@@ -219,18 +219,6 @@ export function TerminalPanel({
         return false;
       }
       if (api.platform === "darwin" && event.metaKey) {
-        if (key === "c" && terminal.hasSelection()) {
-          void navigator.clipboard.writeText(terminal.getSelection());
-          return false;
-        }
-        if (key === "v") {
-          void navigator.clipboard.readText().then((text) => {
-            if (text) {
-              void api.writeTerminal(activeSession.id, text);
-            }
-          });
-          return false;
-        }
         const sequence = macTerminalSequenceForEvent(event);
         if (sequence) {
           void api.writeTerminal(activeSession.id, sequence);
