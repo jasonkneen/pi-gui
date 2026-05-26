@@ -9,6 +9,11 @@ import {
   type CreateAgentSessionOptions,
   type CreateAgentSessionRuntimeResult,
 } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
+
+const PI_GUI_GOAL_EXTENSION_PATH = fileURLToPath(
+  new URL("./internal-extensions/goal-extension.js", import.meta.url),
+);
 
 export function isGlobalNpmLookupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -45,12 +50,14 @@ async function createAgentSessionServicesWithNpmFallback(
   agentDir: string,
   options?: Pick<CreateAgentSessionOptions, "authStorage" | "settingsManager" | "modelRegistry">,
 ) {
+  const settingsManager = options?.settingsManager ?? SettingsManager.create(cwd, agentDir);
   try {
     return await createAgentSessionServices({
       cwd,
       agentDir,
       ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
-      ...(options?.settingsManager ? { settingsManager: options.settingsManager } : {}),
+      settingsManager,
+      resourceLoaderOptions: createPiGuiResourceLoaderOptions(),
       ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
     });
   } catch (error) {
@@ -58,8 +65,7 @@ async function createAgentSessionServicesWithNpmFallback(
       throw error;
     }
 
-    const currentSettingsManager = options?.settingsManager ?? SettingsManager.create(cwd, agentDir);
-    const fallbackSettingsManager = createSettingsManagerWithoutNpmPackages(currentSettingsManager);
+    const fallbackSettingsManager = createSettingsManagerWithoutNpmPackages(settingsManager);
     if (!fallbackSettingsManager) {
       throw error;
     }
@@ -75,9 +81,16 @@ async function createAgentSessionServicesWithNpmFallback(
       agentDir,
       ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
       settingsManager: fallbackSettingsManager,
+      resourceLoaderOptions: createPiGuiResourceLoaderOptions(),
       ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
     });
   }
+}
+
+function createPiGuiResourceLoaderOptions() {
+  return {
+    additionalExtensionPaths: [PI_GUI_GOAL_EXTENSION_PATH],
+  };
 }
 
 async function createAgentSessionResultWithNpmFallback(
