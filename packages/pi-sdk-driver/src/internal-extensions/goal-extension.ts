@@ -182,8 +182,7 @@ async function handleGoalCommand(
     return;
   }
 
-  const [firstToken = ""] = trimmed.split(/\s+/, 1);
-  const command = firstToken.toLowerCase();
+  const command = trimmed.toLowerCase();
   if (command === "clear") {
     clearGoal(pi, state, ctx, goal);
     return;
