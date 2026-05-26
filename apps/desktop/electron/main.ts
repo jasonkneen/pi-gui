@@ -375,24 +375,28 @@ function installApplicationMenu(): void {
 
 app.setName("pi");
 
-const configuredUserDataDir = process.env.PI_APP_USER_DATA_DIR?.trim() || app.getPath("userData");
+const configuredUserDataDirOverride = process.env.PI_APP_USER_DATA_DIR?.trim();
+const configuredUserDataDir = configuredUserDataDirOverride || app.getPath("userData");
 app.setPath("userData", configuredUserDataDir);
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+const usesDefaultUserDataDir = configuredUserDataDirOverride === undefined || configuredUserDataDirOverride === "";
+const hasSingleInstanceLock = usesDefaultUserDataDir ? app.requestSingleInstanceLock() : true;
 if (!hasSingleInstanceLock) {
   app.quit();
 }
 
-app.on("second-instance", () => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
-  }
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore();
-  }
-  mainWindow.show();
-  mainWindow.focus();
-});
+if (usesDefaultUserDataDir) {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) {
