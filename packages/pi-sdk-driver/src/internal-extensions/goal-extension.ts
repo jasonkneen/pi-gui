@@ -78,7 +78,18 @@ export default function piGuiGoalExtension(pi: ExtensionAPI) {
   pi.registerTool(createUpdateGoalTool(pi, state));
 
   pi.on("session_start", async (_event, ctx) => {
-    renderGoalUi(ctx, currentGoal(ctx));
+    const goal = currentGoal(ctx);
+    renderGoalUi(ctx, goal);
+    if (goal?.status === "active") {
+      scheduleGoalContinuation(pi, state, ctx);
+    }
+  });
+
+  pi.on("model_select", async (_event, ctx) => {
+    const goal = currentGoal(ctx);
+    if (goal?.status === "active") {
+      scheduleGoalContinuation(pi, state, ctx);
+    }
   });
 
   pi.on("input", async (_event) => {
@@ -115,16 +126,7 @@ export default function piGuiGoalExtension(pi: ExtensionAPI) {
       state.runningContinuation = undefined;
     }
 
-    if (state.continuationScheduled) {
-      return;
-    }
-    state.continuationScheduled = true;
-    setTimeout(() => {
-      state.continuationScheduled = false;
-      void maybeContinueGoal(pi, state, ctx).catch((error) => {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      });
-    }, 0);
+    scheduleGoalContinuation(pi, state, ctx);
   });
 }
 
@@ -218,6 +220,7 @@ async function handleGoalCommand(
   const nextGoal = createGoalSnapshot(objective, null);
   saveGoal(pi, state, ctx, nextGoal);
   ctx.ui.notify(`Goal active: ${truncate(objective, 140)}`, "info");
+  scheduleGoalContinuation(pi, state, ctx);
 }
 
 function createGetGoalTool() {
@@ -312,9 +315,22 @@ async function maybeContinueGoal(pi: ExtensionAPI, state: GoalExtensionState, ct
   );
 }
 
+function scheduleGoalContinuation(pi: ExtensionAPI, state: GoalExtensionState, ctx: ExtensionContext): void {
+  if (state.continuationScheduled) {
+    return;
+  }
+  state.continuationScheduled = true;
+  setTimeout(() => {
+    state.continuationScheduled = false;
+    void maybeContinueGoal(pi, state, ctx).catch((error) => {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    });
+  }, 0);
+}
+
 function currentGoal(ctx: ExtensionContext): ThreadGoal | undefined {
   let goal: ThreadGoal | undefined;
-  let sawGoalEntry = false;
+  let sawGoalStateEntry = false;
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY_TYPE) {
       continue;
@@ -323,14 +339,15 @@ function currentGoal(ctx: ExtensionContext): ThreadGoal | undefined {
     if (!data) {
       continue;
     }
-    sawGoalEntry = true;
     if (data.event === "clear") {
       goal = undefined;
+      sawGoalStateEntry = true;
     } else if (data.goal) {
       goal = normalizeGoal(data.goal);
+      sawGoalStateEntry = true;
     }
   }
-  return sawGoalEntry ? goal : readGoalSidecar(ctx);
+  return sawGoalStateEntry ? goal : readGoalSidecar(ctx);
 }
 
 function saveGoal(
@@ -381,6 +398,9 @@ function updateGoalStatus(
   const nextGoal = updateGoal(goal, status);
   saveGoal(pi, state, ctx, nextGoal);
   ctx.ui.notify(`Goal ${status}: ${truncate(nextGoal.objective, 140)}`, "info");
+  if (nextGoal.status === "active") {
+    scheduleGoalContinuation(pi, state, ctx);
+  }
 }
 
 function renderGoalUi(ctx: ExtensionContext, goal: ThreadGoal | undefined): void {

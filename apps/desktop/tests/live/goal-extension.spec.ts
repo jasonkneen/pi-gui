@@ -81,7 +81,7 @@ function streamSimple(model) {
     const message = assistantBase(model, callCount * 10);
     stream.push({ type: "start", partial: message });
 
-    if (callCount === 2) {
+    if (callCount === 1) {
       pushUpdateGoalToolCall(stream, message);
       message.stopReason = "toolUse";
       stream.push({ type: "done", reason: "toolUse", message });
@@ -92,7 +92,7 @@ function streamSimple(model) {
     pushText(
       stream,
       message,
-      callCount === 1 ? "initial fake response" : "goal completed by fake provider",
+      "goal completed by fake provider",
     );
     stream.push({ type: "done", reason: "stop", message });
     stream.end();
@@ -216,7 +216,10 @@ test("bundles /goal as an internal extension and restores goal UI after relaunch
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("goal-extension-workspace");
+  const agentDir = join(userDataDir, "agent");
+  await seedAgentDir(agentDir, { enabledModels: [], withDefaultModel: false, withOpenAiAuth: false });
   let harness = await launchDesktop(userDataDir, {
+    agentDir,
     initialWorkspaces: [workspacePath],
     testMode: "background",
   });
@@ -244,6 +247,7 @@ test("bundles /goal as an internal extension and restores goal UI after relaunch
   }
 
   harness = await launchDesktop(userDataDir, {
+    agentDir,
     initialWorkspaces: [workspacePath],
     testMode: "background",
   });
@@ -261,6 +265,68 @@ test("bundles /goal as an internal extension and restores goal UI after relaunch
     await composer.press("Enter");
     await expect(window.locator(".timeline")).toContainText("Goal complete: finish the worktree goal");
     await expect(window.getByTestId("extension-dock")).toHaveCount(0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("auto-continues a restored active goal once a model becomes available", async () => {
+  test.setTimeout(120_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("goal-restored-auto-continue-workspace");
+  await writeProjectExtension(workspacePath, "goal-fake-provider.ts", goalFakeProviderExtension);
+
+  const agentDir = join(userDataDir, "agent");
+  await seedAgentDir(agentDir, { enabledModels: [], withDefaultModel: false, withOpenAiAuth: false });
+
+  let harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+    envOverrides: {
+      GOAL_FAKE_API_KEY: "test-goal-key",
+    },
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await createNamedThread(window, "Goal restored auto session");
+    await expectGoalCommand(window);
+
+    const composer = window.getByTestId("composer");
+    await composer.fill("/goal continue after relaunch");
+    await composer.press("Enter");
+    await expect(window.getByTestId("extension-dock-summary")).toHaveText("active: continue after relaunch");
+  } finally {
+    await harness.close();
+  }
+
+  await writeFakeProviderSettings(agentDir);
+
+  harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+    envOverrides: {
+      GOAL_FAKE_API_KEY: "test-goal-key",
+    },
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await selectSession(window, "Goal restored auto session");
+    await expectGoalCommand(window);
+
+    await expect(window.getByTestId("transcript")).toContainText("goal completed by fake provider", {
+      timeout: 30_000,
+    });
+    await expect(window.locator(".timeline")).toContainText("update_goal");
+    await expect(window.getByTestId("extension-dock")).toHaveCount(0);
+
+    const composer = window.getByTestId("composer");
+    await composer.fill("/goal ");
+    await composer.press("Enter");
+    await expect(window.locator(".timeline")).toContainText("Goal complete: continue after relaunch (30 tokens");
   } finally {
     await harness.close();
   }
@@ -298,10 +364,6 @@ test("auto-continues an active goal while idle and stops after update_goal compl
       "active: finish through idle continuation",
     );
 
-    await composer.fill("Kick off the fake provider.");
-    await composer.press("Enter");
-
-    await expect(window.getByTestId("transcript")).toContainText("initial fake response", { timeout: 30_000 });
     await expect(window.getByTestId("transcript")).toContainText("goal completed by fake provider", {
       timeout: 30_000,
     });
@@ -319,7 +381,7 @@ test("auto-continues an active goal while idle and stops after update_goal compl
     await composer.fill("/goal ");
     await composer.press("Enter");
     await expect(window.locator(".timeline")).toContainText(
-      "Goal complete: finish through idle continuation (60 tokens",
+      "Goal complete: finish through idle continuation (30 tokens",
     );
   } finally {
     await harness.close();
