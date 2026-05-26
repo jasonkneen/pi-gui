@@ -28,6 +28,47 @@ test("opens /tree from the composer, navigates branches, and blocks it on the ne
   try {
     const window = await harness.firstWindow();
     await selectSession(window, "Tree fixture session");
+    const initialTreeState = await window.evaluate(async () => {
+      const app = (window as Window & { piApp?: import("../../src/ipc").PiDesktopApi }).piApp;
+      if (!app) {
+        throw new Error("piApp IPC bridge is unavailable");
+      }
+      const state = await app.getState();
+      const tree = await app.getSessionTree({
+        workspaceId: state.selectedWorkspaceId,
+        sessionId: state.selectedSessionId,
+      });
+      let visibleLeaf: (typeof tree.roots)[number] | undefined;
+      let betaAnswer: (typeof tree.roots)[number] | undefined;
+      const visit = (nodes: typeof tree.roots): void => {
+        for (const node of nodes) {
+          if (node.id === tree.leafId) {
+            visibleLeaf = node;
+          }
+          if (node.preview === "Beta answer") {
+            betaAnswer = node;
+          }
+          visit(node.children);
+        }
+      };
+      visit(tree.roots);
+      return {
+        visibleLeaf: visibleLeaf
+          ? { kind: visibleLeaf.kind, role: visibleLeaf.role, preview: visibleLeaf.preview }
+          : null,
+        betaAnswer: betaAnswer
+          ? { id: betaAnswer.id, kind: betaAnswer.kind, role: betaAnswer.role, preview: betaAnswer.preview }
+          : null,
+        leafId: tree.leafId,
+      };
+    });
+    expect(initialTreeState.visibleLeaf).toBeNull();
+    expect(initialTreeState.betaAnswer).toMatchObject({ kind: "message", role: "assistant", preview: "Beta answer" });
+    if (!initialTreeState.betaAnswer) {
+      throw new Error("Expected Beta answer in visible tree fixture.");
+    }
+    expect(initialTreeState.leafId).not.toBe(initialTreeState.betaAnswer.id);
+    const betaAnswerId = initialTreeState.betaAnswer.id;
 
     const composer = window.getByTestId("composer");
     await composer.fill("/tre");
@@ -64,6 +105,36 @@ test("opens /tree from the composer, navigates branches, and blocks it on the ne
       initialScrollState.scrollHeight - 40,
     );
 
+    await treeModal.locator(".tree-row__content", { hasText: "Beta answer" }).click();
+    const continueButton = treeModal.getByRole("button", { name: "Continue" });
+    await expect(continueButton).toBeEnabled();
+    await continueButton.click();
+    await expect(window.getByTestId("tree-summary-step")).toBeVisible();
+    await treeModal.getByRole("button", { name: "No summary" }).click();
+    await treeModal.getByRole("button", { name: "Switch branch" }).click();
+    await expect(treeModal).toHaveCount(0);
+    await expect
+      .poll(
+        async () =>
+          window.evaluate(async (expectedLeafId) => {
+            const app = (window as Window & { piApp?: import("../../src/ipc").PiDesktopApi }).piApp;
+            if (!app) {
+              throw new Error("piApp IPC bridge is unavailable");
+            }
+            const state = await app.getState();
+            const tree = await app.getSessionTree({
+              workspaceId: state.selectedWorkspaceId,
+              sessionId: state.selectedSessionId,
+            });
+            return tree.leafId === expectedLeafId;
+          }, betaAnswerId),
+        { timeout: 3_000 },
+      )
+      .toBe(true);
+
+    await composer.fill("/tree");
+    await composer.press("Enter");
+    await expect(treeModal).toBeVisible();
     await treeModal.locator(".tree-row__content", { hasText: "Branch alpha" }).click();
     await treeModal.getByRole("button", { name: "Continue" }).click();
     await expect(window.getByTestId("tree-summary-step")).toBeVisible();

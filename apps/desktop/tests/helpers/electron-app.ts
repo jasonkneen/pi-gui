@@ -108,6 +108,50 @@ export async function launchDesktop(
   return createDesktopHarness(electronApp);
 }
 
+export async function launchDesktopAndWaitForExit(
+  userDataDir: string,
+  options: readonly string[] | LaunchDesktopOptions = [],
+): Promise<void> {
+  const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
+  const agentDir = await prepareAgentDir(userDataDir, normalized);
+  const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
+  let electronApp: ElectronApplication;
+  try {
+    electronApp = await electron.launch({
+      args: [desktopDir],
+      cwd: desktopDir,
+      env,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("Target page, context or browser has been closed")) {
+      return;
+    }
+    throw error;
+  }
+  const child = electronApp.process();
+
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Expected duplicate desktop launch to exit."));
+      }, 5_000);
+
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      await electronApp.close().catch(() => {});
+    }
+  }
+}
+
 export async function launchPackagedDesktop(
   userDataDir: string,
   options: readonly string[] | LaunchDesktopOptions = [],
@@ -503,6 +547,80 @@ export async function seedBranchedTreeSessionFixture(
     return {
       sessionId: sessionManager.getSessionId(),
       title: "Tree fixture session",
+    };
+  });
+}
+
+export async function seedGoalTreeEditorSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "Goal tree editor fixture session";
+}> {
+  const { SessionManager } = (await import(
+    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  )) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendCustomEntry(customType: string, data: unknown): string;
+        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendSessionInfo(name: string): string;
+        branch(entryId: string): void;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+    const appendUser = (content: string) =>
+      sessionManager.appendMessage({
+        role: "user",
+        content,
+        timestamp: nextTimestamp(),
+      });
+    const appendAssistant = (content: string) =>
+      sessionManager.appendMessage({
+        role: "assistant",
+        content,
+        timestamp: nextTimestamp(),
+      });
+
+    appendUser("Root question");
+    appendAssistant("Root answer");
+    const createdAt = nextTimestamp();
+    const goalEntryId = sessionManager.appendCustomEntry("pi-gui.goal", {
+      version: 1,
+      event: "set",
+      goalId: "goal-tree-editor-fixture",
+      goal: {
+        goalId: "goal-tree-editor-fixture",
+        objective: "continue after editing a tree prompt",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt,
+        updatedAt: createdAt,
+      },
+    });
+
+    appendUser("Edit this branch prompt");
+    appendAssistant("Alpha answer");
+    sessionManager.branch(goalEntryId);
+    appendUser("Other branch prompt");
+    appendAssistant("Other branch answer");
+    sessionManager.appendSessionInfo("Goal tree editor fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "Goal tree editor fixture session",
     };
   });
 }

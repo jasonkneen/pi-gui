@@ -9,6 +9,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { forcePersistSession } from "../session-supervisor-utils.js";
 
 type GoalStatus = "active" | "paused" | "blocked" | "complete";
 
@@ -35,24 +36,41 @@ interface GoalEntryData {
 interface GoalSidecarData {
   readonly version: 1;
   readonly goal: ThreadGoal | null;
+  readonly baseLeafId?: string | null;
   readonly updatedAt: number;
+}
+
+interface CurrentGoalState {
+  readonly goal: ThreadGoal | undefined;
+  readonly suppressedGoalId: string | undefined;
+  readonly sidecarBaseLeafId: string | null | undefined;
 }
 
 interface RunningContinuation {
   readonly goalId: string;
   readonly continuationId: string;
   hadToolProgress: boolean;
+  cancelled: boolean;
 }
 
 interface GoalExtensionState {
   pendingContinuation: RunningContinuation | undefined;
   runningContinuation: RunningContinuation | undefined;
+  hasActiveAgentRun: boolean;
+  activeAgentGoalId: string | undefined;
+  activeAgentGoalWasActive: boolean;
+  hasActiveTurn: boolean;
+  activeTurnGoalId: string | undefined;
+  activeTurnGoalWasActive: boolean;
   suppressedGoalId: string | undefined;
   continuationScheduled: boolean;
+  pendingTreeEditorGoalId: string | undefined;
+  treeEditorGoalId: string | undefined;
 }
 
 const GOAL_ENTRY_TYPE = "pi-gui.goal";
 const GOAL_MESSAGE_TYPE = "pi-gui.goal.continuation";
+const GOAL_CONTINUATION_TRIGGER_CONTENT = "Goal continuation requested.";
 const GOAL_WIDGET_KEY = "pi-gui-goal";
 const GOAL_STATUS_KEY = "goal";
 const GOAL_SIDECAR_SUFFIX = ".pi-gui-goal.json";
@@ -62,8 +80,16 @@ export default function piGuiGoalExtension(pi: ExtensionAPI) {
   const state: GoalExtensionState = {
     pendingContinuation: undefined,
     runningContinuation: undefined,
+    hasActiveAgentRun: false,
+    activeAgentGoalId: undefined,
+    activeAgentGoalWasActive: false,
+    hasActiveTurn: false,
+    activeTurnGoalId: undefined,
+    activeTurnGoalWasActive: false,
     suppressedGoalId: undefined,
     continuationScheduled: false,
+    pendingTreeEditorGoalId: undefined,
+    treeEditorGoalId: undefined,
   };
 
   pi.registerCommand("goal", {
@@ -78,26 +104,85 @@ export default function piGuiGoalExtension(pi: ExtensionAPI) {
   pi.registerTool(createUpdateGoalTool(pi, state));
 
   pi.on("session_start", async (_event, ctx) => {
-    const goal = currentGoal(ctx);
-    renderGoalUi(ctx, goal);
-    if (goal?.status === "active") {
-      scheduleGoalContinuation(pi, state, ctx);
-    }
+    restoreGoalSession(pi, state, ctx);
   });
 
   pi.on("model_select", async (_event, ctx) => {
+    restoreGoalSession(pi, state, ctx);
+  });
+
+  pi.on("session_before_tree", async (event, ctx) => {
     const goal = currentGoal(ctx);
-    if (goal?.status === "active") {
-      scheduleGoalContinuation(pi, state, ctx);
+    state.pendingTreeEditorGoalId =
+      goal?.status === "active" && isTreeEditorTarget(ctx.sessionManager.getEntry(event.preparation.targetId))
+        ? goal.goalId
+        : undefined;
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    state.treeEditorGoalId = state.pendingTreeEditorGoalId;
+    state.pendingTreeEditorGoalId = undefined;
+    if (state.treeEditorGoalId) {
+      state.suppressedGoalId = state.treeEditorGoalId;
+      appendGoalEntry(pi, ctx, {
+        version: 1,
+        event: "auto_suppressed",
+        goalId: state.treeEditorGoalId,
+        reason: "tree prompt reopened for editing",
+      } satisfies GoalEntryData);
     }
+    restoreGoalSession(pi, state, ctx, { scheduleContinuation: !state.treeEditorGoalId });
   });
 
   pi.on("input", async (_event) => {
     state.suppressedGoalId = undefined;
+    state.treeEditorGoalId = undefined;
     return { action: "continue" as const };
   });
 
-  pi.on("turn_start", async () => {
+  pi.on("context", async (event, ctx) => {
+    const activeContinuation = state.runningContinuation ?? state.pendingContinuation;
+    const activeGoal = activeContinuation ? currentGoal(ctx) : undefined;
+    return {
+      messages: event.messages.flatMap((message) => {
+        if (message.role !== "custom" || message.customType !== GOAL_MESSAGE_TYPE) {
+          return [message];
+        }
+        const details = parseContinuationDetails(message.details);
+        if (
+          !details ||
+          !activeContinuation ||
+          activeContinuation.cancelled ||
+          details.continuationId !== activeContinuation.continuationId ||
+          details.goalId !== activeContinuation.goalId ||
+          !activeGoal ||
+          activeGoal.status !== "active" ||
+          activeGoal.goalId !== details.goalId
+        ) {
+          return [];
+        }
+        return [
+          {
+            ...message,
+            content: continuationPrompt(activeGoal),
+          },
+        ];
+      }),
+    };
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    const goal = currentGoal(ctx);
+    state.hasActiveAgentRun = true;
+    state.activeAgentGoalId = goal?.goalId;
+    state.activeAgentGoalWasActive = goal?.status === "active";
+  });
+
+  pi.on("turn_start", async (_event, ctx) => {
+    const goal = currentGoal(ctx);
+    state.hasActiveTurn = true;
+    state.activeTurnGoalId = goal?.goalId;
+    state.activeTurnGoalWasActive = goal?.status === "active";
     if (!state.runningContinuation && state.pendingContinuation) {
       state.runningContinuation = state.pendingContinuation;
       state.pendingContinuation = undefined;
@@ -105,29 +190,108 @@ export default function piGuiGoalExtension(pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", async (event, ctx) => {
-    if (state.runningContinuation && event.toolResults.length > 0) {
-      state.runningContinuation.hadToolProgress = true;
+    const runningContinuation = state.runningContinuation;
+    if (runningContinuation?.cancelled) {
+      clearActiveTurn(state);
+      return;
     }
-    syncGoalUsage(pi, state, ctx, [event.message]);
+    if (runningContinuation && event.toolResults.length > 0) {
+      runningContinuation.hadToolProgress = true;
+    }
+    const expectedGoalId = runningContinuation?.goalId ?? state.activeTurnGoalId ?? state.activeAgentGoalId;
+    const expectedGoalWasActive =
+      Boolean(runningContinuation) || state.activeTurnGoalWasActive || state.activeAgentGoalWasActive;
+    if ((state.hasActiveTurn || state.hasActiveAgentRun) && !expectedGoalId) {
+      clearActiveTurn(state);
+      return;
+    }
+    if ((state.hasActiveTurn || state.hasActiveAgentRun) && !expectedGoalWasActive) {
+      clearActiveTurn(state);
+      return;
+    }
+    syncGoalUsage(pi, state, ctx, [event.message], expectedGoalId);
+    clearActiveTurn(state);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
-    if (state.runningContinuation) {
-      if (!state.runningContinuation.hadToolProgress) {
-        state.suppressedGoalId = state.runningContinuation.goalId;
-        pi.appendEntry(GOAL_ENTRY_TYPE, {
+    const runningContinuation = state.runningContinuation;
+    if (runningContinuation) {
+      const goal = currentGoal(ctx);
+      if (
+        !runningContinuation.cancelled &&
+        goal?.goalId === runningContinuation.goalId &&
+        goal.status === "active" &&
+        !runningContinuation.hadToolProgress
+      ) {
+        state.suppressedGoalId = runningContinuation.goalId;
+        appendGoalEntry(pi, ctx, {
           version: 1,
           event: "auto_suppressed",
-          goalId: state.runningContinuation.goalId,
-          continuationId: state.runningContinuation.continuationId,
+          goalId: runningContinuation.goalId,
+          continuationId: runningContinuation.continuationId,
           reason: "continuation ended without tool progress",
         } satisfies GoalEntryData);
       }
       state.runningContinuation = undefined;
     }
 
+    state.hasActiveAgentRun = false;
+    state.activeAgentGoalId = undefined;
+    state.activeAgentGoalWasActive = false;
+    clearActiveTurn(state);
     scheduleGoalContinuation(pi, state, ctx);
   });
+}
+
+function clearActiveTurn(state: GoalExtensionState): void {
+  state.hasActiveTurn = false;
+  state.activeTurnGoalId = undefined;
+  state.activeTurnGoalWasActive = false;
+}
+
+function restoreGoalSession(
+  pi: ExtensionAPI,
+  state: GoalExtensionState,
+  ctx: ExtensionContext,
+  options: { readonly scheduleContinuation?: boolean } = {},
+): void {
+  const goalState = currentGoalState(ctx);
+  const goal = goalState.goal;
+  discardContinuationsForInactiveGoal(state, ctx, goal?.status === "active" ? goal.goalId : undefined);
+  state.suppressedGoalId = goalState.suppressedGoalId;
+  renderGoalUi(ctx, goal);
+  if ((options.scheduleContinuation ?? true) && goal?.status === "active") {
+    scheduleGoalContinuation(pi, state, ctx);
+  }
+}
+
+function isTreeEditorTarget(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+
+  const candidate = entry as { readonly type?: unknown; readonly message?: { readonly role?: unknown } };
+  return candidate.type === "custom_message" || (candidate.type === "message" && candidate.message?.role === "user");
+}
+
+function discardContinuationsForInactiveGoal(
+  state: GoalExtensionState,
+  ctx: ExtensionContext,
+  activeGoalId: string | undefined,
+): void {
+  if (!activeGoalId || state.pendingContinuation?.goalId !== activeGoalId) {
+    state.pendingContinuation = undefined;
+  }
+
+  const runningContinuation = state.runningContinuation;
+  if (!runningContinuation || runningContinuation.goalId === activeGoalId) {
+    return;
+  }
+
+  runningContinuation.cancelled = true;
+  if (ctx.signal && !ctx.signal.aborted) {
+    ctx.abort();
+  }
 }
 
 function syncGoalUsage(
@@ -135,9 +299,18 @@ function syncGoalUsage(
   state: GoalExtensionState,
   ctx: ExtensionContext,
   messages: AgentEndEvent["messages"],
+  expectedGoalId?: string,
 ): void {
-  const goal = currentGoal(ctx);
+  const goalState = currentGoalState(ctx);
+  const goal = goalState.goal;
   if (!goal) {
+    return;
+  }
+  const isExpectedContinuationGoal = expectedGoalId !== undefined && goal.goalId === expectedGoalId;
+  if (expectedGoalId !== undefined && !isExpectedContinuationGoal) {
+    return;
+  }
+  if (goal.status !== "active" && !isExpectedContinuationGoal) {
     return;
   }
 
@@ -159,7 +332,7 @@ function syncGoalUsage(
     return;
   }
 
-  saveGoal(pi, state, ctx, nextGoal);
+  saveGoal(pi, state, ctx, nextGoal, goalState.sidecarBaseLeafId);
 }
 
 async function handleGoalCommand(
@@ -169,7 +342,8 @@ async function handleGoalCommand(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   const trimmed = args.trim();
-  const goal = currentGoal(ctx);
+  const goalState = currentGoalState(ctx);
+  const goal = goalState.goal;
 
   if (!trimmed) {
     if (!goal) {
@@ -184,23 +358,27 @@ async function handleGoalCommand(
 
   const command = trimmed.toLowerCase();
   if (command === "clear") {
-    clearGoal(pi, state, ctx, goal);
+    cancelGoalContinuation(state, ctx, goal?.goalId);
+    clearGoal(pi, state, ctx, goal, goalState.sidecarBaseLeafId);
     return;
   }
   if (command === "pause") {
-    updateGoalStatus(pi, state, ctx, goal, "paused");
+    cancelGoalContinuation(state, ctx, goal?.goalId);
+    updateGoalStatus(pi, state, ctx, goalState, "paused");
     return;
   }
   if (command === "resume") {
-    updateGoalStatus(pi, state, ctx, goal, "active");
+    updateGoalStatus(pi, state, ctx, goalState, "active");
     return;
   }
   if (command === "complete") {
-    updateGoalStatus(pi, state, ctx, goal, "complete");
+    cancelGoalContinuation(state, ctx, goal?.goalId);
+    updateGoalStatus(pi, state, ctx, goalState, "complete");
     return;
   }
   if (command === "blocked") {
-    updateGoalStatus(pi, state, ctx, goal, "blocked");
+    cancelGoalContinuation(state, ctx, goal?.goalId);
+    updateGoalStatus(pi, state, ctx, goalState, "blocked");
     return;
   }
 
@@ -216,10 +394,30 @@ async function handleGoalCommand(
     }
   }
 
+  cancelGoalContinuation(state, ctx);
   const nextGoal = createGoalSnapshot(objective, null);
   saveGoal(pi, state, ctx, nextGoal);
   ctx.ui.notify(`Goal active: ${truncate(objective, 140)}`, "info");
   scheduleGoalContinuation(pi, state, ctx);
+}
+
+function cancelGoalContinuation(
+  state: GoalExtensionState,
+  ctx: ExtensionContext,
+  goalId?: string,
+): void {
+  state.pendingContinuation = undefined;
+  const runningContinuation = state.runningContinuation;
+  if (!runningContinuation) {
+    return;
+  }
+  if (goalId && runningContinuation.goalId !== goalId) {
+    return;
+  }
+  runningContinuation.cancelled = true;
+  if (ctx.signal && !ctx.signal.aborted) {
+    ctx.abort();
+  }
 }
 
 function createGetGoalTool() {
@@ -247,14 +445,22 @@ function createCreateGoalTool(pi: ExtensionAPI, state: GoalExtensionState) {
       token_budget: Type.Optional(Type.Integer({ description: "Optional positive token budget." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const existingGoal = currentGoal(ctx);
-      if (existingGoal) {
+      const goalState = currentGoalState(ctx);
+      if (goalState.goal) {
         return errorToolResult("cannot create a new goal because this session already has a goal");
       }
       const objective = validateObjective(params.objective);
       const tokenBudget = normalizeTokenBudget(params.token_budget);
       const goal = createGoalSnapshot(objective, tokenBudget);
-      saveGoal(pi, state, ctx, goal);
+      saveGoal(pi, state, ctx, goal, goalState.sidecarBaseLeafId);
+      if (state.hasActiveAgentRun && !state.activeAgentGoalId) {
+        state.activeAgentGoalId = goal.goalId;
+        state.activeAgentGoalWasActive = true;
+      }
+      if (state.hasActiveTurn && !state.activeTurnGoalId) {
+        state.activeTurnGoalId = goal.goalId;
+        state.activeTurnGoalWasActive = true;
+      }
       return goalToolResult(goal);
     },
   });
@@ -270,23 +476,75 @@ function createUpdateGoalTool(pi: ExtensionAPI, state: GoalExtensionState) {
       status: Type.Union([Type.Literal("complete"), Type.Literal("blocked")]),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const goal = currentGoal(ctx);
+      const goalState = currentGoalState(ctx);
+      const goal = goalState.goal;
       if (!goal) {
         return errorToolResult("cannot update goal because this session has no goal");
       }
+      if (goal.status !== "active") {
+        return errorToolResult("cannot update goal because the current goal is not active");
+      }
+      const runningContinuation = state.runningContinuation;
+      if (runningContinuation?.cancelled) {
+        return errorToolResult("cannot update goal because the active continuation was cancelled");
+      }
+      const staleUpdateReason = getStaleUpdateReason(state, goal.goalId);
+      if (staleUpdateReason) {
+        return errorToolResult(staleUpdateReason);
+      }
+      if (runningContinuation && runningContinuation.goalId !== goal.goalId) {
+        return errorToolResult("cannot update goal because the active goal changed");
+      }
       const nextGoal = updateGoal(goal, params.status);
-      saveGoal(pi, state, ctx, nextGoal);
+      saveGoal(pi, state, ctx, nextGoal, goalState.sidecarBaseLeafId);
       return goalToolResult(nextGoal);
     },
   });
 }
 
+function getStaleUpdateReason(state: GoalExtensionState, goalId: string): string | undefined {
+  if (state.hasActiveTurn) {
+    if (!state.activeTurnGoalId || !state.activeTurnGoalWasActive) {
+      return "cannot update goal because this turn did not start from the active goal";
+    }
+    if (state.activeTurnGoalId !== goalId) {
+      return "cannot update goal because the active goal changed";
+    }
+  }
+
+  if (state.hasActiveAgentRun) {
+    if (!state.activeAgentGoalId || !state.activeAgentGoalWasActive) {
+      return "cannot update goal because this turn did not start from the active goal";
+    }
+    if (state.activeAgentGoalId !== goalId) {
+      return "cannot update goal because the active goal changed";
+    }
+  }
+
+  return undefined;
+}
+
 async function maybeContinueGoal(pi: ExtensionAPI, state: GoalExtensionState, ctx: ExtensionContext): Promise<void> {
-  const goal = currentGoal(ctx);
+  const goalState = currentGoalState(ctx);
+  const goal = goalState.goal;
   if (!goal || goal.status !== "active") {
     return;
   }
-  if (state.suppressedGoalId === goal.goalId || !ctx.model || !ctx.isIdle() || ctx.hasPendingMessages()) {
+  discardContinuationsForInactiveGoal(state, ctx, goal.goalId);
+  if (state.pendingContinuation || state.runningContinuation) {
+    return;
+  }
+  const model = ctx.model;
+  if (
+    state.suppressedGoalId === goal.goalId ||
+    goalState.suppressedGoalId === goal.goalId ||
+    state.treeEditorGoalId === goal.goalId ||
+    isTokenBudgetExhausted(goal) ||
+    !model ||
+    !ctx.modelRegistry.hasConfiguredAuth(model) ||
+    !ctx.isIdle() ||
+    ctx.hasPendingMessages()
+  ) {
     return;
   }
 
@@ -295,8 +553,9 @@ async function maybeContinueGoal(pi: ExtensionAPI, state: GoalExtensionState, ct
     goalId: goal.goalId,
     continuationId,
     hadToolProgress: false,
+    cancelled: false,
   };
-  pi.appendEntry(GOAL_ENTRY_TYPE, {
+  appendGoalEntry(pi, ctx, {
     version: 1,
     event: "auto_continue",
     goalId: goal.goalId,
@@ -306,7 +565,7 @@ async function maybeContinueGoal(pi: ExtensionAPI, state: GoalExtensionState, ct
   pi.sendMessage(
     {
       customType: GOAL_MESSAGE_TYPE,
-      content: continuationPrompt(goal),
+      content: GOAL_CONTINUATION_TRIGGER_CONTENT,
       display: false,
       details: { goalId: goal.goalId, continuationId },
     },
@@ -328,9 +587,19 @@ function scheduleGoalContinuation(pi: ExtensionAPI, state: GoalExtensionState, c
 }
 
 function currentGoal(ctx: ExtensionContext): ThreadGoal | undefined {
+  return currentGoalState(ctx).goal;
+}
+
+function currentGoalState(ctx: ExtensionContext): CurrentGoalState {
   let goal: ThreadGoal | undefined;
+  let suppressedGoalId: string | undefined;
+  let goalEntryId: string | undefined;
   let sawGoalStateEntry = false;
   for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type === "message" && entry.message.role === "user") {
+      suppressedGoalId = undefined;
+      continue;
+    }
     if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY_TYPE) {
       continue;
     }
@@ -340,13 +609,25 @@ function currentGoal(ctx: ExtensionContext): ThreadGoal | undefined {
     }
     if (data.event === "clear") {
       goal = undefined;
+      suppressedGoalId = undefined;
       sawGoalStateEntry = true;
     } else if (data.goal) {
       goal = normalizeGoal(data.goal);
+      goalEntryId = entry.id;
+      suppressedGoalId = undefined;
       sawGoalStateEntry = true;
+    } else if (data.event === "auto_suppressed" && data.goalId) {
+      suppressedGoalId = data.goalId;
     }
   }
-  return sawGoalStateEntry ? goal : readGoalSidecar(ctx);
+  if (sawGoalStateEntry) {
+    return {
+      goal,
+      suppressedGoalId: suppressedGoalId === goal?.goalId ? suppressedGoalId : undefined,
+      sidecarBaseLeafId: goal ? readGoalSidecarBaseLeafId(ctx, goal.goalId) ?? goalEntryId : undefined,
+    };
+  }
+  return { ...readGoalSidecar(ctx), suppressedGoalId: undefined };
 }
 
 function saveGoal(
@@ -354,15 +635,17 @@ function saveGoal(
   state: GoalExtensionState,
   ctx: ExtensionContext,
   goal: ThreadGoal,
+  sidecarBaseLeafId?: string | null,
 ): void {
   state.suppressedGoalId = undefined;
-  pi.appendEntry(GOAL_ENTRY_TYPE, {
+  appendGoalEntry(pi, ctx, {
     version: 1,
     event: "set",
     goal,
     goalId: goal.goalId,
   } satisfies GoalEntryData);
-  writeGoalSidecar(ctx, goal);
+  const baseLeafId = sidecarBaseLeafId ?? ctx.sessionManager.getLeafId();
+  writeGoalSidecar(ctx, goal, baseLeafId);
   renderGoalUi(ctx, goal);
 }
 
@@ -371,14 +654,16 @@ function clearGoal(
   state: GoalExtensionState,
   ctx: ExtensionContext,
   goal: ThreadGoal | undefined,
+  sidecarBaseLeafId: string | null | undefined,
 ): void {
   state.suppressedGoalId = undefined;
-  pi.appendEntry(GOAL_ENTRY_TYPE, {
+  const baseLeafId = sidecarBaseLeafId ?? ctx.sessionManager.getLeafId();
+  appendGoalEntry(pi, ctx, {
     version: 1,
     event: "clear",
     ...(goal ? { goalId: goal.goalId } : {}),
   } satisfies GoalEntryData);
-  writeGoalSidecar(ctx, null);
+  writeGoalSidecar(ctx, null, baseLeafId);
   renderGoalUi(ctx, undefined);
   ctx.ui.notify(goal ? "Goal cleared" : "No goal is currently set", "info");
 }
@@ -387,19 +672,25 @@ function updateGoalStatus(
   pi: ExtensionAPI,
   state: GoalExtensionState,
   ctx: ExtensionContext,
-  goal: ThreadGoal | undefined,
+  goalState: CurrentGoalState,
   status: GoalStatus,
 ): void {
+  const goal = goalState.goal;
   if (!goal) {
     ctx.ui.notify("No goal is currently set", "error");
     return;
   }
   const nextGoal = updateGoal(goal, status);
-  saveGoal(pi, state, ctx, nextGoal);
+  saveGoal(pi, state, ctx, nextGoal, goalState.sidecarBaseLeafId);
   ctx.ui.notify(`Goal ${status}: ${truncate(nextGoal.objective, 140)}`, "info");
   if (nextGoal.status === "active") {
     scheduleGoalContinuation(pi, state, ctx);
   }
+}
+
+function appendGoalEntry(pi: ExtensionAPI, ctx: ExtensionContext, data: GoalEntryData): void {
+  pi.appendEntry(GOAL_ENTRY_TYPE, data);
+  forcePersistSession(ctx.sessionManager);
 }
 
 function renderGoalUi(ctx: ExtensionContext, goal: ThreadGoal | undefined): void {
@@ -468,7 +759,54 @@ function parseGoalEntryData(data: unknown): GoalEntryData | undefined {
   return candidate as GoalEntryData;
 }
 
-function readGoalSidecar(ctx: ExtensionContext): ThreadGoal | undefined {
+function parseContinuationDetails(data: unknown): Pick<RunningContinuation, "goalId" | "continuationId"> | undefined {
+  if (!data || typeof data !== "object") {
+    return undefined;
+  }
+  const candidate = data as Partial<RunningContinuation>;
+  return typeof candidate.goalId === "string" && typeof candidate.continuationId === "string"
+    ? { goalId: candidate.goalId, continuationId: candidate.continuationId }
+    : undefined;
+}
+
+function readGoalSidecar(ctx: ExtensionContext): Pick<CurrentGoalState, "goal" | "sidecarBaseLeafId"> {
+  const parsed = readGoalSidecarData(ctx);
+  if (!parsed?.goal) {
+    return { goal: undefined, sidecarBaseLeafId: undefined };
+  }
+  if (parsed.baseLeafId === undefined) {
+    return canUseLegacyGoalSidecar(ctx)
+      ? { goal: normalizeGoal(parsed.goal), sidecarBaseLeafId: undefined }
+      : { goal: undefined, sidecarBaseLeafId: undefined };
+  }
+  if (!branchContainsEntry(ctx, parsed.baseLeafId)) {
+    return { goal: undefined, sidecarBaseLeafId: undefined };
+  }
+  return { goal: normalizeGoal(parsed.goal), sidecarBaseLeafId: parsed.baseLeafId };
+}
+
+function canUseLegacyGoalSidecar(ctx: ExtensionContext): boolean {
+  return ctx.sessionManager.getEntries().every((entry) =>
+    entry.type === "model_change" ||
+    entry.type === "thinking_level_change" ||
+    entry.type === "session_info"
+  );
+}
+
+function branchContainsEntry(ctx: ExtensionContext, entryId: string | null): boolean {
+  if (!entryId) {
+    return false;
+  }
+  return ctx.sessionManager.getBranch().some((entry) => entry.id === entryId);
+}
+
+function readGoalSidecarBaseLeafId(ctx: ExtensionContext, goalId: string): string | null | undefined {
+  const parsed = readGoalSidecarData(ctx);
+  const baseLeafId = parsed?.goal?.goalId === goalId ? parsed.baseLeafId : undefined;
+  return baseLeafId && branchContainsEntry(ctx, baseLeafId) ? baseLeafId : undefined;
+}
+
+function readGoalSidecarData(ctx: ExtensionContext): Partial<GoalSidecarData> | undefined {
   const sidecarPath = goalSidecarPath(ctx);
   if (!sidecarPath) {
     return undefined;
@@ -476,16 +814,13 @@ function readGoalSidecar(ctx: ExtensionContext): ThreadGoal | undefined {
 
   try {
     const parsed = JSON.parse(readFileSync(sidecarPath, "utf8")) as Partial<GoalSidecarData>;
-    if (parsed.version !== 1 || !parsed.goal) {
-      return undefined;
-    }
-    return normalizeGoal(parsed.goal);
+    return parsed.version === 1 ? parsed : undefined;
   } catch {
     return undefined;
   }
 }
 
-function writeGoalSidecar(ctx: ExtensionContext, goal: ThreadGoal | null): void {
+function writeGoalSidecar(ctx: ExtensionContext, goal: ThreadGoal | null, baseLeafId: string | null): void {
   const sidecarPath = goalSidecarPath(ctx);
   if (!sidecarPath) {
     return;
@@ -498,6 +833,7 @@ function writeGoalSidecar(ctx: ExtensionContext, goal: ThreadGoal | null): void 
       {
         version: 1,
         goal,
+        baseLeafId,
         updatedAt: Date.now(),
       } satisfies GoalSidecarData,
       null,
@@ -531,6 +867,10 @@ function normalizeTokenBudget(value: number | undefined): number | null {
     throw new Error("Goal token budget must be a positive integer");
   }
   return value;
+}
+
+function isTokenBudgetExhausted(goal: ThreadGoal): boolean {
+  return goal.tokenBudget !== null && goal.tokensUsed >= goal.tokenBudget;
 }
 
 function continuationPrompt(goal: ThreadGoal): string {

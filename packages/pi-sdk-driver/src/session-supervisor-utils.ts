@@ -69,8 +69,43 @@ export function deriveSessionConfig(sessionManager: {
 }
 
 export function forcePersistSession(sessionManager: object): void {
-  const maybeRewrite = (sessionManager as { _rewriteFile?: () => void })._rewriteFile;
-  maybeRewrite?.call(sessionManager);
+  const manager = sessionManager as ForcePersistableSessionManager;
+  installForcedFlush(manager);
+  manager._rewriteFile?.call(manager);
+  markSessionFlushed(manager);
+}
+
+interface ForcePersistableSessionManager {
+  _persist?: (entry: unknown) => void;
+  _rewriteFile?: () => void;
+  flushed?: boolean;
+  __piGuiForcePersistPatched?: boolean;
+  __piGuiForcePersistEnabled?: boolean;
+}
+
+function installForcedFlush(manager: ForcePersistableSessionManager): void {
+  if (manager.__piGuiForcePersistPatched || !manager._persist) {
+    manager.__piGuiForcePersistEnabled = true;
+    return;
+  }
+
+  const originalPersist = manager._persist;
+  manager._persist = function persistAndKeepForcedFlush(this: ForcePersistableSessionManager, entry: unknown): void {
+    originalPersist.call(this, entry);
+    if (!this.__piGuiForcePersistEnabled || this.flushed !== false || !this._rewriteFile) {
+      return;
+    }
+    this._rewriteFile();
+    markSessionFlushed(this);
+  };
+  manager.__piGuiForcePersistPatched = true;
+  manager.__piGuiForcePersistEnabled = true;
+}
+
+function markSessionFlushed(manager: ForcePersistableSessionManager): void {
+  if ("flushed" in manager) {
+    manager.flushed = true;
+  }
 }
 
 export function sessionKey(sessionRef: SessionRef): string {
@@ -122,6 +157,10 @@ export function nowIso(): string {
 
 export function extractPreview(message: unknown): string | undefined {
   if (!isRecord(message)) {
+    return undefined;
+  }
+
+  if (message.role === "custom" && message.display === false) {
     return undefined;
   }
 

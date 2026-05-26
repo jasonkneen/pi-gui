@@ -545,7 +545,7 @@ export class SessionSupervisor {
     const record = await this.ensureRecord(sessionRef);
     const session = this.requireSession(record);
     return {
-      roots: session.sessionManager.getTree().map((node) => toSessionTreeNodeSnapshot(node)),
+      roots: session.sessionManager.getTree().flatMap((node) => toVisibleSessionTreeNodeSnapshots(node)),
       leafId: session.sessionManager.getLeafId(),
     };
   }
@@ -557,21 +557,23 @@ export class SessionSupervisor {
   ): Promise<NavigateSessionTreeResult> {
     const record = await this.ensureRecord(sessionRef);
     const session = this.requireSession(record);
+    const suppressEditorText = isHiddenTreeEntry(session.sessionManager.getEntry(targetId));
     const result = await session.navigateTree(targetId, options);
     if (result.cancelled || result.aborted) {
       return {
         cancelled: result.cancelled,
         ...(result.aborted ? { aborted: true } : {}),
-        ...(result.editorText ? { editorText: result.editorText } : {}),
+        ...(result.editorText && !suppressEditorText ? { editorText: result.editorText } : {}),
         ...(result.summaryEntry ? { summaryCreated: true } : {}),
       };
     }
 
     record.updatedAt = nowIso();
+    forcePersistSession(session.sessionManager);
     await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
     return {
       cancelled: false,
-      ...(result.editorText ? { editorText: result.editorText } : {}),
+      ...(result.editorText && !suppressEditorText ? { editorText: result.editorText } : {}),
       ...(result.summaryEntry ? { summaryCreated: true } : {}),
     };
   }
@@ -818,8 +820,12 @@ export class SessionSupervisor {
         return { cancelled: result.cancelled };
       },
       navigateTree: async (targetId, options) => {
-        const result = await this.requireSession(record).navigateTree(targetId, options);
-        await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+        const session = this.requireSession(record);
+        const result = await session.navigateTree(targetId, options);
+        if (!result.cancelled && !result.aborted) {
+          forcePersistSession(session.sessionManager);
+          await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
+        }
         return { cancelled: result.cancelled };
       },
       switchSession: async (sessionPath, options) => {
@@ -1633,17 +1639,26 @@ interface TreeToolCallRecord {
   readonly arguments: Readonly<Record<string, unknown>>;
 }
 
-function toSessionTreeNodeSnapshot(
+function toVisibleSessionTreeNodeSnapshots(
   node: SessionTreeNodeRecord,
   toolCalls: ReadonlyMap<string, TreeToolCallRecord> = new Map(),
-): SessionTreeNodeSnapshot {
+  visibleParentId: string | null = null,
+): readonly SessionTreeNodeSnapshot[] {
+  const childToolCalls = extendTreeToolCalls(toolCalls, node.entry);
+  const hidden = isHiddenTreeEntry(node.entry);
+  const children = node.children.flatMap((child) =>
+    toVisibleSessionTreeNodeSnapshots(child, childToolCalls, hidden ? visibleParentId : node.entry.id),
+  );
+  if (hidden) {
+    return children;
+  }
+
   const role = treeNodeRole(node.entry);
   const customType = treeNodeCustomType(node.entry);
   const preview = treeNodePreview(node.entry, toolCalls);
-  const childToolCalls = extendTreeToolCalls(toolCalls, node.entry);
-  return {
+  return [{
     id: node.entry.id,
-    parentId: node.entry.parentId,
+    parentId: visibleParentId,
     kind: node.entry.type,
     timestamp: node.entry.timestamp,
     ...(node.label ? { label: node.label } : {}),
@@ -1651,8 +1666,24 @@ function toSessionTreeNodeSnapshot(
     ...(customType ? { customType } : {}),
     title: treeNodeTitle(node.entry),
     ...(preview ? { preview } : {}),
-    children: node.children.map((child) => toSessionTreeNodeSnapshot(child, childToolCalls)),
-  };
+    children,
+  }];
+}
+
+function isHiddenTreeEntry(entry: SessionTreeNodeRecord["entry"] | undefined): boolean {
+  if (!entry) {
+    return false;
+  }
+  if (entry.type === "custom_message") {
+    return entry.display === false;
+  }
+  return (
+    entry.type === "custom" ||
+    entry.type === "label" ||
+    entry.type === "model_change" ||
+    entry.type === "thinking_level_change" ||
+    entry.type === "session_info"
+  );
 }
 
 function extendTreeToolCalls(
@@ -1756,7 +1787,7 @@ function treeNodePreview(
     case "message":
       return previewForTreeMessage(entry.message as unknown as Record<string, unknown>, toolCalls);
     case "custom_message":
-      return previewForTreeContent(entry.content);
+      return entry.display ? previewForTreeContent(entry.content) : undefined;
     case "compaction":
       return `${Math.max(1, Math.round(entry.tokensBefore / 1000))}k token summary`;
     case "branch_summary":
