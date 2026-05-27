@@ -30,6 +30,7 @@ const requiredPackages = [
   "node-pty",
   "parse5",
   "parse5-htmlparser2-tree-adapter",
+  "pi-goal",
   "proxy-agent",
   "retry",
   "strip-ansi",
@@ -46,6 +47,7 @@ const notificationHelperPath =
     : undefined;
 const pnpmBinary = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const piCodingAgentPackageName = "@earendil-works/pi-coding-agent";
+const piGoalPackageName = "pi-goal";
 const requiredPiCodingAgentVersion = "0.74.0";
 const packagedRuntimeImportChecks = [
   ["@earendil-works", "pi-ai", "dist", "providers", "google.js"],
@@ -71,6 +73,7 @@ try {
 
   verifyRequiredPackages(extractedDir);
   await verifyPackagedPiRuntime(extractedDir);
+  verifyPackagedPiGoal(extractedDir);
   await verifyPackagedRuntimeImports(extractedDir);
   await verifyNativeNodePty(asarPath);
 } finally {
@@ -126,6 +129,21 @@ async function verifyPackagedPiRuntime(extractedDir) {
   const codexModel = registry.getAll().find((model) => model.provider === "openai-codex" && model.id === "gpt-5.5");
   if (!codexModel?.reasoning || !codexModel.input.includes("image")) {
     throw new Error("Packaged Pi runtime does not expose openai-codex/gpt-5.5 with reasoning and image input.");
+  }
+}
+
+function verifyPackagedPiGoal(extractedDir) {
+  const packageDir = path.join(extractedDir, "node_modules", piGoalPackageName);
+  const packageJsonPath = path.join(packageDir, "package.json");
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+  const extensionPath = "./extension/index.ts";
+
+  if (!Array.isArray(packageJson.pi?.extensions) || !packageJson.pi.extensions.includes(extensionPath)) {
+    throw new Error(`Packaged ${piGoalPackageName} does not declare ${extensionPath} as a pi extension.`);
+  }
+
+  if (!existsSync(path.join(packageDir, "extension", "index.ts"))) {
+    throw new Error(`Packaged ${piGoalPackageName} is missing extension/index.ts.`);
   }
 }
 
