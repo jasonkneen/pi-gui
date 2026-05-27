@@ -625,6 +625,91 @@ export async function seedGoalTreeEditorSessionFixture(
   });
 }
 
+export async function seedLegacyGoalEntrySessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "Legacy goal entry fixture session";
+}> {
+  const { SessionManager } = (await import(
+    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  )) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendCustomEntry(customType: string, data: unknown): string;
+        appendMessage(message: Record<string, unknown>): string;
+        appendModelChange(provider: string, modelId: string): string;
+        appendSessionInfo(name: string): string;
+        appendThinkingLevelChange(thinkingLevel: string): string;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+
+    sessionManager.appendModelChange("openai", "gpt-5");
+    sessionManager.appendThinkingLevelChange("medium");
+    sessionManager.appendMessage({
+      role: "user",
+      content: "Root question",
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "Root answer" }],
+      api: "openai-responses",
+      provider: "openai",
+      model: "gpt-5",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
+      },
+      stopReason: "stop",
+      timestamp: nextTimestamp(),
+    });
+    const createdAt = nextTimestamp();
+    sessionManager.appendCustomEntry("pi-gui.goal", {
+      version: 1,
+      event: "set",
+      goalId: "legacy-goal-entry-fixture",
+      goal: {
+        goalId: "legacy-goal-entry-fixture",
+        objective: "restore legacy goal entry",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt,
+        updatedAt: createdAt,
+      },
+    });
+    sessionManager.appendSessionInfo("Legacy goal entry fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "Legacy goal entry fixture session",
+    };
+  });
+}
+
 export async function seedToolResultTreeSessionFixture(
   agentDir: string,
   workspacePath: string,

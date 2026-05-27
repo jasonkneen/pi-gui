@@ -204,7 +204,7 @@ importers:
         version: link:../session-driver
       pi-goal:
         specifier: github:minghinmatthewlam/pi-goal
-        version: https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/bc9a6a2a401a46fef2c01ca785b2e7572ac203a3(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))
+        version: https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/7006c0e64faffe030932ca8a5126ef5b4bcfd48b(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))
 
   packages/session-driver: {}
 
@@ -3498,8 +3498,8 @@ packages:
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
 
-  pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/bc9a6a2a401a46fef2c01ca785b2e7572ac203a3:
-    resolution: {tarball: https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/bc9a6a2a401a46fef2c01ca785b2e7572ac203a3}
+  pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/7006c0e64faffe030932ca8a5126ef5b4bcfd48b:
+    resolution: {tarball: https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/7006c0e64faffe030932ca8a5126ef5b4bcfd48b}
     version: 0.1.0
     peerDependencies:
       '@earendil-works/pi-ai': '*'
@@ -8313,7 +8313,7 @@ snapshots:
 
   pend@1.2.0: {}
 
-  pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/bc9a6a2a401a46fef2c01ca785b2e7572ac203a3(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6)):
+  pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/7006c0e64faffe030932ca8a5126ef5b4bcfd48b(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6)):
     dependencies:
       '@earendil-works/pi-ai': 0.74.0(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent': 0.74.0(ws@8.20.0)(zod@4.3.6)

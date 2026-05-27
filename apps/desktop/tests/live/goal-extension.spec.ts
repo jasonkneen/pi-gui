@@ -8,6 +8,7 @@ import {
   makeUserDataDir,
   makeWorkspace,
   seedAgentDir,
+  seedLegacyGoalEntrySessionFixture,
   seedGoalTreeEditorSessionFixture,
   selectSession,
   writeProjectExtension,
@@ -761,7 +762,7 @@ async function writeLegacyGoalOnlySidecar(sessionFile: string, objective: string
     updatedAt: now,
   };
   await writeFile(
-    `${sessionFile}.pi-goal.json`,
+    `${sessionFile}.pi-gui-goal.json`,
     `${JSON.stringify({ version: 1, goal, updatedAt: now }, null, 2)}\n`,
     "utf8",
   );
@@ -880,6 +881,43 @@ test("restores legacy sidecar-only goals without base leaf metadata", async () =
       baseLeafId?: unknown;
     };
     expect(typeof migratedSidecar.baseLeafId).toBe("string");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("restores legacy pi-gui goal entries after extraction", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("goal-legacy-entry-workspace");
+  const agentDir = join(userDataDir, "agent");
+  await seedAgentDir(agentDir, { withOpenAiAuth: false });
+  await seedLegacyGoalEntrySessionFixture(agentDir, workspacePath);
+
+  const harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await selectSession(window, "Legacy goal entry fixture session");
+    await expectGoalCommand(window);
+    await expect(window.getByTestId("extension-dock-summary")).toHaveText("active: restore legacy goal entry", {
+      timeout: 15_000,
+    });
+
+    const sessionFile = await selectedSessionFile(userDataDir, window);
+    const composer = window.getByTestId("composer");
+    await composer.fill("/goal pause");
+    await composer.press("Enter");
+    await expect(window.getByTestId("extension-dock-summary")).toHaveText("paused: restore legacy goal entry");
+
+    const migratedSidecar = JSON.parse(await readFile(`${sessionFile}.pi-goal.json`, "utf8")) as {
+      goal?: { goalId?: unknown };
+    };
+    expect(migratedSidecar.goal?.goalId).toBe("legacy-goal-entry-fixture");
   } finally {
     await harness.close();
   }
