@@ -9,11 +9,11 @@ import {
   type CreateAgentSessionOptions,
   type CreateAgentSessionRuntimeResult,
 } from "@earendil-works/pi-coding-agent";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
-const PI_GUI_GOAL_EXTENSION_PATH = fileURLToPath(
-  new URL("./internal-extensions/goal-extension.js", import.meta.url),
-);
+const require = createRequire(import.meta.url);
+const PI_GOAL_EXTENSION_PATH = join(dirname(require.resolve("pi-goal/package.json")), "extension", "index.ts");
 
 export function isGlobalNpmLookupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -89,7 +89,7 @@ async function createAgentSessionServicesWithNpmFallback(
 
 function createPiGuiResourceLoaderOptions() {
   return {
-    additionalExtensionPaths: [PI_GUI_GOAL_EXTENSION_PATH],
+    additionalExtensionPaths: [PI_GOAL_EXTENSION_PATH],
   };
 }
 

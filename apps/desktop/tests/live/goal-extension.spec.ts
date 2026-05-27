@@ -433,7 +433,7 @@ export default function goalBranchProbe(pi) {
         createdAt: now,
         updatedAt: now,
       };
-      pi.appendEntry("pi-gui.goal", {
+      pi.appendEntry("pi-goal.goal", {
         version: 1,
         event: "set",
         goal,
@@ -443,7 +443,7 @@ export default function goalBranchProbe(pi) {
       ctx.sessionManager._rewriteFile?.();
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (sessionFile) {
-        const sidecarPath = sessionFile + ".pi-gui-goal.json";
+        const sidecarPath = sessionFile + ".pi-goal.json";
         mkdirSync(dirname(sidecarPath), { recursive: true });
         writeFileSync(
           sidecarPath,
@@ -459,7 +459,7 @@ export default function goalBranchProbe(pi) {
     description: "Navigate to the branch before the goal was set",
     handler: async (_args, ctx) => {
       const goalEntry = ctx.sessionManager.getEntries().find((entry) => {
-        return entry.type === "custom" && entry.customType === "pi-gui.goal" && entry.data?.event === "set";
+        return entry.type === "custom" && entry.customType === "pi-goal.goal" && entry.data?.event === "set";
       });
       if (!goalEntry?.parentId) {
         throw new Error("No goal entry with a parent was available");
@@ -491,7 +491,7 @@ export default function goalBudgetProbe(pi) {
         createdAt: now,
         updatedAt: now,
       };
-      pi.appendEntry("pi-gui.goal", {
+      pi.appendEntry("pi-goal.goal", {
         version: 1,
         event: "set",
         goal,
@@ -501,7 +501,7 @@ export default function goalBudgetProbe(pi) {
       ctx.sessionManager._rewriteFile?.();
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (sessionFile) {
-        const sidecarPath = sessionFile + ".pi-gui-goal.json";
+        const sidecarPath = sessionFile + ".pi-goal.json";
         mkdirSync(dirname(sidecarPath), { recursive: true });
         writeFileSync(
           sidecarPath,
@@ -761,7 +761,7 @@ async function writeLegacyGoalOnlySidecar(sessionFile: string, objective: string
     updatedAt: now,
   };
   await writeFile(
-    `${sessionFile}.pi-gui-goal.json`,
+    `${sessionFile}.pi-goal.json`,
     `${JSON.stringify({ version: 1, goal, updatedAt: now }, null, 2)}\n`,
     "utf8",
   );
@@ -876,7 +876,7 @@ test("restores legacy sidecar-only goals without base leaf metadata", async () =
     await composer.press("Enter");
     await expect(window.getByTestId("extension-dock-summary")).toHaveText("paused: restore old sidecar");
 
-    const migratedSidecar = JSON.parse(await readFile(`${sessionFile}.pi-gui-goal.json`, "utf8")) as {
+    const migratedSidecar = JSON.parse(await readFile(`${sessionFile}.pi-goal.json`, "utf8")) as {
       baseLeafId?: unknown;
     };
     expect(typeof migratedSidecar.baseLeafId).toBe("string");
@@ -1352,12 +1352,12 @@ test("keeps hidden continuation prompts private and ignores stale completion aft
         if (sessionContents.includes("Continue working toward the active session goal.")) {
           return "leaked";
         }
-        return sessionContents.includes("pi-gui.goal.continuation") ? "private" : "pending";
+        return sessionContents.includes("pi-goal.goal.continuation") ? "private" : "pending";
       }, { timeout: 30_000 })
       .toBe("private");
     await expect.poll(async () => readFile(sessionFile, "utf8")).toContain("Goal continuation requested.");
     await expect
-      .poll(async () => selectedSessionTreePreviews(window, "pi-gui.goal.continuation"), { timeout: 30_000 })
+      .poll(async () => selectedSessionTreePreviews(window, "pi-goal.goal.continuation"), { timeout: 30_000 })
       .toEqual([]);
     await expect
       .poll(async () => (await selectedSessionPreview(window)) ?? "")

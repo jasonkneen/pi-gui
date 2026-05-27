@@ -595,7 +595,7 @@ export async function seedGoalTreeEditorSessionFixture(
     appendUser("Root question");
     appendAssistant("Root answer");
     const createdAt = nextTimestamp();
-    const goalEntryId = sessionManager.appendCustomEntry("pi-gui.goal", {
+    const goalEntryId = sessionManager.appendCustomEntry("pi-goal.goal", {
       version: 1,
       event: "set",
       goalId: "goal-tree-editor-fixture",
