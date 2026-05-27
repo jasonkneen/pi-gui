@@ -481,7 +481,7 @@ func pressKey(_ request: Request) throws -> Response {
     if try pressAccessibleKey(key, app: app) {
         return try stateResponse(for: app)
     }
-    try withTemporaryActivation(app, cursorPoint: targetWindowCenter(for: app)) {
+    try withTemporaryActivation(app, cursorPoint: nil) {
         try postKey(key)
     }
     return try stateResponse(for: app)
@@ -510,7 +510,7 @@ func typeText(_ request: Request) throws -> Response {
     if try typeAccessibleText(text, app: app) {
         return try stateResponse(for: app)
     }
-    withTemporaryActivation(app, cursorPoint: targetWindowCenter(for: app)) {
+    withTemporaryActivation(app, cursorPoint: nil) {
         for character in text {
             postUnicode(String(character))
             Thread.sleep(forTimeInterval: 0.01)
