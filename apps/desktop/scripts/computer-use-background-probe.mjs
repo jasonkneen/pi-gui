@@ -31,14 +31,17 @@ const installedHelperAppExecutablePath = path.join(
   helperExecutableName,
 );
 const installedHelperPath = "/Applications/pi-gui.app/Contents/MacOS/pi-gui-computer-use-helper";
+const helperPathArg = process.argv[2];
 const helperPath =
-  process.argv[2] ??
-  (await firstExistingPath([
-    defaultHelperAppExecutablePath,
-    defaultHelperPath,
-    installedHelperAppExecutablePath,
-    installedHelperPath,
-  ]));
+  helperPathArg === "--packaged"
+    ? await firstExistingPath(packagedHelperCandidates())
+    : helperPathArg ??
+      (await firstExistingPath([
+        defaultHelperAppExecutablePath,
+        defaultHelperPath,
+        installedHelperAppExecutablePath,
+        installedHelperPath,
+      ]));
 const configuredHelperTimeoutMs = Number.parseInt(process.env.PI_GUI_COMPUTER_USE_PROBE_TIMEOUT_MS ?? "", 10);
 const helperTimeoutMs =
   Number.isFinite(configuredHelperTimeoutMs) && configuredHelperTimeoutMs > 0 ? configuredHelperTimeoutMs : 15_000;
@@ -62,6 +65,7 @@ await waitForApp("Calculator");
 await assertTargetDidNotBecomeFrontmost("launch Calculator in background", frontmostBefore, "Calculator");
 
 const initialCalculatorState = await runWithFocusGuard({ command: "get_app_state", app: "Calculator" }, "get_app_state");
+await runOutOfBoundsCoordinateProbe(initialCalculatorState);
 await runCoordinateClickProbe(initialCalculatorState);
 
 for (const key of ["kp_clear", "kp_clear", "7", "plus", "8", "kp_equal"]) {
@@ -93,6 +97,16 @@ async function firstExistingPath(paths) {
   return paths[0];
 }
 
+function packagedHelperCandidates() {
+  return ["mac-arm64", "mac", "mac-universal"].flatMap((outputDir) => {
+    const appBundle = path.join(desktopDir, "release", outputDir, "pi-gui.app");
+    return [
+      path.join(appBundle, "Contents", "SharedSupport", helperAppName, "Contents", "MacOS", helperExecutableName),
+      path.join(appBundle, "Contents", "MacOS", helperExecutableName),
+    ];
+  });
+}
+
 async function activateFinder() {
   await execFileAsync("osascript", ["-e", 'tell application "Finder" to activate']);
   await sleep(300);
@@ -110,11 +124,7 @@ async function runWithFocusGuard(request, action, options = {}) {
 }
 
 async function runCoordinateClickProbe(initialState) {
-  const image = initialState.content?.find((item) => item.type === "image");
-  if (!image?.data) {
-    throw new Error("Calculator get_app_state did not return a screenshot for coordinate click coverage.");
-  }
-  const dimensions = pngDimensions(Buffer.from(image.data, "base64"));
+  const dimensions = screenshotDimensions(initialState, "coordinate click coverage");
   const beforeCursor = await readCursorRequest();
   await runWithFocusGuard(
     {
@@ -128,6 +138,38 @@ async function runCoordinateClickProbe(initialState) {
   );
   const afterCursor = await readCursorRequest();
   assertCursorAdvanced(beforeCursor, afterCursor, "Calculator coordinate click");
+}
+
+async function runOutOfBoundsCoordinateProbe(initialState) {
+  const dimensions = screenshotDimensions(initialState, "out-of-bounds coordinate coverage");
+  await activateFinder();
+  const before = await frontmostApp();
+  if (before === "Calculator") {
+    throw new Error("Could not put a non-target app in front before the out-of-bounds coordinate probe.");
+  }
+  const beforeCursor = await readCursorRequest();
+  let errorMessage = "";
+  try {
+    await runHelper(
+      {
+        command: "click",
+        app: "Calculator",
+        x: dimensions.width + 20,
+        y: Math.round(dimensions.height / 2),
+      },
+      { showCursor: true },
+    );
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  if (!errorMessage.includes("outside the target window screenshot bounds")) {
+    throw new Error(`Out-of-bounds coordinate click was not rejected clearly: ${errorMessage || "<no error>"}`);
+  }
+  await assertTargetDidNotBecomeFrontmost("rejected out-of-bounds coordinate click", before, "Calculator");
+  const afterCursor = await readCursorRequest();
+  if (afterCursor?.timestamp !== beforeCursor?.timestamp) {
+    throw new Error("Rejected out-of-bounds coordinate click moved the agent cursor.");
+  }
 }
 
 async function runKeyboardCursorProbe() {
@@ -263,6 +305,14 @@ async function listApps() {
 
 function stateText(response) {
   return response.content?.filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n") ?? "";
+}
+
+function screenshotDimensions(state, coverageName) {
+  const image = state.content?.find((item) => item.type === "image");
+  if (!image?.data) {
+    throw new Error(`Calculator get_app_state did not return a screenshot for ${coverageName}.`);
+  }
+  return pngDimensions(Buffer.from(image.data, "base64"));
 }
 
 function findEditableTextElementIndex(text, expectedValue) {

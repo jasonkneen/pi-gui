@@ -73,6 +73,7 @@ Use the smallest lane that matches the changed surface.
   ```bash
   pnpm --filter @pi-gui/desktop run test:prod:real-auth-contract
   pnpm --filter @pi-gui/desktop run test:prod:packaged-smoke
+  pnpm --filter @pi-gui/desktop run test:prod:packaged-computer-use-background
   pnpm --filter @pi-gui/desktop run test:prod:applications-relaunch
   pnpm --filter @pi-gui/desktop run test:prod:release-zip-smoke
   pnpm --filter @pi-gui/desktop run test:prod:open-folder-real
@@ -167,6 +168,7 @@ That spec launches the app in development mode, edits isolated probe modules for
 - `pasteTinyPngViaClipboard()` uses Electron clipboard plus `webContents.paste()` and is appropriate for foreground/native coverage.
 - `tests/production/real-auth-contract.spec.ts` proves the default non-real-auth path still seeds a temporary fake-auth agent dir and keeps real-auth coverage opt-in.
 - `tests/production/packaged-smoke.spec.ts` proves the packaged `.app` bundle launches and can start a thread through the real UI.
+- `test:prod:packaged-computer-use-background` packages the `.app` and runs the real Computer Use helper against background Calculator and TextEdit flows without taking focus when macOS permissions allow it.
 - `tests/production/applications-relaunch.spec.ts` proves an installed copy under `/Applications` launches and relaunches with persisted state.
 - `tests/production/release-zip-smoke.spec.ts` proves the packaged release ZIP can be extracted to a temp download-style path and launched through the real UI before publish.
 - `tests/production/open-folder-real.spec.ts` proves the real macOS open panel can add a workspace through the empty-state button.

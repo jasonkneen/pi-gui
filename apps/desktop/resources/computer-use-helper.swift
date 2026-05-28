@@ -605,6 +605,9 @@ func requireIndexedElement(_ request: Request, app: ResolvedApp) throws -> AXUIE
 func screenshotPoint(_ request: Request, app: ResolvedApp, x: Double?, y: Double?) throws -> CGPoint {
     let x = try require(x, "x")
     let y = try require(y, "y")
+    guard x.isFinite, y.isFinite else {
+        throw HelperError.message("Screenshot coordinates must be finite numbers.")
+    }
     let appElement = AXUIElementCreateApplication(app.running.processIdentifier)
     let window = targetWindow(for: appElement) ?? appElement
     let frame = windowFrame(window) ?? windowCapture(for: app, title: nil).frame
@@ -612,6 +615,13 @@ func screenshotPoint(_ request: Request, app: ResolvedApp, x: Double?, y: Double
         throw HelperError.message("Cannot translate screenshot coordinates without a window frame.")
     }
     let screenshotScale = backingScaleFactor(for: frame)
+    let maxX = frame.width * screenshotScale
+    let maxY = frame.height * screenshotScale
+    guard x >= 0, y >= 0, x < maxX, y < maxY else {
+        throw HelperError.message(
+            "Screenshot coordinate (\(formatCoordinate(x)), \(formatCoordinate(y))) is outside the target window screenshot bounds 0...\(formatCoordinate(maxX)) x 0...\(formatCoordinate(maxY)) for \(app.displayName). Call get_app_state again and use coordinates within the returned screenshot."
+        )
+    }
     return CGPoint(x: frame.origin.x + (x / screenshotScale), y: frame.origin.y + (y / screenshotScale))
 }
 
@@ -1746,6 +1756,13 @@ func require<T>(_ value: T?, _ name: String) throws -> T {
         throw HelperError.message("\(name) is required.")
     }
     return value
+}
+
+func formatCoordinate(_ value: Double) -> String {
+    if value.rounded() == value {
+        return String(format: "%.0f", value)
+    }
+    return String(format: "%.1f", value)
 }
 
 func emit(_ response: Response) -> Never {
