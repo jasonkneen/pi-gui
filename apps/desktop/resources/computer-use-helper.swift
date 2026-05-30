@@ -2333,10 +2333,23 @@ func isAgentCursorOverlayDaemonRunning() -> Bool {
         return false
     }
     if Darwin.kill(pid, 0) == 0 || errno == EPERM {
-        return true
+        if isAgentCursorOverlayDaemonProcess(pid) {
+            return true
+        }
+        try? FileManager.default.removeItem(at: agentCursorPidFile)
+        return false
     }
     try? FileManager.default.removeItem(at: agentCursorPidFile)
     return false
+}
+
+func isAgentCursorOverlayDaemonProcess(_ pid: pid_t) -> Bool {
+    guard let executablePath = processPath(pid: pid),
+          URL(fileURLWithPath: executablePath).lastPathComponent == helperExecutableName,
+          let command = processCommand(pid: pid) else {
+        return false
+    }
+    return command.contains(cursorOverlayDaemonArgument)
 }
 
 func readAgentCursorOverlayPid() -> pid_t? {

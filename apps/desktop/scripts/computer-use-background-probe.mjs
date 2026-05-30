@@ -127,7 +127,7 @@ async function main() {
   await runKeyboardCursorProbe();
 
   console.log(
-    `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit frontmost=${frontmostBefore} result=15 textedit="Alpha Beta" physical_mouse=guarded helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
+    `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit frontmost=${frontmostBefore} result=15 textedit="Alpha Beta" physical_mouse=guarded stale_cursor_pid=guarded helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
   );
 }
 
@@ -262,6 +262,7 @@ async function runWithFocusGuard(request, action, options = {}) {
 async function runElementClickProbe(initialState) {
   const sevenButtonIndex = findButtonElementIndex(stateText(initialState), "7");
   const eightButtonIndex = findButtonElementIndex(stateText(initialState), "8");
+  await seedStaleCursorDaemonPid();
   const beforeCursor = await readCursorRequest();
   await runWithFocusGuard(
     {
@@ -295,6 +296,10 @@ async function runElementClickProbe(initialState) {
       `Calculator element clicks did not reuse the persistent agent cursor overlay daemon: ${cursorDaemonPid} -> ${secondCursorDaemonPid}.`,
     );
   }
+}
+
+async function seedStaleCursorDaemonPid() {
+  await writeFile(cursorPidPath, `${process.pid}\n`, "utf8");
 }
 
 async function runOutOfBoundsCoordinateProbe(initialState) {

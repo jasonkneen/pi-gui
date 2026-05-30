@@ -178,6 +178,8 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSwiftSource).toContain("process.standardInput = input");
   expect(helperSwiftSource).toContain('process.arguments = ["-o", "command=", "-p", "\\(pid)"]');
   expect(helperSwiftSource).toContain("try requireTrustedLockedUseDesktopAncestor()");
+  expect(helperSwiftSource).toContain("isAgentCursorOverlayDaemonProcess");
+  expect(helperSwiftSource).toContain("return command.contains(cursorOverlayDaemonArgument)");
 
   const installerSource = await readFile(lockedUseInstallerExecutable, "latin1");
   expect(installerSource).toContain("PiGuiComputerUseAuthorizationPlugin:allow");
