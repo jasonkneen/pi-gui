@@ -65,6 +65,8 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(extensionSource).toContain("element_index for visible text fields");
   expect(extensionSource).toContain("Computer Use blocked");
   expect(extensionSource).toContain("desktop_locked");
+  expect(extensionSource).toContain("screen_recording_denied");
+  expect(extensionSource).toContain("screenshot_unavailable");
   for (const toolName of expectedComputerUseTools) {
     expect(extensionSource).toContain(`name: "${toolName}"`);
   }
@@ -81,9 +83,12 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("enable pi-gui and pi-gui Computer Use");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED");
+  expect(helperSource).toContain("CGRequestScreenCaptureAccess");
   expect(helperSource).toContain("--cursor-overlay-daemon");
   expect(helperSource).toContain("AXUIElementCopyElementAtPosition");
   expect(helperSource).toContain("outside the target window screenshot bounds");
+  expect(helperSource).toContain("target window screenshot is unavailable");
   expect(helperSource).toContain("waitForFrontmost");
 
   const mainSource = extractFile(appAsar, "out/main/main.js").toString("utf8");
@@ -110,6 +115,30 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(lockedHelperResponse.ok).toBe(false);
   expect(lockedHelperResponse.error).toContain("Mac is locked");
   expect(lockedHelperResponse.details?.errorCode).toBe("desktop_locked");
+
+  const screenRecordingDeniedStatus = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "status" },
+    { PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED: "1" },
+  );
+  expect(screenRecordingDeniedStatus.ok).toBe(true);
+  expect(screenRecordingDeniedStatus.details?.screenRecording).toBe("denied");
+
+  if (screenRecordingDeniedStatus.details?.screenLocked === "false") {
+    const screenRecordingDeniedClick = await runPackagedHelper(
+      helperAppExecutable,
+      { command: "click", app: "Finder", x: 10, y: 10 },
+      { PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED: "1" },
+    );
+    expect(screenRecordingDeniedClick.ok).toBe(false);
+    expect(screenRecordingDeniedClick.error).toContain("Screen Recording permission");
+    expect(screenRecordingDeniedClick.details?.errorCode).toBe("screen_recording_denied");
+  } else {
+    test.info().annotations.push({
+      type: "note",
+      description: "Skipped packaged coordinate Screen Recording denial probe because the host session is locked.",
+    });
+  }
 });
 
 function runPackagedHelper(

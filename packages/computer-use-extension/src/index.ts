@@ -437,6 +437,12 @@ function classifyComputerUseError(message: string, details: Record<string, unkno
   if (message.includes("Accessibility permission")) {
     return "accessibility_denied";
   }
+  if (message.includes("Screen Recording permission")) {
+    return "screen_recording_denied";
+  }
+  if (message.includes("target window screenshot is unavailable")) {
+    return "screenshot_unavailable";
+  }
   if (message.includes("helper is not configured") || message.includes("ENOENT") || message.includes("not found")) {
     return "helper_unavailable";
   }
@@ -452,6 +458,10 @@ function failureTitle(errorCode: string): string {
       return "Computer Use blocked: the Mac is locked.";
     case "accessibility_denied":
       return "Computer Use blocked: Accessibility permission is not enabled.";
+    case "screen_recording_denied":
+      return "Computer Use blocked: Screen Recording permission is not enabled.";
+    case "screenshot_unavailable":
+      return "Computer Use blocked: the target screenshot is unavailable.";
     case "helper_unavailable":
       return "Computer Use unavailable: the helper is not configured.";
     case "helper_timeout":

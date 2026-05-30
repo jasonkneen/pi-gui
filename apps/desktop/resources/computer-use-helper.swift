@@ -90,6 +90,7 @@ private let cursorOverlayDaemonArgument = "--cursor-overlay-daemon"
 private let cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS"
 private let cursorOverlayGlideDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS"
 private let testForceLockedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_LOCKED"
+private let testForceScreenRecordingDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED"
 private let defaultCursorOverlayDuration = 8.0
 private let defaultCursorOverlayGlideDuration = 0.32
 private let agentCursorPositionFile = FileManager.default.temporaryDirectory.appendingPathComponent("pi-gui-computer-use-agent-cursor-position")
@@ -333,10 +334,25 @@ func helperErrorDetails(for error: Error) -> [String: String]? {
             "accessibility": "denied",
         ]
     }
+    if message.contains("Screen Recording permission") {
+        return [
+            "errorCode": "screen_recording_denied",
+            "screenRecording": "denied",
+        ]
+    }
+    if message.contains("target window screenshot is unavailable") {
+        return [
+            "errorCode": "screenshot_unavailable",
+            "screenshot": "unavailable",
+        ]
+    }
     return nil
 }
 
 func screenRecordingStatus() -> String {
+    if ProcessInfo.processInfo.environment[testForceScreenRecordingDeniedEnv] == "1" {
+        return "denied"
+    }
     if #available(macOS 10.15, *) {
         return CGPreflightScreenCaptureAccess() ? "granted" : "denied"
     }
@@ -595,7 +611,8 @@ func stateResponse(for app: ResolvedApp) throws -> Response {
     let builder = TreeBuilder()
     let tree = builder.build(from: window)
     let capture = windowCapture(for: app, title: title)
-    let screenshot = capture.windowId.flatMap { captureWindowImage(windowId: $0) }
+    let screenRecording = requestScreenRecordingPermissionIfNeeded()
+    let screenshot = screenRecording == "denied" ? nil : capture.windowId.flatMap { captureWindowImage(windowId: $0) }
 
     var text = "Computer Use state (Pi GUI)\n<app_state>\n"
     text += "App=\(app.path) (bundleID \(app.bundleIdentifier), pid \(app.running.processIdentifier))\n"
@@ -619,6 +636,8 @@ func stateResponse(for app: ResolvedApp) throws -> Response {
             "bundleIdentifier": app.bundleIdentifier,
             "focusMode": "background",
             "pid": String(app.running.processIdentifier),
+            "screenRecording": screenRecording,
+            "screenshot": screenshot == nil ? "unavailable" : "available",
             "windowTitle": title,
         ],
         error: nil
@@ -666,10 +685,16 @@ func screenshotPoint(_ request: Request, app: ResolvedApp, x: Double?, y: Double
     guard x.isFinite, y.isFinite else {
         throw HelperError.message("Screenshot coordinates must be finite numbers.")
     }
+    try requireScreenshotCoordinatesAvailable()
     let appElement = AXUIElementCreateApplication(app.running.processIdentifier)
     let window = targetWindow(for: appElement) ?? appElement
     let title = copyStringAttribute(window, kAXTitleAttribute) ?? app.displayName
     let capture = windowCapture(for: app, title: title)
+    guard capture.windowId != nil else {
+        throw HelperError.message(
+            "Cannot use screenshot coordinates because the target window screenshot is unavailable for \(app.displayName). Call get_app_state and use an element_index from the accessibility tree instead."
+        )
+    }
     let frame = capture.frame ?? windowFrame(window)
     guard let frame else {
         throw HelperError.message("Cannot translate screenshot coordinates without a window frame.")
@@ -683,6 +708,28 @@ func screenshotPoint(_ request: Request, app: ResolvedApp, x: Double?, y: Double
         )
     }
     return CGPoint(x: frame.origin.x + (x / screenshotScale), y: frame.origin.y + (y / screenshotScale))
+}
+
+func requireScreenshotCoordinatesAvailable() throws {
+    if requestScreenRecordingPermissionIfNeeded() == "denied" {
+        throw HelperError.message(
+            "Screen Recording permission is required before using screenshot coordinates. In macOS System Settings > Privacy & Security > Screen Recording, enable pi-gui and pi-gui Computer Use, then retry."
+        )
+    }
+}
+
+func requestScreenRecordingPermissionIfNeeded() -> String {
+    let status = screenRecordingStatus()
+    if status != "denied" {
+        return status
+    }
+    if ProcessInfo.processInfo.environment[testForceScreenRecordingDeniedEnv] == "1" {
+        return "denied"
+    }
+    if #available(macOS 10.15, *) {
+        return CGRequestScreenCaptureAccess() ? "granted" : "denied"
+    }
+    return status
 }
 
 func resolveApp(_ appQuery: String?) throws -> ResolvedApp {
