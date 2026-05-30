@@ -10,6 +10,8 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(scriptDir, "..");
 const helperExecutableName = "pi-gui-computer-use-helper";
 const helperAppName = "pi-gui Computer Use.app";
+const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
+const lockedUseInstallerPathEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH";
 const defaultHelperAppExecutablePath = path.join(
   desktopDir,
   "build",
@@ -20,6 +22,16 @@ const defaultHelperAppExecutablePath = path.join(
   helperExecutableName,
 );
 const defaultHelperPath = path.join(desktopDir, "build", "native", "pi-gui-computer-use-helper");
+const defaultLockedUseInstallerPath = path.join(desktopDir, "build", "native", lockedUseInstallerExecutableName);
+const defaultHelperAppLockedUseInstallerPath = path.join(
+  desktopDir,
+  "build",
+  "native",
+  helperAppName,
+  "Contents",
+  "SharedSupport",
+  lockedUseInstallerExecutableName,
+);
 const installedHelperAppExecutablePath = path.join(
   "/Applications",
   "pi-gui.app",
@@ -31,6 +43,16 @@ const installedHelperAppExecutablePath = path.join(
   helperExecutableName,
 );
 const installedHelperPath = "/Applications/pi-gui.app/Contents/MacOS/pi-gui-computer-use-helper";
+const installedLockedUseInstallerPath = path.join(
+  "/Applications",
+  "pi-gui.app",
+  "Contents",
+  "SharedSupport",
+  helperAppName,
+  "Contents",
+  "SharedSupport",
+  lockedUseInstallerExecutableName,
+);
 const helperPathArg = process.argv[2];
 const lockedUseAuthorizationProtocolVersion = "pi-gui-computer-use-active-turn-v1";
 const helperPath =
@@ -45,6 +67,8 @@ const helperPath =
         installedHelperAppExecutablePath,
         installedHelperPath,
       ]));
+const lockedUseInstallerPath =
+  process.env[lockedUseInstallerPathEnv]?.trim() || (await firstExistingPath(lockedUseInstallerCandidates()));
 const configuredHelperTimeoutMs = Number.parseInt(process.env.PI_GUI_COMPUTER_USE_PROBE_TIMEOUT_MS ?? "", 10);
 const helperTimeoutMs =
   Number.isFinite(configuredHelperTimeoutMs) && configuredHelperTimeoutMs > 0 ? configuredHelperTimeoutMs : 15_000;
@@ -96,7 +120,7 @@ async function main() {
   await runKeyboardCursorProbe();
 
   console.log(
-    `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit frontmost=${frontmostBefore} result=15 textedit="Alpha Beta" helper=${helperPath}`,
+    `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit frontmost=${frontmostBefore} result=15 textedit="Alpha Beta" helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
   );
 }
 
@@ -120,6 +144,14 @@ async function assertHelperSupportsActiveTurnProtocol() {
 }
 
 async function assertUnlockedDesktop() {
+  const status = await runHelper({ command: "status" });
+  if (status.details?.screenLocked === "true") {
+    const statusText = stateText(status) || "Computer Use status unavailable.";
+    throw new Error(
+      `Computer Use background probe cannot run while the desktop is locked.\n${statusText}\nUnlock the desktop before rerunning this background probe. Locked Computer Use uses a separate active-turn authorization path.`,
+    );
+  }
+
   try {
     await runHelper({ command: "get_app_state", app: "Finder" });
   } catch (error) {
@@ -150,6 +182,49 @@ function packagedHelperCandidates() {
       path.join(appBundle, "Contents", "MacOS", helperExecutableName),
     ];
   });
+}
+
+function lockedUseInstallerCandidates() {
+  if (helperPathArg === "--packaged") {
+    return packagedLockedUseInstallerCandidates();
+  }
+  if (helperPathArg === "--installed") {
+    return [installedLockedUseInstallerPath];
+  }
+  if (helperPathArg) {
+    return lockedUseInstallerCandidatesForHelper(helperPath);
+  }
+  return [
+    defaultHelperAppLockedUseInstallerPath,
+    defaultLockedUseInstallerPath,
+    installedLockedUseInstallerPath,
+  ];
+}
+
+function packagedLockedUseInstallerCandidates() {
+  return ["mac-arm64", "mac", "mac-universal"].flatMap((outputDir) => {
+    const appBundle = path.join(desktopDir, "release", outputDir, "pi-gui.app");
+    return [
+      path.join(
+        appBundle,
+        "Contents",
+        "SharedSupport",
+        helperAppName,
+        "Contents",
+        "SharedSupport",
+        lockedUseInstallerExecutableName,
+      ),
+      path.join(appBundle, "Contents", "MacOS", lockedUseInstallerExecutableName),
+    ];
+  });
+}
+
+function lockedUseInstallerCandidatesForHelper(resolvedHelperPath) {
+  const helperDir = path.dirname(resolvedHelperPath);
+  return [
+    path.join(helperDir, "..", "SharedSupport", lockedUseInstallerExecutableName),
+    path.join(helperDir, lockedUseInstallerExecutableName),
+  ];
 }
 
 async function activateFinder() {
@@ -466,15 +541,19 @@ function runHelper(request, options = {}) {
 }
 
 function helperEnv(options) {
+  const env = {
+    ...process.env,
+    [lockedUseInstallerPathEnv]: lockedUseInstallerPath,
+  };
   if (options.showCursor) {
     return {
-      ...process.env,
+      ...env,
       PI_GUI_COMPUTER_USE_SHOW_CURSOR: "1",
       PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS: "250",
       PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS: "80",
     };
   }
-  return { ...process.env, PI_GUI_COMPUTER_USE_SHOW_CURSOR: "0" };
+  return { ...env, PI_GUI_COMPUTER_USE_SHOW_CURSOR: "0" };
 }
 
 async function removeCursorRequest() {
