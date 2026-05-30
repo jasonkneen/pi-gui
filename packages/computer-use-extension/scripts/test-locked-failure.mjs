@@ -123,6 +123,12 @@ process.stdin.on("end", () => {
       error: "Screen Recording permission is required before using screenshot coordinates. In macOS System Settings > Privacy & Security > Screen Recording, enable pi-gui and pi-gui Computer Use, then retry.",
       details: { errorCode: "screen_recording_denied", screenRecording: "denied" },
     };
+  } else if (request.command === "get_app_state" && request.app === "ImaginaryApp") {
+    response = {
+      ok: false,
+      error: "Could not find app: ImaginaryApp",
+      details: { errorCode: "app_not_found" },
+    };
   } else if (request.command === "click" && request.app === "Notes") {
     response = {
       ok: false,
@@ -185,6 +191,22 @@ await assertFailureResult({
   thrown: screenRecordingThrown,
   expectedText: [/Computer Use blocked: Screen Recording permission is not enabled/, /Run computer_use_status/],
   expectedDetails: { errorCode: "screen_recording_denied", screenRecording: "denied" },
+});
+
+const appNotFoundThrown = await executeToolExpectingError(
+  getAppState,
+  "call-app-not-found",
+  { app: "ImaginaryApp" },
+  /Computer Use blocked: the requested app could not be found/,
+  "app-not-found failures should throw so the runtime records a distinct tool error",
+);
+await assertFailureResult({
+  toolCallId: "call-app-not-found",
+  toolName: "get_app_state",
+  input: { app: "ImaginaryApp" },
+  thrown: appNotFoundThrown,
+  expectedText: [/Computer Use blocked: the requested app could not be found/, /Could not find app: ImaginaryApp/],
+  expectedDetails: { errorCode: "app_not_found" },
 });
 
 const screenshotUnavailableThrown = await executeToolExpectingError(

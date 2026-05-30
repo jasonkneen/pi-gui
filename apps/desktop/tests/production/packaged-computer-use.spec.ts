@@ -114,6 +114,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(extensionSource).toContain("Computer Use blocked");
   expect(extensionSource).toContain("desktop_locked");
   expect(extensionSource).toContain("screen_recording_denied");
+  expect(extensionSource).toContain("app_not_found");
   expect(extensionSource).toContain("screenshot_unavailable");
   expect(extensionSource).toContain("physical_input_required");
   expect(extensionSource).toContain("foreground physical input");
@@ -154,6 +155,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("outside the target window screenshot bounds");
   expect(helperSource).toContain("would require foreground physical input");
   expect(helperSource).toContain("moving the user's physical mouse");
+  expect(helperSource).toContain("app_not_found");
   expect(helperSource).toContain("target window screenshot is unavailable");
   expect(helperSource).toContain("active-turn authorization service");
   expect(helperSource).toContain("waitForFrontmost");

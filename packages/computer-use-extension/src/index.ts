@@ -619,6 +619,9 @@ function classifyComputerUseError(message: string, details: Record<string, unkno
   if (message.includes("Screen Recording permission")) {
     return "screen_recording_denied";
   }
+  if (message.includes("Could not find app:")) {
+    return "app_not_found";
+  }
   if (message.includes("target window screenshot is unavailable")) {
     return "screenshot_unavailable";
   }
@@ -646,6 +649,8 @@ function failureTitle(errorCode: string): string {
       return "Computer Use blocked: Accessibility permission is not enabled.";
     case "screen_recording_denied":
       return "Computer Use blocked: Screen Recording permission is not enabled.";
+    case "app_not_found":
+      return "Computer Use blocked: the requested app could not be found.";
     case "screenshot_unavailable":
       return "Computer Use blocked: the target screenshot is unavailable.";
     case "physical_input_required":

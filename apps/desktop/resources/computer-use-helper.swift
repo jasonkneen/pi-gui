@@ -942,6 +942,11 @@ func helperErrorDetails(for error: Error) -> [String: String]? {
             "screenRecording": "denied",
         ]
     }
+    if message.contains("Could not find app:") {
+        return [
+            "errorCode": "app_not_found",
+        ]
+    }
     if message.contains("target window screenshot is unavailable") {
         return [
             "errorCode": "screenshot_unavailable",
