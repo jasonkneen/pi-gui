@@ -27,6 +27,7 @@ const helperExecutableName = "pi-gui-computer-use-helper";
 const helperAppName = "pi-gui Computer Use.app";
 const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
 const authorizationPluginBundleName = "PiGuiComputerUseAuthorizationPlugin.bundle";
+const lockedUseRequiredTeamIdentifier = "P2MBURJVUW";
 const helperSwiftSourcePath = join(process.cwd(), "apps", "desktop", "resources", "computer-use-helper.swift");
 const lockedUseInstallerSourcePath = join(
   process.cwd(),
@@ -73,6 +74,17 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   await access(lockedUseInstallerExecutable);
   await access(authorizationPluginExecutable);
   await access(helperPath);
+  await expectSignedCode(helperAppBundle, {
+    identifier: "com.pi-gui.desktop.computer-use-helper",
+    teamIdentifier: lockedUseRequiredTeamIdentifier,
+  });
+  await expectSignedCode(authorizationPluginBundle, {
+    identifier: "com.pi-gui.desktop.computer-use.authorization-plugin",
+    teamIdentifier: lockedUseRequiredTeamIdentifier,
+  });
+  await expectSignedCode(lockedUseInstallerExecutable, {
+    teamIdentifier: lockedUseRequiredTeamIdentifier,
+  });
 
   const helperInfo = await readFile(helperAppInfoPlist, "utf8");
   expect(helperInfo).toMatch(/<key>LSUIElement<\/key>\s*<true\/>/);
@@ -466,9 +478,56 @@ function runDirectDaemonInvocation(helperPath: string): Promise<{ code: number |
   });
 }
 
-function runLockedUseInstallerStatus(installerPath: string): Promise<string> {
+async function runLockedUseInstallerStatus(installerPath: string): Promise<string> {
+  const result = await runCapturedCommand(installerPath, ["status"]);
+  if (result.code === 0) {
+    return result.stdout.trim();
+  }
+  throw new Error(result.stderr.trim() || `Computer Use locked-use installer exited with code ${result.code}.`);
+}
+
+async function expectSignedCode(
+  targetPath: string,
+  expected: { readonly identifier?: string; readonly teamIdentifier: string },
+): Promise<void> {
+  const details = await codesignDetails(targetPath);
+  if (expected.identifier) {
+    expect(details).toContain(`Identifier=${expected.identifier}`);
+  }
+  expect(details).toContain(`TeamIdentifier=${expected.teamIdentifier}`);
+  expect(details).toContain("flags=0x10000(runtime)");
+  await codesignVerify(targetPath);
+}
+
+async function codesignDetails(targetPath: string): Promise<string> {
+  const result = await runCapturedCommand("codesign", ["-dv", targetPath]);
+  const output = commandOutput(result);
+  if (result.code === 0) {
+    return output;
+  }
+  throw new Error(output.trim() || `codesign -dv failed with code ${result.code}.`);
+}
+
+async function codesignVerify(targetPath: string): Promise<void> {
+  const result = await runCapturedCommand("codesign", ["--verify", "--deep", "--strict", targetPath]);
+  if (result.code !== 0) {
+    throw new Error(commandOutput(result).trim() || `codesign --verify failed with code ${result.code}.`);
+  }
+}
+
+async function expectInstallerInstallWithoutConfirmToFail(installerPath: string): Promise<void> {
+  const result = await runCapturedCommand(installerPath, ["install"]);
+  expect(result.code).not.toBe(0);
+  expect(result.stdout.trim()).toBe("");
+  expect(result.stderr).toContain("--confirm-system-login-change");
+}
+
+function runCapturedCommand(
+  command: string,
+  args: readonly string[],
+): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(installerPath, ["status"], {
+    const child = spawn(command, [...args], {
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
     });
@@ -482,39 +541,11 @@ function runLockedUseInstallerStatus(installerPath: string): Promise<string> {
     });
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-        return;
-      }
-      reject(new Error(stderr.trim() || `Computer Use locked-use installer exited with code ${code}.`));
+      resolve({ code, stdout, stderr });
     });
   });
 }
 
-async function expectInstallerInstallWithoutConfirmToFail(installerPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(installerPath, ["install"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      try {
-        expect(code).not.toBe(0);
-        expect(stdout.trim()).toBe("");
-        expect(stderr).toContain("--confirm-system-login-change");
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
+function commandOutput(result: { readonly stdout: string; readonly stderr: string }): string {
+  return `${result.stdout}${result.stderr}`;
 }
