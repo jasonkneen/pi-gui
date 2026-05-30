@@ -480,7 +480,7 @@ export default function goalBudgetProbe(pi) {
   pi.registerCommand("seed-exhausted-goal", {
     description: "Seed an active goal whose token budget is already exhausted",
     handler: async (args, ctx) => {
-      const objective = args.trim() || "budgeted goal should not continue";
+      const objective = args.trim() || "budgeted goal should still continue";
       const now = Date.now();
       const goal = {
         goalId: "budget-probe-goal",
@@ -1276,7 +1276,7 @@ test("suppresses repeated idle continuation after a no-tool response", async () 
   }
 });
 
-test("does not auto-continue when the token budget is exhausted", async () => {
+test("continues an active goal when the token budget is exhausted", async () => {
   test.setTimeout(120_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("goal-budget-exhausted-workspace");
@@ -1303,7 +1303,7 @@ test("does not auto-continue when the token budget is exhausted", async () => {
     await setSelectedSessionModel(window, "goal-text-only", "goal-text");
 
     const composer = window.getByTestId("composer");
-    await composer.fill("/seed-exhausted-goal exhausted budget should stay idle");
+    await composer.fill("/seed-exhausted-goal exhausted budget should still continue");
     await composer.press("Enter");
     await expect(window.locator(".timeline")).toContainText("Seeded exhausted goal");
   } finally {
@@ -1324,14 +1324,15 @@ test("does not auto-continue when the token budget is exhausted", async () => {
     await selectSession(window, "Goal exhausted budget session");
     await expectGoalCommand(window);
     await expect(window.getByTestId("extension-dock-summary")).toHaveText(
-      "active: exhausted budget should stay idle",
+      "active: exhausted budget should still continue",
     );
 
+    await expect(window.getByTestId("transcript")).toContainText("goal needs more work", { timeout: 30_000 });
     const dockBody = await expandGoalDock(window);
-    await expect(dockBody).toContainText("Usage: 10/10 tokens");
+    await expect(dockBody).toContainText("Tokens: 20 used (10 budget exceeded by 10)");
     await expectSelectedSessionStatus(window, "idle");
     await window.waitForTimeout(500);
-    await expect(window.getByTestId("transcript")).not.toContainText("goal needs more work");
+    await expect(window.getByTestId("transcript").getByText("goal needs more work")).toHaveCount(1);
     await expectSelectedSessionStatus(window, "idle");
   } finally {
     await harness.close();

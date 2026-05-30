@@ -203,8 +203,8 @@ importers:
         specifier: workspace:*
         version: link:../session-driver
       pi-goal:
-        specifier: github:minghinmatthewlam/pi-goal
-        version: '@matthewlam/pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/831f5d7972953601eedec853e62bf3903789e47e(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))'
+        specifier: npm:@matthewlam/pi-goal@0.1.2
+        version: '@matthewlam/pi-goal@0.1.2(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))'
 
   packages/session-driver: {}
 
@@ -1134,9 +1134,8 @@ packages:
     resolution: {integrity: sha512-D3F+UrU9CR7roJt0zDLp6Oc+4/KlLDIrN4frH+6V90SJNW2KKUec1oCQIPaaDjCqeOsQyX9dyqYbImIQIM45PA==}
     engines: {node: '>= 10'}
 
-  '@matthewlam/pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/831f5d7972953601eedec853e62bf3903789e47e':
-    resolution: {tarball: https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/831f5d7972953601eedec853e62bf3903789e47e}
-    version: 0.1.1
+  '@matthewlam/pi-goal@0.1.2':
+    resolution: {integrity: sha512-GYC6K8u/gzKyyv2o6LzRp2k+gtS1xMiN0HXNrFzXY5G+xKL7Zy7TETlnwqmSLKvwzucxOulyeF6bp/JYTEecPA==}
     peerDependencies:
       '@earendil-works/pi-ai': '*'
       '@earendil-works/pi-coding-agent': '*'
@@ -5408,7 +5407,7 @@ snapshots:
       '@mariozechner/clipboard-win32-x64-msvc': 0.3.2
     optional: true
 
-  '@matthewlam/pi-goal@https://codeload.github.com/minghinmatthewlam/pi-goal/tar.gz/831f5d7972953601eedec853e62bf3903789e47e(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))':
+  '@matthewlam/pi-goal@0.1.2(@earendil-works/pi-ai@0.74.0(ws@8.20.0)(zod@4.3.6))(@earendil-works/pi-coding-agent@0.74.0(ws@8.20.0)(zod@4.3.6))':
     dependencies:
       '@earendil-works/pi-ai': 0.74.0(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent': 0.74.0(ws@8.20.0)(zod@4.3.6)
