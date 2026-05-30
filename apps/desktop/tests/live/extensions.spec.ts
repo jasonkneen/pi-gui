@@ -451,6 +451,13 @@ test("manages extensions and prefers runtime commands over colliding host action
     await window.getByRole("button", { name: "Extensions", exact: true }).click();
     await expect(window.getByTestId("extensions-surface")).toBeVisible();
     const extensionsList = window.getByTestId("extensions-list");
+    const builtInComputerUseCard = extensionsList.getByRole("button", { name: /Computer Use.*temporary/i });
+    await expect(builtInComputerUseCard).toBeVisible();
+    await builtInComputerUseCard.click();
+    await expect(window.locator(".skill-detail")).toContainText("temporary");
+    await expect(window.getByRole("button", { name: "Open folder", exact: true })).toHaveCount(0);
+    await expect(window.getByRole("button", { name: "Disable", exact: true })).toHaveCount(0);
+
     const extensionCard = extensionsList.getByRole("button", { name: /demo-extension/i });
     await expect(extensionCard).toBeVisible();
     await extensionCard.click();

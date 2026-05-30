@@ -7,6 +7,7 @@ import {
   SettingsManager,
   parseFrontmatter,
   stripFrontmatter,
+  type ExtensionFactory,
   type PathMetadata,
   type ResolvedPaths,
   type ResolvedResource,
@@ -43,6 +44,11 @@ interface RuntimeContext {
   readonly resourceLoader: DefaultResourceLoader;
 }
 
+export interface RuntimeInlineExtensionMetadata {
+  readonly displayName: string;
+  readonly description?: string;
+}
+
 interface ProjectWritableSettingsManager {
   markProjectModified(field: string, nestedKey?: string): void;
   saveProjectSettings(settings: Record<string, unknown>): void;
@@ -52,6 +58,8 @@ export interface RuntimeSupervisorOptions {
   readonly agentDir?: string;
   readonly authStorage?: AuthStorage;
   readonly modelRegistry?: ModelRegistry;
+  readonly extensionFactories?: readonly ExtensionFactory[];
+  readonly inlineExtensionMetadata?: readonly RuntimeInlineExtensionMetadata[];
 }
 
 type ResourceScope = "user" | "project";
@@ -66,6 +74,8 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
   private readonly agentDir: string;
   private readonly authStorage: AuthStorage;
   private readonly modelRegistry: ModelRegistry;
+  private readonly extensionFactories: readonly ExtensionFactory[];
+  private readonly inlineExtensionMetadata: readonly RuntimeInlineExtensionMetadata[];
   private readonly contexts = new Map<string, RuntimeContext>();
 
   constructor(options: RuntimeSupervisorOptions = {}) {
@@ -73,6 +83,8 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
     this.agentDir = deps.agentDir;
     this.authStorage = deps.authStorage;
     this.modelRegistry = deps.modelRegistry;
+    this.extensionFactories = options.extensionFactories ?? [];
+    this.inlineExtensionMetadata = options.inlineExtensionMetadata ?? [];
   }
 
   async getRuntimeSnapshot(workspace: WorkspaceRef): Promise<RuntimeSnapshot> {
@@ -306,6 +318,7 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
       cwd: workspace.path,
       agentDir: this.agentDir,
       settingsManager,
+      extensionFactories: [...this.extensionFactories],
     });
     try {
       await resourceLoader.reload();
@@ -335,6 +348,7 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
         cwd: workspace.path,
         agentDir: this.agentDir,
         settingsManager,
+        extensionFactories: [...this.extensionFactories],
       });
       await resourceLoader.reload();
     }
@@ -584,12 +598,40 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
         };
       }),
     );
+    const resolvedRecordPaths = new Set(records.map((record) => resolve(record.path)));
+    const inlineRecords = loadedResult.extensions
+      .filter((extension) => extension.path.startsWith("<inline:") && !resolvedRecordPaths.has(resolve(extension.path)))
+      .map((extension) => this.buildInlineExtensionRecord(extension));
+    records.push(...inlineRecords);
 
     return records.sort((left, right) =>
       left.displayName === right.displayName
         ? left.path.localeCompare(right.path)
         : left.displayName.localeCompare(right.displayName),
     );
+  }
+
+  private buildInlineExtensionRecord(extension: ReturnType<DefaultResourceLoader["getExtensions"]>["extensions"][number]): RuntimeExtensionRecord {
+    const metadata = inlineExtensionMetadataForPath(extension.path, this.inlineExtensionMetadata);
+    return {
+      path: extension.path,
+      displayName: metadata.displayName,
+      ...(metadata.description ? { description: metadata.description } : {}),
+      enabled: true,
+      sourceInfo: {
+        path: extension.path,
+        source: "builtin",
+        scope: "temporary",
+        origin: "top-level",
+      },
+      commands: [...extension.commands.keys()].sort((left, right) => left.localeCompare(right)),
+      tools: [...extension.tools.values()]
+        .map((tool) => tool.definition.name)
+        .sort((left, right) => left.localeCompare(right)),
+      flags: [...extension.flags.keys()].sort((left, right) => left.localeCompare(right)),
+      shortcuts: [...extension.shortcuts.keys()].sort((left, right) => left.localeCompare(right)),
+      diagnostics: [],
+    };
   }
 
   private toggleResource(
@@ -856,6 +898,15 @@ function toRuntimeSourceInfo(path: string, metadata: PathMetadata): RuntimeSourc
     origin: metadata.origin,
     ...(metadata.baseDir ? { baseDir: metadata.baseDir } : {}),
   };
+}
+
+function inlineExtensionMetadataForPath(
+  path: string,
+  metadata: readonly RuntimeInlineExtensionMetadata[],
+): RuntimeInlineExtensionMetadata {
+  const match = /^<inline:(\d+)>$/.exec(path);
+  const index = match?.[1] ? Number.parseInt(match[1], 10) - 1 : -1;
+  return metadata[index] ?? { displayName: path };
 }
 
 function titleForResourceKind(kind: ToggleableResourceKind): string {

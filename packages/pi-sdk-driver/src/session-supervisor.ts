@@ -7,6 +7,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type CreateAgentSessionOptions,
+  type ExtensionFactory,
   type ExtensionCommandContextActions,
   type ExtensionUIDialogOptions,
   type ExtensionUIContext,
@@ -70,12 +71,16 @@ import {
   workspaceToRef,
 } from "./session-supervisor-utils.js";
 import type { SessionTranscriptMessage } from "./transcript.js";
-import { createAgentSessionRuntimeWithNpmFallback } from "./npm-package-fallback.js";
+import {
+  createAgentSessionRuntimeWithNpmFallback,
+  type PiCreateAgentSessionOptions,
+} from "./npm-package-fallback.js";
 
 export interface PiSdkDriverOptions {
   readonly catalogFilePath?: string;
   readonly createAgentSessionRuntimeImpl?: (options?: CreateAgentSessionOptions) => Promise<AgentSessionRuntime>;
   readonly modelRegistry?: ModelRegistry;
+  readonly extensionFactories?: readonly ExtensionFactory[];
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
     options: import("./thread-title-generator.js").GenerateThreadTitleOptions,
@@ -153,7 +158,15 @@ export class SessionSupervisor {
       ? new JsonCatalogStore({ catalogFilePath: options.catalogFilePath })
       : new JsonCatalogStore();
     this.createAgentSessionRuntimeImpl =
-      options.createAgentSessionRuntimeImpl ?? ((createOptions) => createAgentSessionRuntimeWithNpmFallback(createOptions));
+      options.createAgentSessionRuntimeImpl ??
+      ((createOptions) =>
+        createAgentSessionRuntimeWithNpmFallback({
+          ...createOptions,
+          resourceLoaderOptions: {
+            ...(createOptions as PiCreateAgentSessionOptions | undefined)?.resourceLoaderOptions,
+            ...(options.extensionFactories ? { extensionFactories: [...options.extensionFactories] } : {}),
+          },
+        }));
     this.modelRegistry = options.modelRegistry;
   }
 

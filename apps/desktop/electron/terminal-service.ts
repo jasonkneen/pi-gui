@@ -21,6 +21,12 @@ let nodePty: NodePty | undefined;
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { cols: 80, rows: 24 };
 const MAX_WRITE_LENGTH = 128 * 1024;
 const MAX_TERMINAL_SESSIONS_PER_ROOT = 8;
+const computerUsePrivateEnvKeys = [
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PID",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PATH",
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET",
+];
 
 interface TerminalRoot {
   readonly rootKey: string;
@@ -440,6 +446,9 @@ function buildTerminalEnv(): Record<string, string> {
   env.TERM = "xterm-256color";
   delete env.TERMINFO;
   delete env.TERMINFO_DIRS;
+  for (const key of computerUsePrivateEnvKeys) {
+    delete env[key];
+  }
   return env;
 }
 

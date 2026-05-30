@@ -417,7 +417,7 @@ app.whenReady().then(async () => {
         reject: (error: Error) => void;
       }
     | undefined;
-  await configureComputerUseRuntime({
+  const computerUseRuntimeDriverOptions = await configureComputerUseRuntime({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     execPath: process.execPath,
@@ -426,6 +426,7 @@ app.whenReady().then(async () => {
     userDataDir: configuredUserDataDir,
     initialWorkspacePaths: resolveInitialWorkspacePaths(),
     getWindow: () => mainWindow,
+    ...(computerUseRuntimeDriverOptions ? { driverOptions: computerUseRuntimeDriverOptions } : {}),
     generateThreadTitleOverride: async (workspace, options) => generateThreadTitleOverride?.(workspace, options),
   });
   await store.initialize();

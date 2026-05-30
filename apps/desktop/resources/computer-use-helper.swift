@@ -3,6 +3,7 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
+import Security
 
 struct Request: Decodable {
     let command: String
@@ -25,6 +26,8 @@ struct Request: Decodable {
     let suffix: String?
     let selection: String?
     let action: String?
+    let locked_use_app_token: String?
+    let locked_use_turn_token: String?
 
     enum CodingKeys: String, CodingKey {
         case command
@@ -47,6 +50,8 @@ struct Request: Decodable {
         case suffix
         case selection
         case action
+        case locked_use_app_token
+        case locked_use_turn_token
     }
 }
 
@@ -87,15 +92,39 @@ struct WindowCapture {
 
 private let cursorOverlayDisabledValue = "0"
 private let cursorOverlayDaemonArgument = "--cursor-overlay-daemon"
+private let lockedUseAuthorizationDaemonArgument = "--lock-screen-authorization-daemon"
+private let lockedUseAuthorizationProtocolVersionArgument = "--lock-screen-authorization-protocol-version"
+private let lockedUseAuthorizationProtocolVersion = "pi-gui-computer-use-active-turn-v1"
 private let cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS"
 private let cursorOverlayGlideDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS"
 private let lockedUseInstallerPathEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH"
+private let lockedUseAppTokenEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN"
+private let lockedUseDesktopPidEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PID"
+private let lockedUseDesktopPathEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PATH"
+private let lockedUseAuthorizationSocketEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET"
+private let lockedUseLeaseSecondsEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_LEASE_SECONDS"
+private let lockedUseUnlockTimeoutMsEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_UNLOCK_TIMEOUT_MS"
 private let testForceLockedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_LOCKED"
+private let testLockedUseInstallerStateEnv = "PI_GUI_COMPUTER_USE_TEST_LOCKED_USE_INSTALLER_STATE"
+private let testAssumeUnlockedAfterAuthorizationEnv = "PI_GUI_COMPUTER_USE_TEST_ASSUME_UNLOCKED_AFTER_AUTHORIZATION"
+private let testSkipRelockEnv = "PI_GUI_COMPUTER_USE_TEST_SKIP_RELOCK"
 private let testForceScreenRecordingDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED"
 private let defaultCursorOverlayDuration = 8.0
 private let defaultCursorOverlayGlideDuration = 0.32
+private let defaultLockedUseLeaseSeconds: TimeInterval = 300
+private let defaultLockedUseUnlockTimeout: TimeInterval = 8.0
+private let desktopBundleIdentifier = "com.pi-gui.desktop"
+private let helperBundleIdentifier = "com.pi-gui.desktop.computer-use-helper"
+private let expectedTeamIdentifier = "P2MBURJVUW"
+private let helperExecutableName = "pi-gui-computer-use-helper"
+private let lockedUseConfigurationPath = "/Library/Application Support/PiGuiComputerUseAuthorizationPlugin/configuration.plist"
+private let lockedUseSocketDirectory = "/tmp/com.pi-gui.desktop.computer-use"
+private let lockedUseSocketPath = "\(lockedUseSocketDirectory)/LockScreenLoginAuthorization.sock"
+private let lockedUseTurnTokenPath = "\(lockedUseSocketDirectory)/active-turn-token"
 private let agentCursorPositionFile = FileManager.default.temporaryDirectory.appendingPathComponent("pi-gui-computer-use-agent-cursor-position")
 private let agentCursorPidFile = FileManager.default.temporaryDirectory.appendingPathComponent("pi-gui-computer-use-agent-cursor.pid")
+private let lockedUseDaemonPidFile = FileManager.default.temporaryDirectory.appendingPathComponent("pi-gui-computer-use-lock-screen-authorization.pid")
+private let lockedUseDaemonStateFile = FileManager.default.temporaryDirectory.appendingPathComponent("pi-gui-computer-use-lock-screen-authorization-state")
 private let maxSavedAgentCursorPositionAge: TimeInterval = 300
 private let cursorOverlayFrameInterval: TimeInterval = 1.0 / 60.0
 
@@ -109,6 +138,11 @@ struct LockedUseInstallerStatus {
     let state: String
     let message: String
     let path: String?
+}
+
+struct LockedUseAuthorizationDaemonInvocation {
+    let launcherPid: pid_t
+    let launcherPath: String
 }
 
 final class AgentCursorView: NSView {
@@ -236,8 +270,23 @@ enum HelperError: Error, CustomStringConvertible {
 }
 
 func main() {
+    if CommandLine.arguments.contains(lockedUseAuthorizationProtocolVersionArgument) {
+        print(lockedUseAuthorizationProtocolVersion)
+        exit(EXIT_SUCCESS)
+    }
     if CommandLine.arguments.contains(cursorOverlayDaemonArgument) {
         runAgentCursorOverlayDaemon()
+    }
+    if CommandLine.arguments.contains(lockedUseAuthorizationDaemonArgument) {
+        do {
+            let invocation = try lockedUseAuthorizationDaemonInvocation()
+            try requireTrustedLockedUseAuthorizationDaemonLaunch(invocation)
+            let turnToken = try readLockedUseAuthorizationDaemonTurnToken()
+            runLockedUseAuthorizationDaemon(turnToken: turnToken)
+        } catch {
+            fputs("ERROR: \(error)\n", stderr)
+            exit(EXIT_FAILURE)
+        }
     }
 
     do {
@@ -250,8 +299,38 @@ func main() {
     }
 }
 
+func lockedUseAuthorizationDaemonInvocation() throws -> LockedUseAuthorizationDaemonInvocation {
+    guard let argumentIndex = CommandLine.arguments.firstIndex(of: lockedUseAuthorizationDaemonArgument),
+          CommandLine.arguments.count > argumentIndex + 2 else {
+        throw HelperError.message("Locked Computer Use authorization daemon launch is missing required credentials.")
+    }
+    let launcherPidValue = CommandLine.arguments[argumentIndex + 1]
+    let launcherPath = CommandLine.arguments[argumentIndex + 2]
+    guard let launcherPid = Int32(launcherPidValue),
+          URL(fileURLWithPath: launcherPath).lastPathComponent == helperExecutableName else {
+        throw HelperError.message("Locked Computer Use authorization daemon launch received invalid credentials.")
+    }
+    return LockedUseAuthorizationDaemonInvocation(
+        launcherPid: launcherPid,
+        launcherPath: launcherPath
+    )
+}
+
+func readLockedUseAuthorizationDaemonTurnToken() throws -> String {
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    guard let token = String(data: input, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          isValidLockedUseToken(token) else {
+        throw HelperError.message("Locked Computer Use authorization daemon launch received an invalid active-turn token.")
+    }
+    return token
+}
+
 func handle(_ request: Request) throws -> Response {
-    if request.command != "list_apps", request.command != "status" {
+    if request.command != "list_apps",
+       request.command != "status",
+       request.command != "locked_use_begin",
+       request.command != "locked_use_end",
+       request.command != "locked_use_authorization_probe" {
         try requireUnlockedDesktop()
     }
 
@@ -260,6 +339,12 @@ func handle(_ request: Request) throws -> Response {
         return try listApps()
     case "status":
         return status()
+    case "locked_use_begin":
+        return try beginLockedUse(request)
+    case "locked_use_end":
+        return try endLockedUse(request)
+    case "locked_use_authorization_probe":
+        return try probeLockedUseAuthorizationServer(request)
     case "get_app_state":
         return try getAppState(request)
     case "click":
@@ -288,15 +373,17 @@ func status() -> Response {
     let accessibilityGranted = AXIsProcessTrusted()
     let screenRecordingGranted = screenRecordingStatus()
     let installerStatus = lockedUseInstallerStatus()
-    let lockSupport = "not_enabled"
+    let lockSupport = installerStatus.state == "installed" ? "enabled" : "not_enabled"
     let lockSupportMessage = lockedUseMessage(for: installerStatus)
+    let daemonActive = isLockedUseAuthorizationDaemonRunning()
 
     var text = "Computer Use status (Pi GUI)\n"
     text += "Desktop: \(locked ? "locked" : "unlocked")\n"
     text += "Accessibility: \(accessibilityGranted ? "granted" : "not granted")\n"
     text += "Screen Recording: \(screenRecordingGranted)\n"
-    text += "Locked Computer Use: not enabled\n"
+    text += "Locked Computer Use: \(lockSupport)\n"
     text += "Locked Computer Use Installer: \(installerStatus.state)\n"
+    text += "Locked Computer Use Authorization Service: \(daemonActive ? "active" : "inactive")\n"
     text += lockSupportMessage
 
     var details = [
@@ -304,6 +391,7 @@ func status() -> Response {
         "accessibility": accessibilityGranted ? "granted" : "denied",
         "screenRecording": screenRecordingGranted,
         "lockedUse": lockSupport,
+        "lockedUseAuthorizationService": daemonActive ? "active" : "inactive",
         "lockedUseInstaller": installerStatus.state,
         "lockedUseMessage": lockSupportMessage,
     ]
@@ -322,7 +410,7 @@ func status() -> Response {
 func lockedUseMessage(for installerStatus: LockedUseInstallerStatus) -> String {
     switch installerStatus.state {
     case "installed":
-        return "Locked Computer Use authorization plug-in is installed, but pi-gui has not enabled the active-turn authorization service yet, so app control still pauses while the desktop is locked."
+        return "Locked Computer Use is enabled. When the Mac is locked, pi-gui will use a guarded active-turn authorization service and relock when the turn ends."
     case "partial":
         return "Locked Computer Use authorization plug-in setup is partially installed. Reinstall or uninstall it before enabling locked computer use."
     case "not-installed":
@@ -334,7 +422,23 @@ func lockedUseMessage(for installerStatus: LockedUseInstallerStatus) -> String {
     }
 }
 
+func lockedUseUnavailableMessage(for installerStatus: LockedUseInstallerStatus) -> String {
+    if installerStatus.state == "partial" {
+        return "Computer Use is unavailable while the Mac is locked because Locked Computer Use is partially installed. \(installerStatus.message) Reinstall or uninstall Locked Computer Use, then retry."
+    }
+    return "Computer Use is unavailable while the Mac is locked because Locked Computer Use is not enabled. Enable the locked Computer Use authorization plug-in, then retry."
+}
+
 func lockedUseInstallerStatus() -> LockedUseInstallerStatus {
+    if let forcedState = ProcessInfo.processInfo.environment[testLockedUseInstallerStateEnv],
+       ["installed", "partial", "not-installed"].contains(forcedState) {
+        return LockedUseInstallerStatus(
+            state: forcedState,
+            message: "Forced test locked-use installer state: \(forcedState).",
+            path: nil
+        )
+    }
+
     guard let installerPath = ProcessInfo.processInfo.environment[lockedUseInstallerPathEnv],
           !installerPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return LockedUseInstallerStatus(
@@ -378,6 +482,14 @@ func lockedUseInstallerStatus() -> LockedUseInstallerStatus {
     }
 
     if output.contains("OK: installed") {
+        if let configuredPath = configuredLockedUseHelperExecutablePath(),
+           !lockedUseHelperSupportsActiveTurnProtocol(configuredPath) {
+            return LockedUseInstallerStatus(
+                state: "partial",
+                message: "Installed Locked Computer Use helper is stale and must be reinstalled to support active-turn authorization.",
+                path: installerPath
+            )
+        }
         return LockedUseInstallerStatus(state: "installed", message: output, path: installerPath)
     }
     if output.contains("OK: partial") {
@@ -400,6 +512,374 @@ func requireUnlockedDesktop() throws {
     }
 }
 
+func beginLockedUse(_ request: Request) throws -> Response {
+    if !isScreenLocked() {
+        return Response(
+            ok: true,
+            content: [.text("Desktop is already unlocked.")],
+            details: [
+                "lockedUseLease": "not_needed",
+                "screenLocked": "false",
+            ],
+            error: nil
+        )
+    }
+
+    let installerStatus = lockedUseInstallerStatus()
+    let lockedUseEnabled = installerStatus.state == "installed"
+    guard lockedUseEnabled else {
+        throw HelperError.message(lockedUseUnavailableMessage(for: installerStatus))
+    }
+
+    try requireTrustedLockedUseLauncher(request)
+    let turnToken = try requireLockedUseTurnToken(request)
+    try ensureLockedUseAuthorizationDaemon(turnToken: turnToken)
+    postLockScreenUnlockReturnKey()
+    if waitForDesktopUnlockOrTestAuthorization(timeout: lockedUseUnlockTimeout()) {
+        let didAuthorizeUnlock = lockedUseDaemonState() == "authorized"
+        if didAuthorizeUnlock {
+            writeLockedUseDaemonState("auto_unlocked")
+        } else {
+            stopLockedUseAuthorizationDaemon()
+        }
+        return lockedUseLeaseResponse(
+            state: didAuthorizeUnlock ? "auto_unlocked" : "user_unlocked",
+            message: didAuthorizeUnlock
+                ? "Locked Computer Use unlocked the desktop for this active turn."
+                : "The desktop was unlocked manually before Locked Computer Use authorization completed.",
+            installerStatus: installerStatus,
+            screenLocked: false,
+            lockedUseEnabled: true
+        )
+    }
+
+    stopLockedUseAuthorizationDaemon()
+    throw HelperError.message(
+        "The Mac is locked and automatic Locked Computer Use unlock did not complete. Ask the user to unlock the Mac manually before continuing."
+    )
+}
+
+func endLockedUse(_ request: Request) throws -> Response {
+    try requireTrustedLockedUseLauncher(request)
+    let turnToken = try requireLockedUseTurnToken(request)
+    if let activeTurnToken = lockedUseTurnToken(), activeTurnToken != turnToken {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the turn token does not match the active lease.")
+    }
+
+    let shouldRelock = shouldRelockAutoUnlockedDesktop()
+    stopLockedUseAuthorizationDaemon()
+    if shouldRelock {
+        lockDesktop()
+    }
+
+    return Response(
+        ok: true,
+        content: [.text("Locked Computer Use lease ended.")],
+        details: [
+            "lockedUseLease": "ended",
+            "relockRequested": shouldRelock ? "true" : "false",
+        ],
+        error: nil
+    )
+}
+
+func probeLockedUseAuthorizationServer(_ request: Request) throws -> Response {
+    try requireTrustedLockedUseLauncher(request)
+    let turnToken = UUID().uuidString.replacingOccurrences(of: "-", with: "") + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    try ensureLockedUseAuthorizationDaemon(turnToken: turnToken)
+    defer {
+        stopLockedUseAuthorizationDaemon()
+    }
+    let response = try requestLockedUseAuthorization(turnToken: turnToken)
+    guard response == "ALLOW" else {
+        throw HelperError.message("Locked Computer Use authorization service returned \(response) instead of ALLOW.")
+    }
+    return Response(
+        ok: true,
+        content: [.text("Locked Computer Use authorization service accepted a guarded authorization probe.")],
+        details: [
+            "lockedUseAuthorizationService": "ok",
+            "authorizationResponse": response,
+            "socketPath": lockedUseSocketPath,
+        ],
+        error: nil
+    )
+}
+
+func lockedUseLeaseResponse(
+    state: String,
+    message: String,
+    installerStatus: LockedUseInstallerStatus,
+    screenLocked: Bool,
+    lockedUseEnabled: Bool
+) -> Response {
+    var details = [
+        "lockedUse": lockedUseEnabled ? "enabled" : "not_enabled",
+        "lockedUseInstaller": installerStatus.state,
+        "lockedUseLease": state,
+        "screenLocked": screenLocked ? "true" : "false",
+    ]
+    if let path = installerStatus.path {
+        details["lockedUseInstallerPath"] = path
+    }
+    return Response(ok: true, content: [.text(message)], details: details, error: nil)
+}
+
+func requireTrustedLockedUseLauncher(_ request: Request) throws {
+    let appToken = try requireLockedUseAppToken(request)
+    try requireTrustedLockedUseDesktopAncestor()
+    try requireDesktopLockedUseAuthorization(appToken: appToken)
+}
+
+func requireLockedUseAppToken(_ request: Request) throws -> String {
+    guard let token = request.locked_use_app_token,
+          isValidLockedUseToken(token) else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the app token is missing or invalid.")
+    }
+    return token
+}
+
+func requireLockedUseTurnToken(_ request: Request) throws -> String {
+    guard let token = request.locked_use_turn_token,
+          isValidLockedUseToken(token) else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the turn token is missing or invalid.")
+    }
+    return token
+}
+
+func isValidLockedUseToken(_ token: String) -> Bool {
+    token.count >= 32 && token.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+}
+
+func requireTrustedLockedUseAuthorizationDaemonLaunch(_ invocation: LockedUseAuthorizationDaemonInvocation) throws {
+    guard invocation.launcherPid == getppid() else {
+        throw HelperError.message("Locked Computer Use authorization daemon rejected a launch from an unexpected parent process.")
+    }
+    guard let launcherPath = processPath(pid: invocation.launcherPid),
+          standardizedPath(launcherPath) == standardizedPath(invocation.launcherPath) else {
+        throw HelperError.message("Locked Computer Use authorization daemon rejected an untrusted launcher path.")
+    }
+    guard URL(fileURLWithPath: launcherPath).lastPathComponent == helperExecutableName,
+          processSatisfiesCodeRequirement(pid: invocation.launcherPid, identifier: helperBundleIdentifier) else {
+        throw HelperError.message("Locked Computer Use authorization daemon rejected an untrusted launcher process.")
+    }
+    try requireTrustedLockedUseDesktopAncestor()
+}
+
+func requireTrustedLockedUseDesktopAncestor() throws {
+    guard let rawPid = ProcessInfo.processInfo.environment[lockedUseDesktopPidEnv],
+          let desktopPid = pid_t(rawPid.trimmingCharacters(in: .whitespacesAndNewlines)),
+          desktopPid > 1 else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the trusted pi-gui desktop process is missing.")
+    }
+    guard processHasAncestor(pid: getppid(), ancestorPid: desktopPid) else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the helper was not launched from pi-gui.")
+    }
+    guard let desktopPath = processPath(pid: desktopPid),
+          isTrustedPiGuiDesktopPath(desktopPath),
+          desktopPathMatchesExpectedEnvironment(desktopPath),
+          processSatisfiesCodeRequirement(pid: desktopPid, identifier: desktopBundleIdentifier) else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the trusted pi-gui desktop process could not be verified.")
+    }
+}
+
+func processHasAncestor(pid: pid_t, ancestorPid: pid_t) -> Bool {
+    var currentPid = pid
+    for _ in 0..<48 {
+        if currentPid == ancestorPid {
+            return true
+        }
+        guard let parentPid = parentPid(of: currentPid),
+              parentPid > 1,
+              parentPid != currentPid else {
+            return false
+        }
+        currentPid = parentPid
+    }
+    return false
+}
+
+func parentPid(of pid: pid_t) -> pid_t? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-o", "ppid=", "-p", "\(pid)"]
+
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle(forWritingAtPath: "/dev/null")
+
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+    let output = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    process.waitUntilExit()
+    guard process.terminationStatus == 0,
+          let parentPid = pid_t(output) else {
+        return nil
+    }
+    return parentPid
+}
+
+func isTrustedPiGuiDesktopPath(_ path: String) -> Bool {
+    let standardized = standardizedPath(path)
+    return standardized.contains(".app/Contents/MacOS/")
+        && URL(fileURLWithPath: standardized).lastPathComponent == "pi-gui"
+}
+
+func desktopPathMatchesExpectedEnvironment(_ actualPath: String) -> Bool {
+    guard let expectedPath = ProcessInfo.processInfo.environment[lockedUseDesktopPathEnv]?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !expectedPath.isEmpty else {
+        return false
+    }
+    return standardizedPath(actualPath) == standardizedPath(expectedPath)
+}
+
+func processSatisfiesCodeRequirement(pid: pid_t, identifier: String) -> Bool {
+    var code: SecCode?
+    let attributes = [kSecGuestAttributePid as String: NSNumber(value: pid)] as CFDictionary
+    let codeStatus = SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code)
+    guard codeStatus == errSecSuccess, let code else {
+        return false
+    }
+
+    var requirement: SecRequirement?
+    let requirementText = "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(expectedTeamIdentifier)\"" as CFString
+    let requirementStatus = SecRequirementCreateWithString(requirementText, SecCSFlags(), &requirement)
+    guard requirementStatus == errSecSuccess, let requirement else {
+        return false
+    }
+
+    return SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
+}
+
+func requireDesktopLockedUseAuthorization(appToken: String) throws {
+    let response = try requestDesktopLockedUseAuthorization(appToken: appToken)
+    guard response == "ALLOW" else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the app token is not active.")
+    }
+}
+
+func requestDesktopLockedUseAuthorization(appToken: String) throws -> String {
+    guard let socketPath = ProcessInfo.processInfo.environment[lockedUseAuthorizationSocketEnv]?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !socketPath.isEmpty else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the trusted pi-gui desktop authorization service is missing.")
+    }
+
+    let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard clientFd >= 0 else {
+        throw HelperError.message("Could not create Locked Computer Use desktop authorization socket.")
+    }
+    defer {
+        close(clientFd)
+    }
+
+    var timeout = timeval(tv_sec: 2, tv_usec: 0)
+    setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    guard writeUnixSocketPath(socketPath, to: &address) else {
+        throw HelperError.message("Locked Computer Use desktop authorization socket path is too long.")
+    }
+
+    let connectStatus = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(clientFd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connectStatus == 0 else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the trusted pi-gui desktop authorization service could not be reached.")
+    }
+    guard socketPeerSatisfiesCodeRequirement(clientFd, identifier: desktopBundleIdentifier) else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the desktop authorization service is untrusted.")
+    }
+
+    let request = "authorize \(appToken)\n"
+    request.withCString { pointer in
+        _ = write(clientFd, pointer, strlen(pointer))
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 64)
+    let count = read(clientFd, &buffer, buffer.count - 1)
+    guard count > 0 else {
+        throw HelperError.message("Locked Computer Use active-turn authorization is unavailable because the trusted pi-gui desktop authorization service did not return a response.")
+    }
+    return String(decoding: buffer.prefix(Int(count)), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func socketPeerSatisfiesCodeRequirement(_ fd: Int32, identifier: String) -> Bool {
+    var token = audit_token_t()
+    var tokenLength = socklen_t(MemoryLayout<audit_token_t>.size)
+    let tokenStatus = withUnsafeMutablePointer(to: &token) { pointer in
+        pointer.withMemoryRebound(to: UInt8.self, capacity: MemoryLayout<audit_token_t>.size) { reboundPointer in
+            getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, reboundPointer, &tokenLength)
+        }
+    }
+    guard tokenStatus == 0, tokenLength == socklen_t(MemoryLayout<audit_token_t>.size) else {
+        return false
+    }
+
+    let tokenData = withUnsafeBytes(of: token) { rawBuffer in
+        Data(rawBuffer)
+    }
+    let attributes = [kSecGuestAttributeAudit as String: tokenData] as CFDictionary
+    var code: SecCode?
+    let codeStatus = SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code)
+    guard codeStatus == errSecSuccess, let code else {
+        return false
+    }
+
+    var requirement: SecRequirement?
+    let requirementText = "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(expectedTeamIdentifier)\"" as CFString
+    let requirementStatus = SecRequirementCreateWithString(requirementText, SecCSFlags(), &requirement)
+    guard requirementStatus == errSecSuccess, let requirement else {
+        return false
+    }
+
+    return SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
+}
+
+func processPath(pid: pid_t) -> String? {
+    var buffer = [CChar](repeating: 0, count: 4096)
+    let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+    guard count > 0 else {
+        return nil
+    }
+    return String(cString: buffer)
+}
+
+func standardizedPath(_ path: String) -> String {
+    URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+}
+
+func waitForDesktopUnlockOrTestAuthorization(timeout: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if ProcessInfo.processInfo.environment[testAssumeUnlockedAfterAuthorizationEnv] == "1",
+           lockedUseDaemonState() == "authorized" {
+            return true
+        }
+        if !isScreenLocked() {
+            return true
+        }
+        Thread.sleep(forTimeInterval: 0.08)
+    }
+    return !isScreenLocked()
+}
+
+func lockedUseUnlockTimeout() -> TimeInterval {
+    let rawValue = ProcessInfo.processInfo.environment[lockedUseUnlockTimeoutMsEnv] ?? ""
+    if let milliseconds = Double(rawValue), milliseconds > 0 {
+        return milliseconds / 1000
+    }
+    return defaultLockedUseUnlockTimeout
+}
+
 func isScreenLocked() -> Bool {
     if ProcessInfo.processInfo.environment[testForceLockedEnv] == "1" {
         return true
@@ -412,6 +892,35 @@ func isScreenLocked() -> Bool {
 
 func helperErrorDetails(for error: Error) -> [String: String]? {
     let message = String(describing: error)
+    if message.contains("Locked Computer Use is not enabled") {
+        return [
+            "errorCode": "desktop_locked",
+            "screenLocked": "true",
+            "lockedUse": "not_enabled",
+        ]
+    }
+    if message.contains("Locked Computer Use is partially installed")
+        || message.contains("must be reinstalled") {
+        return [
+            "errorCode": "desktop_locked",
+            "screenLocked": "true",
+            "lockedUse": "partial",
+        ]
+    }
+    if message.contains("automatic Locked Computer Use unlock did not complete") {
+        return [
+            "errorCode": "desktop_locked",
+            "screenLocked": "true",
+            "lockedUse": "enabled",
+        ]
+    }
+    if message.contains("active-turn authorization is unavailable") {
+        return [
+            "errorCode": "desktop_locked",
+            "screenLocked": "true",
+            "lockedUse": "enabled",
+        ]
+    }
     if message.contains("Mac is locked") {
         return [
             "errorCode": "desktop_locked",
@@ -1275,6 +1784,438 @@ func waitForAgentCursorGlide() {
         return
     }
     RunLoop.current.run(until: Date().addingTimeInterval(delay))
+}
+
+func ensureLockedUseAuthorizationDaemon(turnToken: String) throws {
+    if isLockedUseAuthorizationDaemonRunning(),
+       FileManager.default.fileExists(atPath: lockedUseSocketPath),
+       lockedUseTurnToken() == turnToken {
+        return
+    }
+
+    stopLockedUseAuthorizationDaemon()
+    cleanupLockedUseAuthorizationSocket()
+
+    let daemonExecutablePath = try lockedUseAuthorizationDaemonExecutablePath()
+    let launcherPid = getpid()
+    let launcherPath = CommandLine.arguments[0]
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: daemonExecutablePath)
+    process.arguments = [
+        lockedUseAuthorizationDaemonArgument,
+        "\(launcherPid)",
+        launcherPath,
+    ]
+    var environment = ProcessInfo.processInfo.environment
+    environment.removeValue(forKey: lockedUseAppTokenEnv)
+    process.environment = environment
+    let input = Pipe()
+    process.standardInput = input
+    process.standardOutput = FileHandle(forWritingAtPath: "/dev/null")
+    process.standardError = FileHandle(forWritingAtPath: "/dev/null")
+    try process.run()
+    input.fileHandleForWriting.write(Data("\(turnToken)\n".utf8))
+    try? input.fileHandleForWriting.close()
+    try "\(process.processIdentifier)".write(to: lockedUseDaemonPidFile, atomically: true, encoding: .utf8)
+
+    let deadline = Date().addingTimeInterval(1.5)
+    while Date() < deadline {
+        if isLockedUseAuthorizationDaemonRunning(),
+           FileManager.default.fileExists(atPath: lockedUseSocketPath),
+           lockedUseTurnToken() == turnToken {
+            return
+        }
+        Thread.sleep(forTimeInterval: 0.03)
+    }
+
+    throw HelperError.message("Locked Computer Use authorization service did not start.")
+}
+
+func lockedUseAuthorizationDaemonExecutablePath() throws -> String {
+    if let configuredPath = configuredLockedUseHelperExecutablePath(),
+       FileManager.default.isExecutableFile(atPath: configuredPath) {
+        guard lockedUseHelperSupportsActiveTurnProtocol(configuredPath) else {
+            throw HelperError.message(
+                "Locked Computer Use authorization service must be reinstalled because the installed helper does not support active-turn authorization."
+            )
+        }
+        return configuredPath
+    }
+    if ProcessInfo.processInfo.environment[testLockedUseInstallerStateEnv] == "installed"
+        || lockedUseInstallerStatus().state != "installed" {
+        return CommandLine.arguments[0]
+    }
+    throw HelperError.message("Locked Computer Use authorization service is not installed correctly because the configured helper copy is unavailable.")
+}
+
+func configuredLockedUseHelperExecutablePath() -> String? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: lockedUseConfigurationPath)),
+          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+          let dictionary = plist as? [String: Any],
+          let path = dictionary["helperExecutablePath"] as? String else {
+        return nil
+    }
+    let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmedPath.isEmpty ? nil : trimmedPath
+}
+
+func lockedUseHelperSupportsActiveTurnProtocol(_ helperPath: String) -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: helperPath)
+    process.arguments = [lockedUseAuthorizationProtocolVersionArgument]
+    process.standardInput = FileHandle(forReadingAtPath: "/dev/null")
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    do {
+        try process.run()
+    } catch {
+        return false
+    }
+    let deadline = Date().addingTimeInterval(2)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    if process.isRunning {
+        process.terminate()
+        process.waitUntilExit()
+        return false
+    }
+
+    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+    _ = stderr.fileHandleForReading.readDataToEndOfFile()
+
+    guard process.terminationStatus == 0 else {
+        return false
+    }
+    let output = String(decoding: stdoutData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    return output == lockedUseAuthorizationProtocolVersion
+}
+
+func runLockedUseAuthorizationDaemon(turnToken: String) -> Never {
+    let currentPid = getpid()
+    try? "\(currentPid)".write(to: lockedUseDaemonPidFile, atomically: true, encoding: .utf8)
+    try? FileManager.default.createDirectory(
+        atPath: lockedUseSocketDirectory,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700]
+    )
+    _ = chmod(lockedUseSocketDirectory, 0o700)
+    cleanupLockedUseAuthorizationSocket()
+    writeLockedUseTurnToken(turnToken)
+
+    let serverFd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard serverFd >= 0 else {
+        exitLockedUseAuthorizationDaemon(status: EXIT_FAILURE, serverFd: nil, currentPid: currentPid)
+    }
+    guard makeSocketNonBlocking(serverFd) else {
+        exitLockedUseAuthorizationDaemon(status: EXIT_FAILURE, serverFd: serverFd, currentPid: currentPid)
+    }
+
+    var timeout = timeval(tv_sec: 0, tv_usec: 200_000)
+    setsockopt(serverFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    guard writeUnixSocketPath(lockedUseSocketPath, to: &address) else {
+        exitLockedUseAuthorizationDaemon(status: EXIT_FAILURE, serverFd: serverFd, currentPid: currentPid)
+    }
+
+    let bindStatus = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(serverFd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard bindStatus == 0, listen(serverFd, 4) == 0 else {
+        exitLockedUseAuthorizationDaemon(status: EXIT_FAILURE, serverFd: serverFd, currentPid: currentPid)
+    }
+
+    let expiresAt = Date().addingTimeInterval(lockedUseLeaseSeconds())
+    while Date() < expiresAt {
+        let clientFd = accept(serverFd, nil, nil)
+        if clientFd < 0 {
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                Thread.sleep(forTimeInterval: 0.05)
+                continue
+            }
+            if errno == EINTR {
+                continue
+            }
+            continue
+        }
+        if makeSocketBlocking(clientFd), setLockedUseClientSocketTimeout(clientFd) {
+            handleLockedUseAuthorizationClient(clientFd, turnToken: turnToken)
+        }
+        close(clientFd)
+    }
+
+    exitLockedUseAuthorizationDaemon(status: EXIT_SUCCESS, serverFd: serverFd, currentPid: currentPid)
+}
+
+func makeSocketNonBlocking(_ fd: Int32) -> Bool {
+    let flags = fcntl(fd, F_GETFL, 0)
+    guard flags >= 0 else {
+        return false
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
+}
+
+func makeSocketBlocking(_ fd: Int32) -> Bool {
+    let flags = fcntl(fd, F_GETFL, 0)
+    guard flags >= 0 else {
+        return false
+    }
+    return fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0
+}
+
+func setLockedUseClientSocketTimeout(_ fd: Int32) -> Bool {
+    var timeout = timeval(tv_sec: 0, tv_usec: 200_000)
+    let readStatus = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    let writeStatus = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    return readStatus == 0 && writeStatus == 0
+}
+
+func exitLockedUseAuthorizationDaemon(status: Int32, serverFd: Int32?, currentPid: pid_t) -> Never {
+    relockAutoUnlockedDesktopIfNeeded()
+    if let serverFd, serverFd >= 0 {
+        close(serverFd)
+    }
+    cleanupLockedUseAuthorizationSocket()
+    clearLockedUseAuthorizationDaemonPid(currentPid)
+    try? FileManager.default.removeItem(at: lockedUseDaemonStateFile)
+    try? FileManager.default.removeItem(atPath: lockedUseTurnTokenPath)
+    exit(status)
+}
+
+@discardableResult
+func relockAutoUnlockedDesktopIfNeeded() -> Bool {
+    let shouldRelock = shouldRelockAutoUnlockedDesktop()
+    if shouldRelock {
+        lockDesktop()
+    }
+    return shouldRelock
+}
+
+func shouldRelockAutoUnlockedDesktop() -> Bool {
+    lockedUseDaemonStateRequiresRelock(lockedUseDaemonState())
+        && ProcessInfo.processInfo.environment[testSkipRelockEnv] != "1"
+        && !isScreenLocked()
+}
+
+func lockedUseDaemonStateRequiresRelock(_ state: String?) -> Bool {
+    state == "auto_unlocked" || state == "authorized"
+}
+
+func handleLockedUseAuthorizationClient(_ clientFd: Int32, turnToken: String) {
+    var buffer = [UInt8](repeating: 0, count: 160)
+    let count = read(clientFd, &buffer, buffer.count - 1)
+    guard count > 0 else {
+        return
+    }
+    let request = String(decoding: buffer.prefix(Int(count)), as: UTF8.self)
+    guard request.trimmingCharacters(in: .whitespacesAndNewlines) == "authorize \(turnToken)" else {
+        writeLockedUseAuthorizationResponse("DENY\n", to: clientFd)
+        return
+    }
+
+    writeLockedUseDaemonState("authorized")
+    writeLockedUseAuthorizationResponse("ALLOW\n", to: clientFd)
+}
+
+func writeLockedUseAuthorizationResponse(_ response: String, to clientFd: Int32) {
+    response.withCString { pointer in
+        _ = write(clientFd, pointer, strlen(pointer))
+    }
+}
+
+func requestLockedUseAuthorization(turnToken: String) throws -> String {
+    let clientFd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard clientFd >= 0 else {
+        throw HelperError.message("Could not create Locked Computer Use authorization probe socket.")
+    }
+    defer {
+        close(clientFd)
+    }
+
+    var timeout = timeval(tv_sec: 2, tv_usec: 0)
+    setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    guard writeUnixSocketPath(lockedUseSocketPath, to: &address) else {
+        throw HelperError.message("Locked Computer Use authorization probe socket path is too long.")
+    }
+
+    let connectStatus = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(clientFd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connectStatus == 0 else {
+        throw HelperError.message("Could not connect to Locked Computer Use authorization service.")
+    }
+
+    let request = "authorize \(turnToken)\n"
+    request.withCString { pointer in
+        _ = write(clientFd, pointer, strlen(pointer))
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 64)
+    let count = read(clientFd, &buffer, buffer.count - 1)
+    guard count > 0 else {
+        throw HelperError.message("Locked Computer Use authorization service did not return a response.")
+    }
+    return String(decoding: buffer.prefix(Int(count)), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func writeUnixSocketPath(_ path: String, to address: inout sockaddr_un) -> Bool {
+    let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+    guard path.utf8.count < maxLength else {
+        return false
+    }
+
+    return path.withCString { pathPointer in
+        withUnsafeMutablePointer(to: &address.sun_path) { tuplePointer in
+            tuplePointer.withMemoryRebound(to: CChar.self, capacity: maxLength) { destination in
+                strncpy(destination, pathPointer, maxLength)
+                destination[maxLength - 1] = 0
+            }
+        }
+        return true
+    }
+}
+
+func postLockScreenUnlockReturnKey() {
+    let returnKeyCode: CGKeyCode = 36
+    let source = CGEventSource(stateID: .hidSystemState)
+    let keyDown = CGEvent(keyboardEventSource: source, virtualKey: returnKeyCode, keyDown: true)
+    let keyUp = CGEvent(keyboardEventSource: source, virtualKey: returnKeyCode, keyDown: false)
+    keyDown?.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.04)
+    keyUp?.post(tap: .cghidEventTap)
+}
+
+func stopLockedUseAuthorizationDaemon() {
+    if let pid = readLockedUseAuthorizationDaemonPid(), pid > 0 {
+        if isLockedUseAuthorizationDaemonProcess(pid) {
+            Darwin.kill(pid, SIGTERM)
+        }
+    }
+    cleanupLockedUseAuthorizationSocket()
+    try? FileManager.default.removeItem(at: lockedUseDaemonPidFile)
+    try? FileManager.default.removeItem(at: lockedUseDaemonStateFile)
+    try? FileManager.default.removeItem(atPath: lockedUseTurnTokenPath)
+}
+
+func cleanupLockedUseAuthorizationSocket() {
+    try? FileManager.default.removeItem(atPath: lockedUseSocketPath)
+}
+
+func isLockedUseAuthorizationDaemonRunning() -> Bool {
+    guard let pid = readLockedUseAuthorizationDaemonPid(), pid > 0 else {
+        return false
+    }
+    if Darwin.kill(pid, 0) == 0 || errno == EPERM {
+        if isLockedUseAuthorizationDaemonProcess(pid) {
+            return true
+        }
+        try? FileManager.default.removeItem(at: lockedUseDaemonPidFile)
+        return false
+    }
+    try? FileManager.default.removeItem(at: lockedUseDaemonPidFile)
+    return false
+}
+
+func isLockedUseAuthorizationDaemonProcess(_ pid: pid_t) -> Bool {
+    guard let executablePath = processPath(pid: pid),
+          URL(fileURLWithPath: executablePath).lastPathComponent == helperExecutableName,
+          let command = processCommand(pid: pid) else {
+        return false
+    }
+    return command.contains(lockedUseAuthorizationDaemonArgument)
+}
+
+func processCommand(pid: pid_t) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-o", "command=", "-p", "\(pid)"]
+
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle(forWritingAtPath: "/dev/null")
+
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+    let output = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    process.waitUntilExit()
+    guard process.terminationStatus == 0, !output.isEmpty else {
+        return nil
+    }
+    return output
+}
+
+func readLockedUseAuthorizationDaemonPid() -> pid_t? {
+    guard let rawValue = try? String(contentsOf: lockedUseDaemonPidFile, encoding: .utf8),
+          let pid = pid_t(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        return nil
+    }
+    return pid
+}
+
+func clearLockedUseAuthorizationDaemonPid(_ pid: pid_t) {
+    if readLockedUseAuthorizationDaemonPid() == pid {
+        try? FileManager.default.removeItem(at: lockedUseDaemonPidFile)
+    }
+}
+
+func writeLockedUseDaemonState(_ state: String) {
+    try? state.write(to: lockedUseDaemonStateFile, atomically: true, encoding: .utf8)
+}
+
+func writeLockedUseTurnToken(_ token: String) {
+    FileManager.default.createFile(atPath: lockedUseTurnTokenPath, contents: Data(token.utf8), attributes: [
+        .posixPermissions: 0o600,
+    ])
+    _ = chmod(lockedUseTurnTokenPath, 0o600)
+}
+
+func lockedUseTurnToken() -> String? {
+    try? String(contentsOfFile: lockedUseTurnTokenPath, encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func lockedUseDaemonState() -> String? {
+    try? String(contentsOf: lockedUseDaemonStateFile, encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func lockedUseLeaseSeconds() -> TimeInterval {
+    let rawValue = ProcessInfo.processInfo.environment[lockedUseLeaseSecondsEnv] ?? ""
+    if let seconds = Double(rawValue), seconds > 0 {
+        return seconds
+    }
+    return defaultLockedUseLeaseSeconds
+}
+
+func lockDesktop() {
+    let lockCommand = "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: lockCommand)
+    process.arguments = ["-suspend"]
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return
+    }
 }
 
 func showTransientAgentCursor(at point: CGPoint, pressed: Bool) {

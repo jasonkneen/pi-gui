@@ -1,15 +1,29 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import net from "node:net";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import {
+  createComputerUseExtension,
+  type ComputerUseRuntimeConfig,
+} from "../../../packages/computer-use-extension/src/index";
 
 const computerUsePackageName = "@pi-gui/computer-use-extension";
 const helperEnv = "PI_GUI_COMPUTER_USE_HELPER_PATH";
 const lockedUseInstallerEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH";
+const lockedUseAppTokenEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN";
+const lockedUseDesktopPidEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PID";
+const lockedUseDesktopPathEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PATH";
+const lockedUseAuthorizationSocketEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET";
 const disableEnv = "PI_GUI_DISABLE_BUILTIN_COMPUTER_USE";
 const helperExecutableName = "pi-gui-computer-use-helper";
 const helperAppName = "pi-gui Computer Use.app";
 const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
+const lockedUseAuthorizationSocketDirectory = "/tmp/pi-gui-cu";
+let lockedUseAuthorizationServer: net.Server | undefined;
+let lockedUseAppToken: string | undefined;
 
 interface ConfigureComputerUseRuntimeOptions {
   readonly isPackaged: boolean;
@@ -17,14 +31,45 @@ interface ConfigureComputerUseRuntimeOptions {
   readonly execPath: string;
 }
 
-export async function configureComputerUseRuntime(options: ConfigureComputerUseRuntimeOptions): Promise<void> {
+export interface ComputerUseRuntimeDriverOptions {
+  readonly extensionFactories: readonly ExtensionFactory[];
+  readonly inlineExtensionMetadata: readonly {
+    readonly displayName: string;
+    readonly description?: string;
+  }[];
+}
+
+export async function configureComputerUseRuntime(
+  options: ConfigureComputerUseRuntimeOptions,
+): Promise<ComputerUseRuntimeDriverOptions | undefined> {
+  await removeComputerUsePackageEntry(resolveAgentDir(), resolveComputerUsePackageDir(options));
+
   if (process.env[disableEnv] === "1") {
-    return;
+    return undefined;
   }
 
   configureHelperPath(options);
   configureLockedUseInstallerPath(options);
-  await ensureComputerUsePackageEnabled(resolveAgentDir(), resolveComputerUsePackageDir(options));
+  const appToken = configureLockedUseAppToken();
+  const desktopProcess = configureLockedUseDesktopProcess();
+  const authorizationSocket = await tryConfigureLockedUseAuthorizationBroker(appToken);
+  const runtimeConfig: ComputerUseRuntimeConfig = {
+    helperPath: process.env[helperEnv]?.trim() || undefined,
+    lockedUseAppToken: appToken,
+    lockedUseDesktopPid: desktopProcess.pid,
+    lockedUseDesktopPath: desktopProcess.path,
+    lockedUseAuthorizationSocket: authorizationSocket,
+  };
+
+  return {
+    extensionFactories: [createComputerUseExtension(runtimeConfig)],
+    inlineExtensionMetadata: [
+      {
+        displayName: "Computer Use",
+        description: "Control Mac apps from pi",
+      },
+    ],
+  };
 }
 
 function configureHelperPath(options: ConfigureComputerUseRuntimeOptions): void {
@@ -43,6 +88,93 @@ function configureLockedUseInstallerPath(options: ConfigureComputerUseRuntimeOpt
 
   const candidates = computerUseLockedUseInstallerCandidates(options);
   process.env[lockedUseInstallerEnv] = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+function configureLockedUseAppToken(): string {
+  lockedUseAppToken ??= process.env[lockedUseAppTokenEnv]?.trim() || randomBytes(32).toString("hex");
+  scrubLockedUsePrivateProcessEnv();
+  return lockedUseAppToken;
+}
+
+function configureLockedUseDesktopProcess(): { pid: string; path: string } {
+  scrubLockedUsePrivateProcessEnv();
+  return {
+    pid: `${process.pid}`,
+    path: process.execPath,
+  };
+}
+
+async function configureLockedUseAuthorizationBroker(appToken: string): Promise<string | undefined> {
+  scrubLockedUsePrivateProcessEnv();
+  if (process.platform !== "darwin") {
+    return undefined;
+  }
+
+  const socketPath = path.join(lockedUseAuthorizationSocketDirectory, `auth-${process.pid}.sock`);
+  await mkdir(lockedUseAuthorizationSocketDirectory, { recursive: true, mode: 0o700 });
+  await chmod(lockedUseAuthorizationSocketDirectory, 0o700).catch(() => undefined);
+  await rm(socketPath, { force: true });
+
+  lockedUseAuthorizationServer?.close();
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    let settled = false;
+    const finish = (allowed: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.end(allowed ? "ALLOW\n" : "DENY\n");
+    };
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 256) {
+        finish(false);
+        return;
+      }
+      if (buffer.includes("\n")) {
+        finish(buffer.trim() === `authorize ${appToken}`);
+      }
+    });
+    socket.on("end", () => finish(buffer.trim() === `authorize ${appToken}`));
+    socket.on("error", () => undefined);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  server.unref();
+  lockedUseAuthorizationServer = server;
+  await chmod(socketPath, 0o600).catch(() => undefined);
+  process.once("exit", () => {
+    try {
+      rmSync(socketPath, { force: true });
+    } catch {
+      // Best-effort cleanup for a per-process Unix socket.
+    }
+  });
+  return socketPath;
+}
+
+async function tryConfigureLockedUseAuthorizationBroker(appToken: string): Promise<string | undefined> {
+  try {
+    return await configureLockedUseAuthorizationBroker(appToken);
+  } catch (error) {
+    console.warn(`Locked Computer Use authorization broker is unavailable: ${errorMessage(error)}`);
+    return undefined;
+  }
+}
+
+function scrubLockedUsePrivateProcessEnv(): void {
+  delete process.env[lockedUseAppTokenEnv];
+  delete process.env[lockedUseDesktopPidEnv];
+  delete process.env[lockedUseDesktopPathEnv];
+  delete process.env[lockedUseAuthorizationSocketEnv];
 }
 
 function computerUseHelperCandidates(options: ConfigureComputerUseRuntimeOptions): string[] {
@@ -153,25 +285,19 @@ function isModuleResolutionError(error: unknown): boolean {
   );
 }
 
-async function ensureComputerUsePackageEnabled(agentDir: string, packageDir: string): Promise<void> {
-  await mkdir(agentDir, { recursive: true });
+async function removeComputerUsePackageEntry(agentDir: string, packageDir: string): Promise<void> {
   const settingsPath = path.join(agentDir, "settings.json");
   const settings = await readSettings(settingsPath);
-  const currentPackages = Array.isArray(settings.packages) ? settings.packages : [];
-  const nextPackages = [
-    ...currentPackages.filter((entry) => !isComputerUsePackageEntry(entry, packageDir)),
-    packageDir,
-  ];
-
-  const changed =
-    !Array.isArray(settings.packages) ||
-    settings.packages.length !== nextPackages.length ||
-    settings.packages.some((entry, index) => entry !== nextPackages[index]);
-
-  if (!changed) {
+  if (!Array.isArray(settings.packages)) {
     return;
   }
 
+  const nextPackages = settings.packages.filter((entry) => !isComputerUsePackageEntry(entry, packageDir, agentDir));
+  if (nextPackages.length === settings.packages.length) {
+    return;
+  }
+
+  await mkdir(agentDir, { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify({ ...settings, packages: nextPackages }, null, 2)}\n`, "utf8");
 }
 
@@ -190,16 +316,56 @@ async function readSettings(settingsPath: string): Promise<Record<string, unknow
   return {};
 }
 
-function isComputerUsePackageEntry(entry: unknown, packageDir: string): boolean {
-  const source = packageEntrySource(entry);
+function isComputerUsePackageEntry(entry: unknown, packageDir: string, agentDir: string): boolean {
+  const source = packageEntrySource(entry)?.trim();
   if (!source) {
     return false;
   }
+  if (
+    source === computerUsePackageName ||
+    source === `npm:${computerUsePackageName}` ||
+    source.startsWith(`npm:${computerUsePackageName}@`)
+  ) {
+    return true;
+  }
+  if (isRemotePackageSource(source)) {
+    return false;
+  }
+
+  const resolvedSource = resolvePackageSourcePath(source, agentDir);
   return (
-    path.resolve(expandHome(source)) === path.resolve(packageDir) ||
-    source.includes(computerUsePackageName) ||
-    path.basename(source) === "computer-use-extension"
+    resolvedSource === path.resolve(packageDir) ||
+    isPackagedComputerUsePackagePath(resolvedSource) ||
+    packageManifestName(resolvedSource) === computerUsePackageName
   );
+}
+
+function isRemotePackageSource(source: string): boolean {
+  return /^(git|github|https?|ssh):/.test(source);
+}
+
+function resolvePackageSourcePath(source: string, agentDir: string): string {
+  const expanded = expandHome(source);
+  return path.resolve(path.isAbsolute(expanded) ? expanded : path.join(agentDir, expanded));
+}
+
+function isPackagedComputerUsePackagePath(sourcePath: string): boolean {
+  const normalized = sourcePath.split(path.sep).join("/");
+  return normalized.endsWith(".app/Contents/Resources/app.asar/out/computer-use-extension");
+}
+
+function packageManifestName(sourcePath: string): string | undefined {
+  try {
+    const raw = readFileSync(path.join(sourcePath, "package.json"), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const name = (parsed as { name?: unknown }).name;
+      return typeof name === "string" ? name : undefined;
+    }
+  } catch {
+    // Missing or invalid local packages are not pi-gui Computer Use packages.
+  }
+  return undefined;
 }
 
 function packageEntrySource(entry: unknown): string | undefined {
@@ -215,4 +381,8 @@ function packageEntrySource(entry: unknown): string | undefined {
 
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

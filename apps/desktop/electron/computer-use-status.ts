@@ -10,6 +10,12 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const helperPathEnv = "PI_GUI_COMPUTER_USE_HELPER_PATH";
+const computerUsePrivateEnvKeys = [
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PID",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PATH",
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET",
+];
 const statusOverrideEnv = "PI_APP_TEST_COMPUTER_USE_STATUS_JSON";
 const settingsLogPathEnv = "PI_APP_TEST_COMPUTER_USE_SETTINGS_LOG_PATH";
 const helperStatusTimeoutMs = 5_000;
@@ -122,7 +128,7 @@ function textContent(response: HelperResponse): string | undefined {
 
 function runHelper(helperPath: string, request: Record<string, unknown>): Promise<HelperResponse> {
   return new Promise((resolve, reject) => {
-    const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"], env: helperEnvironment() });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -167,4 +173,12 @@ function runHelper(helperPath: string, request: Record<string, unknown>): Promis
     });
     child.stdin.end(`${JSON.stringify(request)}\n`);
   });
+}
+
+function helperEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of computerUsePrivateEnvKeys) {
+    delete env[key];
+  }
+  return env;
 }

@@ -46,6 +46,7 @@ export function ExtensionsView({
   }, [extensions, query]);
   const selectedExtension =
     filteredExtensions.find((extension) => extension.path === selectedExtensionPath) ?? filteredExtensions[0];
+  const selectedExtensionCanBeManaged = selectedExtension ? isManageableExtension(selectedExtension) : false;
   const selectedCompatibilityRecords = useMemo(
     () =>
       selectedExtension
@@ -153,18 +154,20 @@ export function ExtensionsView({
                     <DetailItem label="Base dir" value={selectedExtension.sourceInfo.baseDir} mono />
                   ) : null}
                 </div>
-                <div className="skill-detail__actions">
-                  <button className="button button--secondary" type="button" onClick={() => onOpenExtensionFolder(selectedExtension.path)}>
-                    Open folder
-                  </button>
-                  <button
-                    className="button button--secondary"
-                    type="button"
-                    onClick={() => onToggleExtension(selectedExtension.path, !selectedExtension.enabled)}
-                  >
-                    {selectedExtension.enabled ? "Disable" : "Enable"}
-                  </button>
-                </div>
+                {selectedExtensionCanBeManaged ? (
+                  <div className="skill-detail__actions">
+                    <button className="button button--secondary" type="button" onClick={() => onOpenExtensionFolder(selectedExtension.path)}>
+                      Open folder
+                    </button>
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      onClick={() => onToggleExtension(selectedExtension.path, !selectedExtension.enabled)}
+                    >
+                      {selectedExtension.enabled ? "Disable" : "Enable"}
+                    </button>
+                  </div>
+                ) : null}
 
                 <ExtensionContributionSection title="Commands" items={selectedExtension.commands} emptyLabel="No commands contributed." />
                 <ExtensionCompatibilitySection
@@ -184,6 +187,10 @@ export function ExtensionsView({
       </div>
     </section>
   );
+}
+
+function isManageableExtension(extension: RuntimeExtensionRecord): boolean {
+  return extension.sourceInfo.scope === "project" || extension.sourceInfo.scope === "user";
 }
 
 function DetailItem({

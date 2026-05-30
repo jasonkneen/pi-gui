@@ -4,7 +4,9 @@
 #include <Security/SecRequirement.h>
 #include <bsm/libbsm.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -13,6 +15,7 @@
 #include <unistd.h>
 
 #define PI_GUI_LOCKED_USE_SOCKET_PATH "/tmp/com.pi-gui.desktop.computer-use/LockScreenLoginAuthorization.sock"
+#define PI_GUI_LOCKED_USE_TOKEN_PATH "/tmp/com.pi-gui.desktop.computer-use/active-turn-token"
 #define PI_GUI_LOCKED_USE_EXPECTED_IDENTIFIER "com.pi-gui.desktop.computer-use-helper"
 #define PI_GUI_LOCKED_USE_EXPECTED_TEAM_IDENTIFIER "P2MBURJVUW"
 #define PI_GUI_LOCKED_USE_CONFIGURATION_PATH "/Library/Application Support/PiGuiComputerUseAuthorizationPlugin/configuration.plist"
@@ -45,6 +48,7 @@ static bool codeSatisfiesExpectedRequirement(SecCodeRef code);
 static bool stringEqualsCFString(CFStringRef lhs, CFStringRef rhs);
 static CFStringRef copyConfiguredHelperPath(void);
 static CFStringRef copyCodePath(SecCodeRef code);
+static bool readActiveTurnToken(char *buffer, size_t bufferLength);
 static bool readAllowResponse(int fd);
 
 OSStatus AuthorizationPluginCreate(
@@ -150,9 +154,20 @@ static bool requestLoginAuthorization(void) {
         return false;
     }
 
-    const char request[] = "authorize\n";
-    ssize_t written = write(fd, request, sizeof(request) - 1);
-    if (written != (ssize_t)(sizeof(request) - 1)) {
+    char token[96];
+    if (!readActiveTurnToken(token, sizeof(token))) {
+        close(fd);
+        return false;
+    }
+
+    char request[128];
+    int requestLength = snprintf(request, sizeof(request), "authorize %s\n", token);
+    if (requestLength <= 0 || requestLength >= (int)sizeof(request)) {
+        close(fd);
+        return false;
+    }
+    ssize_t written = write(fd, request, (size_t)requestLength);
+    if (written != (ssize_t)requestLength) {
         close(fd);
         return false;
     }
@@ -307,6 +322,30 @@ static CFStringRef copyCodePath(SecCodeRef code) {
     CFStringRef path = CFURLCopyFileSystemPath(codeURL, kCFURLPOSIXPathStyle);
     CFRelease(codeURL);
     return path;
+}
+
+static bool readActiveTurnToken(char *buffer, size_t bufferLength) {
+    if (buffer == NULL || bufferLength < 33) {
+        return false;
+    }
+
+    int fd = open(PI_GUI_LOCKED_USE_TOKEN_PATH, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+
+    ssize_t count = read(fd, buffer, bufferLength - 1);
+    close(fd);
+    if (count < 32) {
+        return false;
+    }
+
+    buffer[count] = '\0';
+    while (count > 0 && (buffer[count - 1] == '\n' || buffer[count - 1] == '\r' || buffer[count - 1] == ' ' || buffer[count - 1] == '\t')) {
+        buffer[count - 1] = '\0';
+        count--;
+    }
+    return count >= 32;
 }
 
 static bool readAllowResponse(int fd) {

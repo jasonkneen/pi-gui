@@ -22,6 +22,7 @@ const helperExecutableName = "pi-gui-computer-use-helper";
 const helperAppName = "pi-gui Computer Use.app";
 const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
 const authorizationPluginBundleName = "PiGuiComputerUseAuthorizationPlugin.bundle";
+const helperSwiftSourcePath = join(process.cwd(), "apps", "desktop", "resources", "computer-use-helper.swift");
 const lockedUseInstallerSourcePath = join(
   process.cwd(),
   "apps",
@@ -115,6 +116,16 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_LOCKED_USE_INSTALLER_STATE");
+  expect(helperSource).toContain("active-turn-token");
+  expect(helperSource).toContain("--lock-screen-authorization-daemon");
+  expect(helperSource).toContain("--lock-screen-authorization-protocol-version");
+  expect(helperSource).toContain("pi-gui-computer-use-active-turn-v1");
+  expect(helperSource).toContain("LockScreenLoginAuthorization.sock");
+  expect(helperSource).toContain("configuration.plist");
+  expect(helperSource).toContain("helperExecutablePath");
   expect(helperSource).toContain("CGRequestScreenCaptureAccess");
   expect(helperSource).toContain("--cursor-overlay-daemon");
   expect(helperSource).toContain("AXUIElementCopyElementAtPosition");
@@ -122,6 +133,29 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("target window screenshot is unavailable");
   expect(helperSource).toContain("active-turn authorization service");
   expect(helperSource).toContain("waitForFrontmost");
+  const helperSwiftSource = await readFile(helperSwiftSourcePath, "utf8");
+  expect(helperSwiftSource).toContain("locked_use_begin");
+  expect(helperSwiftSource).toContain("locked_use_end");
+  expect(helperSwiftSource).toContain("locked_use_authorization_probe");
+  expect(helperSwiftSource).toContain("lockedUseHelperSupportsActiveTurnProtocol");
+  expect(helperSwiftSource).toContain("Installed Locked Computer Use helper is stale");
+  expect(helperSwiftSource).toContain("does not support active-turn authorization");
+  expect(helperSwiftSource).toContain("relockAutoUnlockedDesktopIfNeeded");
+  expect(helperSwiftSource).toContain("shouldRelockAutoUnlockedDesktop");
+  expect(helperSwiftSource).toContain("lockedUseDaemonStateRequiresRelock");
+  expect(helperSwiftSource).toContain('state == "auto_unlocked" || state == "authorized"');
+  expect(helperSwiftSource).toContain("isLockedUseAuthorizationDaemonProcess");
+  expect(helperSwiftSource).toContain("requestDesktopLockedUseAuthorization");
+  expect(helperSwiftSource).toContain("socketPeerSatisfiesCodeRequirement");
+  expect(helperSwiftSource).toContain("makeSocketNonBlocking");
+  expect(helperSwiftSource).toContain("makeSocketBlocking");
+  expect(helperSwiftSource).toContain("setLockedUseClientSocketTimeout");
+  expect(helperSwiftSource).toContain("SO_RCVTIMEO");
+  expect(helperSwiftSource).toContain("SO_SNDTIMEO");
+  expect(helperSwiftSource).toContain("O_NONBLOCK");
+  expect(helperSwiftSource).toContain("process.standardInput = input");
+  expect(helperSwiftSource).toContain('process.arguments = ["-o", "command=", "-p", "\\(pid)"]');
+  expect(helperSwiftSource).toContain("try requireTrustedLockedUseDesktopAncestor()");
 
   const installerSource = await readFile(lockedUseInstallerExecutable, "latin1");
   expect(installerSource).toContain("PiGuiComputerUseAuthorizationPlugin:allow");
@@ -153,11 +187,14 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
 
   const authorizationPluginSource = await readFile(authorizationPluginExecutable, "latin1");
   expect(authorizationPluginSource).toContain("LockScreenLoginAuthorization.sock");
+  expect(authorizationPluginSource).toContain("active-turn-token");
   expect(authorizationPluginSource).toContain("com.pi-gui.desktop.computer-use-helper");
   expect(authorizationPluginSource).toContain("configuration.plist");
   expect(authorizationPluginSource).toContain("helperExecutablePath");
   expect(authorizationPluginSource).toContain("helperCodePath");
   const authorizationPluginCSource = await readFile(authorizationPluginSourcePath, "utf8");
+  expect(authorizationPluginCSource).toContain("PI_GUI_LOCKED_USE_TOKEN_PATH");
+  expect(authorizationPluginCSource).toContain("readActiveTurnToken");
   expect(authorizationPluginCSource).toContain("SO_RCVTIMEO");
   expect(authorizationPluginCSource).toContain("SO_SNDTIMEO");
   expect(authorizationPluginCSource).toContain("PI_GUI_LOCKED_USE_SOCKET_TIMEOUT_SECONDS");
@@ -171,8 +208,43 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(mainSource).not.toContain("@earendil-works/pi-coding-agent");
   expect(mainSource).toContain(helperAppName);
   expect(mainSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH");
+  expect(mainSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN");
+  expect(mainSource).toContain("PI_GUI_COMPUTER_USE_DESKTOP_PID");
+  expect(mainSource).toContain("PI_GUI_COMPUTER_USE_DESKTOP_PATH");
+  expect(mainSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET");
+  expect(mainSource).toContain("/tmp/pi-gui-cu");
+  expect(mainSource).toContain("auth-");
+  expect(mainSource).toContain("tryConfigureLockedUseAuthorizationBroker");
+  expect(mainSource).toContain("Locked Computer Use authorization broker is unavailable");
+  expect(mainSource).toContain("createComputerUseExtension");
+  expect(mainSource).toContain("inlineExtensionMetadata");
+  expect(mainSource).toContain("removeComputerUsePackageEntry");
+  expect(mainSource).toContain("isPackagedComputerUsePackagePath");
+  expect(mainSource).toContain("app/Contents/Resources/app.asar/out/computer-use-extension");
+  expect(mainSource).toContain("packageManifestName(resolvedSource)");
+  expect(mainSource).toContain("scrubLockedUsePrivateProcessEnv");
+  expect(mainSource).not.toContain('Symbol.for("pi-gui.computer-use.runtime")');
+  expect(mainSource).not.toContain("process.env[lockedUseAppTokenEnv] =");
+  expect(mainSource).not.toContain("process.env[lockedUseDesktopPidEnv] =");
+  expect(mainSource).not.toContain("process.env[lockedUseAuthorizationSocketEnv] =");
+  expect(mainSource).toContain("computerUsePrivateEnvKeys");
+  expect(mainSource).toContain("delete env[key]");
   expect(mainSource).toContain(lockedUseInstallerExecutableName);
   expect(mainSource).toContain("SharedSupport");
+  expect(extensionSource).toContain("locked_use_begin");
+  expect(extensionSource).toContain("locked_use_end");
+  expect(extensionSource).toContain("createComputerUseExtension");
+  expect(extensionSource).toContain("AsyncLocalStorage");
+  expect(extensionSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN");
+  expect(extensionSource).not.toContain('Symbol.for("pi-gui.computer-use.runtime")');
+  expect(extensionSource).toContain("lockedUseDesktopPid");
+  expect(extensionSource).toContain("lockedUseAuthorizationSocket");
+  expect(extensionSource).toContain("lockedUseCredentialsIfConfigured");
+  expect(extensionSource).toContain("delete env[key]");
+  expect(extensionSource).toContain("setEnvFromRuntimeConfig");
+  expect(extensionSource).toContain("turn_end");
+  expect(extensionSource).toContain("session_shutdown");
+  expect(extensionSource).toContain("cleanupComputerUseRuntime");
 
   const helperResponse = await runPackagedHelper(helperAppExecutable, { command: "list_apps" });
   expect(helperResponse.ok).toBe(true);
@@ -194,9 +266,69 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
     { PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH: lockedUseInstallerExecutable },
   );
   expect(helperStatusWithInstaller.ok).toBe(true);
-  expect(helperStatusWithInstaller.details?.lockedUse).toBe("not_enabled");
   expect(helperStatusWithInstaller.details?.lockedUseInstaller).toMatch(/^(installed|not-installed|partial)$/);
+  expect(helperStatusWithInstaller.details?.lockedUse).toBe(
+    helperStatusWithInstaller.details?.lockedUseInstaller === "installed" ? "enabled" : "not_enabled",
+  );
   expect(helperStatusWithInstaller.details?.lockedUseInstallerPath).toBe(lockedUseInstallerExecutable);
+
+  const helperStatusWithForcedInstalled = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "status" },
+    { PI_GUI_COMPUTER_USE_TEST_LOCKED_USE_INSTALLER_STATE: "installed" },
+  );
+  expect(helperStatusWithForcedInstalled.ok).toBe(true);
+  expect(helperStatusWithForcedInstalled.details?.lockedUse).toBe("enabled");
+
+  const lockedAuthorizationProbeWithoutTrustedDesktop = await runPackagedHelper(
+    helperAppExecutable,
+    {
+      command: "locked_use_authorization_probe",
+      locked_use_app_token: "test-app-token-000000000000000000000000000000",
+      locked_use_turn_token: "test-turn-token-000000000000000000000000000000",
+    },
+    {
+      PI_GUI_COMPUTER_USE_HELPER_PATH: helperAppExecutable,
+      PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN: "test-app-token-000000000000000000000000000000",
+    },
+  );
+  expect(lockedAuthorizationProbeWithoutTrustedDesktop.ok).toBe(false);
+  expect(lockedAuthorizationProbeWithoutTrustedDesktop.error).toContain("trusted pi-gui desktop process");
+  expect(lockedAuthorizationProbeWithoutTrustedDesktop.details?.errorCode).toBe("desktop_locked");
+
+  const directDaemonInvocation = await runDirectDaemonInvocation(helperAppExecutable);
+  expect(directDaemonInvocation.code).not.toBe(0);
+  expect(directDaemonInvocation.stderr).toContain("authorization daemon rejected");
+
+  const lockedBeginWithoutTrustedDesktop = await runPackagedHelper(
+    helperAppExecutable,
+    {
+      command: "locked_use_begin",
+      locked_use_app_token: "test-app-token-000000000000000000000000000000",
+      locked_use_turn_token: "test-turn-token-000000000000000000000000000000",
+    },
+    {
+      PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN: "test-app-token-000000000000000000000000000000",
+      PI_GUI_COMPUTER_USE_TEST_FORCE_LOCKED: "1",
+      PI_GUI_COMPUTER_USE_TEST_LOCKED_USE_INSTALLER_STATE: "installed",
+    },
+  );
+  expect(lockedBeginWithoutTrustedDesktop.ok).toBe(false);
+  expect(lockedBeginWithoutTrustedDesktop.error).toContain("trusted pi-gui desktop process");
+  expect(lockedBeginWithoutTrustedDesktop.details?.errorCode).toBe("desktop_locked");
+
+  const lockedBeginWithoutInstall = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "locked_use_begin" },
+    {
+      PI_GUI_COMPUTER_USE_TEST_FORCE_LOCKED: "1",
+      PI_GUI_COMPUTER_USE_TEST_LOCKED_USE_INSTALLER_STATE: "not-installed",
+    },
+  );
+  expect(lockedBeginWithoutInstall.ok).toBe(false);
+  expect(lockedBeginWithoutInstall.error).toContain("Locked Computer Use is not enabled");
+  expect(lockedBeginWithoutInstall.details?.errorCode).toBe("desktop_locked");
+  expect(lockedBeginWithoutInstall.details?.lockedUse).toBe("not_enabled");
 
   const lockedHelperResponse = await runPackagedHelper(
     helperAppExecutable,
@@ -269,6 +401,29 @@ function runPackagedHelper(
       reject(new Error("Computer Use helper produced no response."));
     });
     child.stdin.end(`${JSON.stringify(request)}\n`);
+  });
+}
+
+function runDirectDaemonInvocation(helperPath: string): Promise<{ code: number | null; stderr: string }> {
+  const turnToken = "direct-turn-token-000000000000000000000000000";
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      helperPath,
+      ["--lock-screen-authorization-daemon", `${process.pid}`, helperPath],
+      {
+        stdio: ["pipe", "ignore", "pipe"],
+        env: process.env,
+      },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({ code, stderr });
+    });
+    child.stdin.end(`${turnToken}\n`);
   });
 }
 

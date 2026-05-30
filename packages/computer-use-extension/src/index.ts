@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import { access } from "node:fs/promises";
-import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionFactory,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 
 type HelperContent =
   | {
@@ -41,6 +49,10 @@ interface HelperResponse {
 }
 
 const helperPathEnv = "PI_GUI_COMPUTER_USE_HELPER_PATH";
+const lockedUseAppTokenEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN";
+const lockedUseDesktopPidEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PID";
+const lockedUseDesktopPathEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PATH";
+const lockedUseAuthorizationSocketEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET";
 const autoAllowEnv = "PI_GUI_COMPUTER_USE_AUTO_ALLOW";
 const appConfirmEnv = "PI_GUI_COMPUTER_USE_REQUIRE_APP_CONFIRMATION";
 const toolTimeoutMs = 20_000;
@@ -49,6 +61,27 @@ const allowedApps = new Set<string>();
 const computerUseFailureResults = new Map<string, AgentToolResult<unknown>>();
 const blockedToolGuideline =
   "If a Computer Use tool result says blocked or unavailable, do not retry the same action; report the exact status and the user action needed to continue.";
+
+export interface ComputerUseRuntimeConfig {
+  readonly helperPath?: string;
+  readonly lockedUseAppToken?: string;
+  readonly lockedUseDesktopPid?: string;
+  readonly lockedUseDesktopPath?: string;
+  readonly lockedUseAuthorizationSocket?: string;
+}
+
+interface ComputerUseRuntimeState {
+  lockedUseLeaseActive: boolean;
+  lockedUseTurnToken?: string;
+}
+
+interface ComputerUseRuntimeBinding {
+  readonly config: ComputerUseRuntimeConfig;
+  readonly state: ComputerUseRuntimeState;
+}
+
+const fallbackRuntimeState: ComputerUseRuntimeState = { lockedUseLeaseActive: false };
+const runtimeBindingStorage = new AsyncLocalStorage<ComputerUseRuntimeBinding>();
 
 function objectSchema(properties: Record<string, PropertySchema>): any {
   const entries = Object.entries(properties);
@@ -294,18 +327,31 @@ const typeTextTool: ComputerUseTool = {
   },
 };
 
+export function createComputerUseExtension(runtimeConfig: ComputerUseRuntimeConfig = {}): ExtensionFactory {
+  const sealedRuntimeConfig = Object.freeze({ ...runtimeConfig });
+  return (pi: ExtensionAPI) => registerComputerUseTools(pi, sealedRuntimeConfig);
+}
+
 export default function computerUseExtension(pi: ExtensionAPI): void {
-  pi.registerTool(statusTool);
-  pi.registerTool(listAppsTool);
-  pi.registerTool(getAppStateTool);
-  pi.registerTool(clickTool);
-  pi.registerTool(performSecondaryActionTool);
-  pi.registerTool(setValueTool);
-  pi.registerTool(selectTextTool);
-  pi.registerTool(scrollTool);
-  pi.registerTool(dragTool);
-  pi.registerTool(pressKeyTool);
-  pi.registerTool(typeTextTool);
+  registerComputerUseTools(pi, {});
+}
+
+function registerComputerUseTools(pi: ExtensionAPI, runtimeConfig: ComputerUseRuntimeConfig): void {
+  const binding = {
+    config: runtimeConfig,
+    state: { lockedUseLeaseActive: false },
+  };
+  pi.registerTool(bindRuntimeBinding(statusTool, binding));
+  pi.registerTool(bindRuntimeBinding(listAppsTool, binding));
+  pi.registerTool(bindRuntimeBinding(getAppStateTool, binding));
+  pi.registerTool(bindRuntimeBinding(clickTool, binding));
+  pi.registerTool(bindRuntimeBinding(performSecondaryActionTool, binding));
+  pi.registerTool(bindRuntimeBinding(setValueTool, binding));
+  pi.registerTool(bindRuntimeBinding(selectTextTool, binding));
+  pi.registerTool(bindRuntimeBinding(scrollTool, binding));
+  pi.registerTool(bindRuntimeBinding(dragTool, binding));
+  pi.registerTool(bindRuntimeBinding(pressKeyTool, binding));
+  pi.registerTool(bindRuntimeBinding(typeTextTool, binding));
 
   pi.on("tool_result", async (event) => {
     const result = computerUseFailureResults.get(event.toolCallId);
@@ -316,9 +362,33 @@ export default function computerUseExtension(pi: ExtensionAPI): void {
     return { content: result.content, details: result.details, isError: true };
   });
 
-  pi.on("turn_end", async (_event, ctx) => {
+  pi.on("turn_end", async (_event, ctx) =>
+    cleanupComputerUseRuntime(binding, ctx),
+  );
+  pi.on("session_shutdown", async (_event, ctx) => cleanupComputerUseRuntime(binding, ctx));
+}
+
+function bindRuntimeBinding(tool: ComputerUseTool, binding: ComputerUseRuntimeBinding): ComputerUseTool {
+  return {
+    ...tool,
+    execute(toolCallId, params, signal, onUpdate, ctx) {
+      return runtimeBindingStorage.run(binding, () => tool.execute(toolCallId, params, signal, onUpdate, ctx));
+    },
+  };
+}
+
+async function cleanupComputerUseRuntime(
+  binding: ComputerUseRuntimeBinding,
+  ctx?: ExtensionContext,
+): Promise<void> {
+  await runtimeBindingStorage.run(binding, async () => {
     computerUseFailureResults.clear();
-    ctx.ui.setWidget("computer-use", undefined);
+    await endLockedUseLease();
+    try {
+      ctx?.ui.setWidget("computer-use", undefined);
+    } catch {
+      // Session teardown can invalidate host UI before extension cleanup runs.
+    }
   });
 }
 
@@ -369,9 +439,15 @@ async function callHelper(
 
   let response: HelperResponse;
   try {
+    if (requiresUnlockedDesktop(action)) {
+      await beginLockedUseLease(toolCallId, helperPath, signal);
+    }
     response = await runHelper(helperPath, { ...params, command: action }, signal);
   } catch (error) {
     if (isAbortError(error)) {
+      throw error;
+    }
+    if (isComputerUseResultError(error)) {
       throw error;
     }
     const message = errorMessage(error);
@@ -391,10 +467,87 @@ async function callHelper(
   };
 }
 
+function requiresUnlockedDesktop(action: string): boolean {
+  return !["computer_use_status", "status", "list_apps", "locked_use_begin", "locked_use_end"].includes(action);
+}
+
+async function beginLockedUseLease(
+  toolCallId: string,
+  helperPath: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const credentials = lockedUseCredentialsIfConfigured();
+  const state = runtimeState();
+  const hadActiveLease = state.lockedUseLeaseActive;
+  if (credentials) {
+    state.lockedUseLeaseActive = true;
+  }
+  const response = await runHelper(helperPath, { command: "locked_use_begin", ...(credentials ?? {}) }, signal);
+  if (!response.ok) {
+    if (!hadActiveLease) {
+      state.lockedUseLeaseActive = false;
+    }
+    throwComputerUseFailure(toolCallId, response.error ?? "Locked Computer Use could not start.", response.details);
+  }
+  const details = normalizeDetails(response.details);
+  if (
+    !credentials ||
+    (!hadActiveLease && details.lockedUseLease !== "auto_unlocked" && details.lockedUseLease !== "active")
+  ) {
+    state.lockedUseLeaseActive = false;
+  }
+}
+
+async function endLockedUseLease(): Promise<void> {
+  const state = runtimeState();
+  const shouldEndLease = state.lockedUseLeaseActive;
+  state.lockedUseLeaseActive = false;
+  try {
+    if (!shouldEndLease) {
+      return;
+    }
+    const helperPath = await resolveHelperPath();
+    const credentials = lockedUseCredentialsIfConfigured();
+    if (credentials) {
+      await runHelper(helperPath, { command: "locked_use_end", ...credentials }, undefined);
+    }
+  } catch {
+    // The next status/action call will surface any remaining lock-screen state.
+  } finally {
+    delete state.lockedUseTurnToken;
+  }
+}
+
+function lockedUseCredentialsIfConfigured():
+  | { locked_use_app_token: string; locked_use_turn_token: string }
+  | undefined {
+  const appToken = runtimeString("lockedUseAppToken", lockedUseAppTokenEnv);
+  if (!appToken) {
+    return undefined;
+  }
+  const state = runtimeState();
+  state.lockedUseTurnToken ??= randomBytes(32).toString("hex");
+  return {
+    locked_use_app_token: appToken,
+    locked_use_turn_token: state.lockedUseTurnToken,
+  };
+}
+
 function throwComputerUseFailure(toolCallId: string, message: string, details: unknown): never {
   const result = computerUseFailureResult(message, details);
   computerUseFailureResults.set(toolCallId, result);
-  throw new Error(textForResult(result));
+  throw new ComputerUseResultError(result);
+}
+
+class ComputerUseResultError extends Error {
+  constructor(readonly result: AgentToolResult<unknown>) {
+    super(textForResult(result));
+    this.name = "ComputerUseResultError";
+  }
+}
+
+function isComputerUseResultError(error: unknown): error is ComputerUseResultError {
+  return error instanceof ComputerUseResultError;
 }
 
 function computerUseFailureResult(message: string, details: unknown): AgentToolResult<unknown> {
@@ -480,7 +633,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 async function resolveHelperPath(): Promise<string> {
-  const helperPath = process.env[helperPathEnv]?.trim();
+  const helperPath = runtimeString("helperPath", helperPathEnv);
   if (!helperPath) {
     throw new Error(`Computer Use helper is not configured. Missing ${helperPathEnv}.`);
   }
@@ -496,7 +649,7 @@ function runHelper(
   return new Promise((resolve, reject) => {
     const child = spawn(helperPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: helperEnvironment(),
     });
     let stdout = "";
     let stderr = "";
@@ -563,4 +716,47 @@ function runHelper(
     });
     child.stdin.end(`${JSON.stringify(request)}\n`);
   });
+}
+
+function helperEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of [
+    lockedUseAppTokenEnv,
+    lockedUseDesktopPidEnv,
+    lockedUseDesktopPathEnv,
+    lockedUseAuthorizationSocketEnv,
+  ]) {
+    delete env[key];
+  }
+  setEnvFromRuntimeConfig(env, lockedUseDesktopPidEnv, "lockedUseDesktopPid");
+  setEnvFromRuntimeConfig(env, lockedUseDesktopPathEnv, "lockedUseDesktopPath");
+  setEnvFromRuntimeConfig(env, lockedUseAuthorizationSocketEnv, "lockedUseAuthorizationSocket");
+  return env;
+}
+
+function runtimeString(key: keyof ComputerUseRuntimeConfig, fallbackEnv: string): string | undefined {
+  const configured = runtimeConfig()[key]?.trim();
+  if (configured) {
+    return configured;
+  }
+  return process.env[fallbackEnv]?.trim() || undefined;
+}
+
+function setEnvFromRuntimeConfig(
+  env: NodeJS.ProcessEnv,
+  envKey: string,
+  configKey: keyof ComputerUseRuntimeConfig,
+): void {
+  const configured = runtimeConfig()[configKey]?.trim();
+  if (configured) {
+    env[envKey] = configured;
+  }
+}
+
+function runtimeConfig(): ComputerUseRuntimeConfig {
+  return runtimeBindingStorage.getStore()?.config ?? {};
+}
+
+function runtimeState(): ComputerUseRuntimeState {
+  return runtimeBindingStorage.getStore()?.state ?? fallbackRuntimeState;
 }
