@@ -1,4 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
+import { execFile } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import {
   createNamedThread,
   getDesktopState,
@@ -14,6 +20,11 @@ import { getFrontmostAppName, resetAppInBackground } from "../helpers/macos-ui";
 
 const installedAppBundle = "/Applications/pi-gui.app";
 const targetApp = "Calculator";
+const helperExecutableName = "pi-gui-computer-use-helper";
+const cursorOverlayArgument = "--cursor-overlay-daemon";
+const cursorPositionPath = join(tmpdir(), "pi-gui-computer-use-agent-cursor-position");
+const cursorPidPath = join(tmpdir(), "pi-gui-computer-use-agent-cursor.pid");
+const execFileAsync = promisify(execFile);
 
 test("installed app runs Computer Use through the real UI without foregrounding the target app", async () => {
   test.setTimeout(240_000);
@@ -23,6 +34,8 @@ test("installed app runs Computer Use through the real UI without foregrounding 
   const userDataDir = await makeUserDataDir("pi-gui-installed-computer-use-live-");
   const workspacePath = await makeWorkspace("installed-computer-use-live-workspace");
   const executablePath = await resolveAppBundleExecutable(installedAppBundle);
+  await rm(cursorPositionPath, { force: true });
+  await rm(cursorPidPath, { force: true });
 
   const harness = await launchDesktopByExecutable(executablePath, userDataDir, {
     initialWorkspaces: [workspacePath],
@@ -72,6 +85,8 @@ test("installed app runs Computer Use through the real UI without foregrounding 
         "TOOL_ERRORS: <yes/no>",
       ].join("\n"),
     );
+    const cursorSeen = waitForFreshAgentCursorRequest(Date.now() / 1000);
+    void cursorSeen.catch(() => undefined);
     await composer.press("Enter");
 
     const focusSamples: string[] = [];
@@ -96,6 +111,10 @@ test("installed app runs Computer Use through the real UI without foregrounding 
         ),
       ).toBe(true);
       expect(toolCalls.some((call) => call.toolName === "type_text")).toBe(false);
+      const cursorRequest = await cursorSeen;
+      expect(cursorRequest.pressed).toBe(true);
+      expect(cursorRequest.pid).toBeGreaterThan(0);
+      expect(cursorRequest.command).toContain(cursorOverlayArgument);
       await expect(window.locator(".timeline-tool--error")).toHaveCount(0);
       await expect(transcript).not.toContainText(/terminated/i);
     } finally {
@@ -109,6 +128,68 @@ test("installed app runs Computer Use through the real UI without foregrounding 
     await harness.close();
   }
 });
+
+async function waitForFreshAgentCursorRequest(startedAtSeconds: number): Promise<AgentCursorObservation> {
+  const deadline = Date.now() + 210_000;
+  while (Date.now() < deadline) {
+    const observation = await readAgentCursorObservation(startedAtSeconds);
+    if (observation) {
+      return observation;
+    }
+    await delay(250);
+  }
+  throw new Error("Installed Computer Use live run did not show the separate agent cursor.");
+}
+
+async function readAgentCursorObservation(startedAtSeconds: number): Promise<AgentCursorObservation | null> {
+  const [rawPosition, rawPid] = await Promise.all([
+    readFile(cursorPositionPath, "utf8").catch(() => ""),
+    readFile(cursorPidPath, "utf8").catch(() => ""),
+  ]);
+  const parts = rawPosition.trim().split(",");
+  const x = Number(parts[0]);
+  const y = Number(parts[1]);
+  const timestamp = Number(parts[2]);
+  const pid = Number(rawPid.trim());
+  if (
+    parts.length !== 4 ||
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    !Number.isFinite(timestamp) ||
+    timestamp < startedAtSeconds ||
+    !Number.isInteger(pid) ||
+    pid <= 0
+  ) {
+    return null;
+  }
+  const command = await agentCursorDaemonCommand(pid);
+  if (!command) {
+    return null;
+  }
+  return { x, y, timestamp, pressed: parts[3] === "1", pid, command };
+}
+
+async function agentCursorDaemonCommand(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", `${pid}`, "-o", "command="]);
+    const command = stdout.trim();
+    if (command.includes(helperExecutableName) && command.includes(cursorOverlayArgument)) {
+      return command;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+interface AgentCursorObservation {
+  readonly x: number;
+  readonly y: number;
+  readonly timestamp: number;
+  readonly pressed: boolean;
+  readonly pid: number;
+  readonly command: string;
+}
 
 async function waitForSelectedSessionIdle(window: Page): Promise<void> {
   await expect
