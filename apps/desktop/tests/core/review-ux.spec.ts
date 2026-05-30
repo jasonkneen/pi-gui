@@ -286,9 +286,9 @@ test("physical-pointer Computer Use failures keep the foreground-safe reason vis
   try {
     const sessionRef = await selectedSessionRef(window);
     const timestamp = new Date().toISOString();
-    const title = "Computer Use blocked: this action would require foreground mouse control.";
+    const title = "Computer Use blocked: this action would require foreground physical input.";
     const helperMessage =
-      "Computer Use blocked: this click in Sketch would require moving the user's physical mouse at 120,120. Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background.";
+      "Computer Use blocked: this click in Sketch would require foreground physical input by moving the user's physical mouse at 120,120. Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background.";
     const startedEvent: Extract<SessionDriverEvent, { type: "toolStarted" }> = {
       type: "toolStarted",
       sessionRef,

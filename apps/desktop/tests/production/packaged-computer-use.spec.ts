@@ -116,7 +116,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(extensionSource).toContain("screen_recording_denied");
   expect(extensionSource).toContain("screenshot_unavailable");
   expect(extensionSource).toContain("physical_input_required");
-  expect(extensionSource).toContain("foreground mouse control");
+  expect(extensionSource).toContain("foreground physical input");
   for (const toolName of expectedComputerUseTools) {
     expect(extensionSource).toContain(`name: "${toolName}"`);
   }
@@ -133,6 +133,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("enable pi-gui and pi-gui Computer Use");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH");
@@ -151,7 +152,8 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("--cursor-overlay-daemon");
   expect(helperSource).toContain("AXUIElementCopyElementAtPosition");
   expect(helperSource).toContain("outside the target window screenshot bounds");
-  expect(helperSource).toContain("would require moving the user's physical mouse");
+  expect(helperSource).toContain("would require foreground physical input");
+  expect(helperSource).toContain("moving the user's physical mouse");
   expect(helperSource).toContain("target window screenshot is unavailable");
   expect(helperSource).toContain("active-turn authorization service");
   expect(helperSource).toContain("waitForFrontmost");

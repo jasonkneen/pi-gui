@@ -55,12 +55,14 @@ const lockedUseDesktopPathEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PATH";
 const lockedUseAuthorizationSocketEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET";
 const autoAllowEnv = "PI_GUI_COMPUTER_USE_AUTO_ALLOW";
 const appConfirmEnv = "PI_GUI_COMPUTER_USE_REQUIRE_APP_CONFIRMATION";
+const allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT";
 const toolTimeoutMs = 20_000;
 const maxHelperOutputBytes = 24 * 1024 * 1024;
 const allowedApps = new Set<string>();
 const computerUseFailureResults = new Map<string, AgentToolResult<unknown>>();
 const blockedToolGuideline =
   "If a Computer Use tool result says blocked or unavailable, do not retry the same action; report the exact status and the user action needed to continue.";
+const foregroundPhysicalInputGuideline = `Normal pi-gui Computer Use blocks foreground physical mouse and keyboard fallbacks; only use this path when ${allowPhysicalInputEnv}=1 is intentionally enabled.`;
 
 export interface ComputerUseRuntimeConfig {
   readonly helperPath?: string;
@@ -175,7 +177,7 @@ const clickTool: ComputerUseTool = {
     "Click an element by index or a background-safe pressable coordinate from the latest screenshot.",
   promptSnippet: "Click a Mac app element or screenshot coordinate",
   promptGuidelines: [
-    "Prefer element_index from the latest get_app_state result. Coordinate clicks are blocked when they would require foreground physical mouse control.",
+    "Prefer element_index from the latest get_app_state result. Coordinate clicks are blocked when they would require foreground physical input.",
     blockedToolGuideline,
   ],
   parameters: objectSchema({
@@ -259,13 +261,19 @@ const selectTextTool: ComputerUseTool = {
 const scrollTool: ComputerUseTool = {
   name: "scroll",
   label: "Scroll",
-  description: "Scroll an element in a direction by a number of pages.",
+  description:
+    "Scroll a numbered accessibility element using the app's background-safe scroll actions. Physical wheel fallback is blocked in normal pi-gui.",
   promptSnippet: "Scroll a Mac app element",
+  promptGuidelines: [
+    "Use element_index from the latest get_app_state result. Use whole-page scrolls only; fractional or non-accessible scrolls are blocked as foreground physical input.",
+    foregroundPhysicalInputGuideline,
+    blockedToolGuideline,
+  ],
   parameters: objectSchema({
     ...AppParams,
     element_index: stringSchema({ description: "Element identifier" }),
     direction: stringSchema({ description: "Scroll direction: up, down, left, or right" }),
-    pages: optional(numberSchema({ description: "Number of pages to scroll. Fractional values are supported." })),
+    pages: optional(integerSchema({ description: "Whole number of pages to scroll. Defaults to 1." })),
   }),
   executionMode: "sequential",
   async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -277,8 +285,14 @@ const scrollTool: ComputerUseTool = {
 const dragTool: ComputerUseTool = {
   name: "drag",
   label: "Drag",
-  description: "Drag from one point to another using pixel coordinates from the latest screenshot.",
-  promptSnippet: "Drag inside a Mac app using screenshot coordinates",
+  description:
+    "Foreground physical drag escape hatch using screenshot coordinates. It is blocked in normal pi-gui so Computer Use can stay in the background.",
+  promptSnippet: "Drag inside a Mac app only when foreground physical input is allowed",
+  promptGuidelines: [
+    "Prefer click, set_value, select_text, perform_secondary_action, or an app-specific accessible control. Normal background Computer Use rejects drag with physical_input_required.",
+    foregroundPhysicalInputGuideline,
+    blockedToolGuideline,
+  ],
   parameters: objectSchema({
     ...AppParams,
     from_x: numberSchema({ description: "Start X coordinate" }),
@@ -297,11 +311,16 @@ const pressKeyTool: ComputerUseTool = {
   name: "press_key",
   label: "Press Key",
   description:
-    "Press a key or key-combination on the keyboard using xdotool-style syntax, such as Return, Tab, super+c, Up, plus, equals, or KP_0.",
-  promptSnippet: "Press a key or key combination in a Mac app",
+    "Press a background-safe app key exposed as a pressable accessibility control, such as Calculator keypad aliases. Foreground keyboard fallback is blocked in normal pi-gui.",
+  promptSnippet: "Press a background-safe Mac app key",
+  promptGuidelines: [
+    "Prefer click with element_index for visible buttons. Use press_key only for known background-safe app controls, not arbitrary shortcuts or text editing.",
+    foregroundPhysicalInputGuideline,
+    blockedToolGuideline,
+  ],
   parameters: objectSchema({
     ...AppParams,
-    key: stringSchema({ description: "Key or key combination to press" }),
+    key: stringSchema({ description: "Background-safe app key alias, such as plus, equals, kp_0, or kp_clear" }),
   }),
   executionMode: "sequential",
   async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -314,11 +333,13 @@ const typeTextTool: ComputerUseTool = {
   name: "type_text",
   label: "Type Text",
   description:
-    "Type literal text. Provide element_index for text fields when available so Pi can type through Accessibility without activating the app.",
+    "Type literal text into an editable accessibility element without activating the app. No-element keyboard fallback is blocked in normal pi-gui unless the app has background-safe controls.",
   promptSnippet: "Type literal text into a Mac app",
   promptGuidelines: [
     "Prefer element_index for visible text fields or text areas from the latest get_app_state result; this keeps typing background-friendly.",
-    "Omit element_index only when the app must receive literal keyboard input or the accessibility tree cannot target the text destination.",
+    "Omit element_index only for known background-safe app controls such as Calculator keypad entry; arbitrary keyboard input is blocked as foreground physical input.",
+    foregroundPhysicalInputGuideline,
+    blockedToolGuideline,
   ],
   parameters: objectSchema({
     ...AppParams,
@@ -601,7 +622,11 @@ function classifyComputerUseError(message: string, details: Record<string, unkno
   if (message.includes("target window screenshot is unavailable")) {
     return "screenshot_unavailable";
   }
-  if (message.includes("would require moving the user's physical mouse")) {
+  if (
+    message.includes("would require moving the user's physical mouse") ||
+    message.includes("would require foreground physical input") ||
+    message.includes("would require foreground keyboard input")
+  ) {
     return "physical_input_required";
   }
   if (message.includes("helper is not configured") || message.includes("ENOENT") || message.includes("not found")) {
@@ -624,7 +649,7 @@ function failureTitle(errorCode: string): string {
     case "screenshot_unavailable":
       return "Computer Use blocked: the target screenshot is unavailable.";
     case "physical_input_required":
-      return "Computer Use blocked: this action would require foreground mouse control.";
+      return "Computer Use blocked: this action would require foreground physical input.";
     case "helper_unavailable":
       return "Computer Use unavailable: the helper is not configured.";
     case "helper_timeout":

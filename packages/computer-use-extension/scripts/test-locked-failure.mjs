@@ -132,7 +132,7 @@ process.stdin.on("end", () => {
   } else if (request.command === "click" && request.app === "Sketch") {
     response = {
       ok: false,
-      error: "Computer Use blocked: this click in Sketch would require moving the user's physical mouse at 120,120. Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background.",
+      error: "Computer Use blocked: this click in Sketch would require foreground physical input by moving the user's physical mouse at 120,120. Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background.",
       details: { errorCode: "physical_input_required" },
     };
   } else {
@@ -207,7 +207,7 @@ const physicalInputThrown = await executeToolExpectingError(
   click,
   "call-physical-input",
   { app: "Sketch", x: 120, y: 120 },
-  /Computer Use blocked: this action would require foreground mouse control/,
+  /Computer Use blocked: this action would require foreground physical input/,
   "physical pointer fallback failures should throw so the runtime records a tool error",
 );
 await assertFailureResult({
@@ -215,7 +215,7 @@ await assertFailureResult({
   toolName: "click",
   input: { app: "Sketch", x: 120, y: 120 },
   thrown: physicalInputThrown,
-  expectedText: [/Computer Use blocked: this action would require foreground mouse control/, /physical mouse/],
+  expectedText: [/Computer Use blocked: this action would require foreground physical input/, /physical mouse/],
   expectedDetails: { errorCode: "physical_input_required" },
 });
 

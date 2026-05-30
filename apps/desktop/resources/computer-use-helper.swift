@@ -97,6 +97,7 @@ private let lockedUseAuthorizationProtocolVersionArgument = "--lock-screen-autho
 private let lockedUseAuthorizationProtocolVersion = "pi-gui-computer-use-active-turn-v1"
 private let cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS"
 private let cursorOverlayGlideDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS"
+private let allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT"
 private let lockedUseInstallerPathEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH"
 private let lockedUseAppTokenEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN"
 private let lockedUseDesktopPidEnv = "PI_GUI_COMPUTER_USE_DESKTOP_PID"
@@ -947,7 +948,9 @@ func helperErrorDetails(for error: Error) -> [String: String]? {
             "screenshot": "unavailable",
         ]
     }
-    if message.contains("would require moving the user's physical mouse") {
+    if message.contains("would require moving the user's physical mouse")
+        || message.contains("would require foreground physical input")
+        || message.contains("would require foreground keyboard input") {
         return [
             "errorCode": "physical_input_required",
         ]
@@ -1030,8 +1033,41 @@ func click(_ request: Request) throws -> Response {
 }
 
 func physicalPointerClickRequired(app: ResolvedApp, point: CGPoint) -> HelperError {
-    HelperError.message(
-        "Computer Use blocked: this click in \(app.displayName) would require moving the user's physical mouse at \(Int(point.x)),\(Int(point.y)). Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background."
+    physicalInputRequired(
+        app: app,
+        action: "click",
+        pointDescription: "at \(Int(point.x)),\(Int(point.y))",
+        guidance: "Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background."
+    )
+}
+
+func requirePhysicalInputAllowed(
+    app: ResolvedApp,
+    action: String,
+    pointDescription: String?,
+    guidance: String
+) throws {
+    if ProcessInfo.processInfo.environment[allowPhysicalInputEnv] == "1" {
+        return
+    }
+    throw physicalInputRequired(
+        app: app,
+        action: action,
+        pointDescription: pointDescription,
+        guidance: guidance
+    )
+}
+
+func physicalInputRequired(
+    app: ResolvedApp,
+    action: String,
+    pointDescription: String?,
+    guidance: String
+) -> HelperError {
+    let location = pointDescription.map { " \($0)" } ?? ""
+    let inputDetail = pointDescription == nil ? "" : " by moving the user's physical mouse"
+    return HelperError.message(
+        "Computer Use blocked: this \(action) in \(app.displayName) would require foreground physical input\(inputDetail)\(location). \(guidance)"
     )
 }
 
@@ -1139,6 +1175,12 @@ func scroll(_ request: Request) throws -> Response {
     }
 
     let cursorPoint = element.flatMap(elementCenter) ?? targetWindowCenter(for: app)
+    try requirePhysicalInputAllowed(
+        app: app,
+        action: "scroll",
+        pointDescription: cursorPoint.map { "at \(Int($0.x)),\(Int($0.y))" },
+        guidance: "Use an element_index with a supported accessibility scroll action to keep Computer Use in the background."
+    )
     return try withTemporaryActivation(app, cursorPoint: cursorPoint) {
         if let cursorPoint {
             moveMouse(to: cursorPoint)
@@ -1150,6 +1192,12 @@ func scroll(_ request: Request) throws -> Response {
 
 func drag(_ request: Request) throws -> Response {
     let app = try resolveApp(request.app)
+    try requirePhysicalInputAllowed(
+        app: app,
+        action: "drag",
+        pointDescription: "for the requested coordinates",
+        guidance: "Use background-safe accessibility actions where available; drag currently requires foreground physical input."
+    )
     let from = try screenshotPoint(request, app: app, x: request.from_x, y: request.from_y)
     let to = try screenshotPoint(request, app: app, x: request.to_x, y: request.to_y)
     return try withTemporaryActivation(app, cursorPoint: from) {
@@ -1165,6 +1213,12 @@ func pressKey(_ request: Request) throws -> Response {
     if try pressAccessibleKey(key, app: app) {
         return try stateResponse(for: app)
     }
+    try requirePhysicalInputAllowed(
+        app: app,
+        action: "press key \(key)",
+        pointDescription: nil,
+        guidance: "Use an element_index, set_value, select_text, type_text, or an app-specific accessible control to keep Computer Use in the background."
+    )
     return try withTemporaryActivation(app, cursorPoint: nil) {
         try postKey(key)
         return try stateResponse(for: app)
@@ -1179,6 +1233,12 @@ func typeText(_ request: Request) throws -> Response {
             return try stateResponse(for: app)
         }
         if let center = elementCenter(element) {
+            try requirePhysicalInputAllowed(
+                app: app,
+                action: "type text",
+                pointDescription: "at \(Int(center.x)),\(Int(center.y))",
+                guidance: "Use an editable text element whose accessibility value can be set to keep Computer Use in the background."
+            )
             return try withTemporaryActivation(app, cursorPoint: center) {
                 moveMouse(to: center)
                 postClick(at: center, button: "left", count: 1)
@@ -1194,6 +1254,12 @@ func typeText(_ request: Request) throws -> Response {
     if try typeAccessibleText(text, app: app) {
         return try stateResponse(for: app)
     }
+    try requirePhysicalInputAllowed(
+        app: app,
+        action: "type text",
+        pointDescription: nil,
+        guidance: "Use element_index for an editable text field or a background-safe app control before retrying."
+    )
     return try withTemporaryActivation(app, cursorPoint: nil) {
         for character in text {
             postUnicode(String(character))

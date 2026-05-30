@@ -12,6 +12,7 @@ const helperExecutableName = "pi-gui-computer-use-helper";
 const helperAppName = "pi-gui Computer Use.app";
 const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
 const lockedUseInstallerPathEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH";
+const allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT";
 const defaultHelperAppExecutablePath = path.join(
   desktopDir,
   "build",
@@ -92,7 +93,7 @@ try {
 async function main() {
   await access(helperPath);
   await assertHelperSupportsActiveTurnProtocol();
-  await assertHelperSupportsMouseWarpGuard();
+  await assertHelperSupportsBackgroundSafetyGuards();
   await removeCursorArtifacts();
   await assertUnlockedDesktop();
   await execFileAsync("osascript", ["-e", 'if application "Calculator" is running then tell application "Calculator" to quit']);
@@ -112,6 +113,7 @@ async function main() {
   await runOutOfBoundsCoordinateProbe(initialCalculatorState);
   await runElementClickProbe(initialCalculatorState);
   await runPhysicalPointerFallbackProbe(initialCalculatorState);
+  await runForegroundPhysicalFallbackProbes(initialCalculatorState);
 
   for (const key of ["kp_clear", "kp_clear", "7", "plus", "8", "kp_equal"]) {
     await runWithFocusGuard({ command: "press_key", app: "Calculator", key }, `press_key ${key}`);
@@ -124,7 +126,6 @@ async function main() {
   }
 
   await runTextEditTypingProbe();
-  await runKeyboardCursorProbe();
 
   console.log(
     `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit frontmost=${frontmostBefore} result=15 textedit="Alpha Beta" physical_mouse=guarded stale_cursor_pid=guarded helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
@@ -150,11 +151,19 @@ async function assertHelperSupportsActiveTurnProtocol() {
   }
 }
 
-async function assertHelperSupportsMouseWarpGuard() {
+async function assertHelperSupportsBackgroundSafetyGuards() {
   const helperSource = await readFile(helperPath, "latin1");
   if (!helperSource.includes("PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP")) {
     throw new Error(
       `Computer Use helper is stale or incompatible at ${helperPath}; it does not support the physical mouse guard. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+  if (
+    !helperSource.includes("PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT") ||
+    !helperSource.includes("would require foreground physical input")
+  ) {
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; it does not support foreground physical-input rejection. Reinstall the latest pi-gui.app before running this probe.`,
     );
   }
 }
@@ -356,7 +365,7 @@ async function runPhysicalPointerFallbackProbe(initialState) {
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : String(error);
   }
-  if (!errorMessage.includes("would require moving the user's physical mouse")) {
+  if (!errorMessage.includes("would require foreground physical input")) {
     throw new Error(`Physical pointer fallback was not rejected clearly: ${errorMessage || "<no error>"}`);
   }
   await assertTargetDidNotBecomeFrontmost("rejected physical pointer fallback click", before, "Calculator");
@@ -366,14 +375,59 @@ async function runPhysicalPointerFallbackProbe(initialState) {
   }
 }
 
-async function runKeyboardCursorProbe() {
+async function runForegroundPhysicalFallbackProbes(initialState) {
+  const dimensions = screenshotDimensions(initialState, "foreground physical fallback coverage");
+  const fallbackCases = [
+    {
+      action: "Calculator foreground scroll fallback",
+      request: { command: "scroll", app: "Calculator", direction: "down", pages: 0.5 },
+    },
+    {
+      action: "Calculator foreground drag fallback",
+      request: {
+        command: "drag",
+        app: "Calculator",
+        from_x: Math.round(dimensions.width * 0.25),
+        from_y: Math.round(dimensions.height * 0.25),
+        to_x: Math.round(dimensions.width * 0.5),
+        to_y: Math.round(dimensions.height * 0.5),
+      },
+    },
+    {
+      action: "Calculator foreground key fallback",
+      request: { command: "press_key", app: "Calculator", key: "escape" },
+    },
+    {
+      action: "Calculator foreground text fallback",
+      request: { command: "type_text", app: "Calculator", text: "abc" },
+    },
+  ];
+
+  for (const fallbackCase of fallbackCases) {
+    await expectForegroundPhysicalFallbackRejected(fallbackCase.request, fallbackCase.action);
+  }
+}
+
+async function expectForegroundPhysicalFallbackRejected(request, action) {
+  await activateFinder();
+  const before = await frontmostApp();
+  if (before === request.app) {
+    throw new Error(`Could not put a non-target app in front before ${action}.`);
+  }
   const beforeCursor = await readCursorRequest();
-  await runWithFocusGuard({ command: "press_key", app: "Calculator", key: "escape" }, "Calculator keyboard-only press", {
-    showCursor: true,
-  });
+  let errorMessage = "";
+  try {
+    await runHelper(request, { showCursor: true });
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  if (!errorMessage.includes("would require foreground physical input")) {
+    throw new Error(`${action} was not rejected clearly: ${errorMessage || "<no error>"}`);
+  }
+  await assertTargetDidNotBecomeFrontmost(`rejected ${action}`, before, request.app);
   const afterCursor = await readCursorRequest();
   if (afterCursor?.timestamp !== beforeCursor?.timestamp) {
-    throw new Error("Keyboard-only Computer Use action moved the agent cursor.");
+    throw new Error(`Rejected ${action} moved the agent cursor.`);
   }
 }
 
@@ -602,6 +656,7 @@ function helperEnv(options) {
   const env = {
     ...process.env,
     [lockedUseInstallerPathEnv]: lockedUseInstallerPath,
+    [allowPhysicalInputEnv]: "0",
     PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP: "1",
   };
   if (options.showCursor) {
