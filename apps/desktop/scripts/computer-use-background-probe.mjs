@@ -76,6 +76,11 @@ const strictFocusGuard = process.env.PI_GUI_COMPUTER_USE_STRICT_FOCUS_GUARD === 
 const allowTextEditTakeover = process.env.PI_GUI_COMPUTER_USE_ALLOW_TEXTEDIT_TAKEOVER === "1";
 const cursorPositionPath = path.join(tmpdir(), "pi-gui-computer-use-agent-cursor-position");
 const cursorPidPath = path.join(tmpdir(), "pi-gui-computer-use-agent-cursor.pid");
+const persistentCursorOptions = Object.freeze({
+  showCursor: true,
+  cursorDurationMs: helperTimeoutMs + 5_000,
+  cursorGlideMs: 300,
+});
 
 try {
   await main();
@@ -256,8 +261,8 @@ async function runWithFocusGuard(request, action, options = {}) {
 
 async function runElementClickProbe(initialState) {
   const sevenButtonIndex = findButtonElementIndex(stateText(initialState), "7");
+  const eightButtonIndex = findButtonElementIndex(stateText(initialState), "8");
   const beforeCursor = await readCursorRequest();
-  const cursorOptions = { showCursor: true, cursorDurationMs: 1500, cursorGlideMs: 300 };
   await runWithFocusGuard(
     {
       command: "click",
@@ -265,11 +270,31 @@ async function runElementClickProbe(initialState) {
       element_index: sevenButtonIndex,
     },
     "Calculator element click",
-    cursorOptions,
+    persistentCursorOptions,
   );
   const afterCursor = await readCursorRequest();
   assertCursorAdvanced(beforeCursor, afterCursor, "Calculator element click");
-  await assertCursorOverlayDaemonRunning("Calculator element click");
+  const cursorDaemonPid = await assertCursorOverlayDaemonRunning("Calculator element click");
+  await runWithFocusGuard(
+    {
+      command: "click",
+      app: "Calculator",
+      element_index: eightButtonIndex,
+    },
+    "Calculator second element click",
+    persistentCursorOptions,
+  );
+  const secondCursor = await readCursorRequest();
+  assertCursorAdvanced(afterCursor, secondCursor, "Calculator second element click");
+  if (secondCursor.x === afterCursor.x && secondCursor.y === afterCursor.y) {
+    throw new Error("Repeated Calculator element clicks did not move the agent cursor between button centers.");
+  }
+  const secondCursorDaemonPid = await assertCursorOverlayDaemonRunning("Calculator second element click");
+  if (secondCursorDaemonPid !== cursorDaemonPid) {
+    throw new Error(
+      `Calculator element clicks did not reuse the persistent agent cursor overlay daemon: ${cursorDaemonPid} -> ${secondCursorDaemonPid}.`,
+    );
+  }
 }
 
 async function runOutOfBoundsCoordinateProbe(initialState) {
@@ -390,6 +415,7 @@ async function runTextEditTypingProbe() {
     const initialState = await runWithFocusGuard({ command: "get_app_state", app: "TextEdit" }, "TextEdit get_app_state");
     const initialText = stateText(initialState);
     const textElementIndex = findEditableTextElementIndex(initialText, "Alpha");
+    const beforeSelectCursor = await readCursorRequest();
     await runWithFocusGuard(
       {
         command: "select_text",
@@ -399,11 +425,25 @@ async function runTextEditTypingProbe() {
         selection: "cursor_after",
       },
       "TextEdit select_text",
+      persistentCursorOptions,
     );
+    const afterSelectCursor = await readCursorRequest();
+    assertCursorAdvanced(beforeSelectCursor, afterSelectCursor, "TextEdit select_text");
+    const textEditCursorDaemonPid = await assertCursorOverlayDaemonRunning("TextEdit select_text");
+    const beforeTypeCursor = await readCursorRequest();
     const finalState = await runWithFocusGuard(
       { command: "type_text", app: "TextEdit", element_index: textElementIndex, text: " Beta" },
       "TextEdit type_text",
+      persistentCursorOptions,
     );
+    const afterTypeCursor = await readCursorRequest();
+    assertCursorAdvanced(beforeTypeCursor, afterTypeCursor, "TextEdit type_text");
+    const textEditTypeCursorDaemonPid = await assertCursorOverlayDaemonRunning("TextEdit type_text");
+    if (textEditTypeCursorDaemonPid !== textEditCursorDaemonPid) {
+      throw new Error(
+        `TextEdit actions did not reuse the persistent agent cursor overlay daemon: ${textEditCursorDaemonPid} -> ${textEditTypeCursorDaemonPid}.`,
+      );
+    }
     if (!stateText(finalState).includes("Alpha Beta")) {
       throw new Error("TextEdit did not expose typed background text Alpha Beta.");
     }
@@ -595,7 +635,7 @@ async function assertCursorOverlayDaemonRunning(action) {
         const { stdout } = await execFileAsync("ps", ["-p", `${pid}`, "-o", "command="], { timeout: 1_000 });
         const command = stdout.trim();
         if (command.includes(helperExecutableName) && command.includes("--cursor-overlay-daemon")) {
-          return;
+          return pid;
         }
         lastError = `pid ${pid} command was ${command || "<empty>"}`;
       } catch (error) {
