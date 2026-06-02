@@ -137,6 +137,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_SCREENSHOT_UNAVAILABLE");
+  expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_PHYSICAL_INPUT_REQUIRED");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH");
   expect(helperSource).toContain("PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN");
@@ -501,6 +502,19 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(screenshotUnavailableClick.error).toContain("target window screenshot is unavailable");
   expect(screenshotUnavailableClick.details?.errorCode).toBe("screenshot_unavailable");
   expect(screenshotUnavailableClick.details?.screenshot).toBe("unavailable");
+
+  const physicalInputRequiredClick = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "click", app: "Finder", x: 10, y: 10 },
+    {
+      PI_GUI_COMPUTER_USE_TEST_FORCE_UNLOCKED: "1",
+      PI_GUI_COMPUTER_USE_TEST_FORCE_PHYSICAL_INPUT_REQUIRED: "1",
+    },
+  );
+  expect(physicalInputRequiredClick.ok).toBe(false);
+  expect(physicalInputRequiredClick.error).toContain("would require foreground physical input");
+  expect(physicalInputRequiredClick.error).toContain("moving the user's physical mouse");
+  expect(physicalInputRequiredClick.details?.errorCode).toBe("physical_input_required");
 });
 
 test("packaged app completes a locked-use active-turn self-test through its trusted desktop process", async () => {

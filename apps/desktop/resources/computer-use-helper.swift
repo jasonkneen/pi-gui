@@ -115,6 +115,7 @@ private let testForceUnlockedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_UNLOCKED"
 private let testForceAccessibilityDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_ACCESSIBILITY_DENIED"
 private let testForceScreenRecordingDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED"
 private let testForceScreenshotUnavailableEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREENSHOT_UNAVAILABLE"
+private let testForcePhysicalInputRequiredEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_PHYSICAL_INPUT_REQUIRED"
 private let testForbidMouseWarpEnv = "PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP"
 private let testIncludePhysicalMouseStatusEnv = "PI_GUI_COMPUTER_USE_TEST_INCLUDE_PHYSICAL_MOUSE_STATUS"
 private let defaultCursorOverlayDuration = 8.0
@@ -1082,6 +1083,9 @@ func click(_ request: Request) throws -> Response {
     let app = try resolveApp(request.app)
     let clickCount = max(1, request.click_count ?? 1)
     let button = request.mouse_button ?? "left"
+    if ProcessInfo.processInfo.environment[testForcePhysicalInputRequiredEnv] == "1" {
+        throw physicalPointerClickRequired(app: app, point: CGPoint(x: request.x ?? 0, y: request.y ?? 0))
+    }
 
     if let element = try indexedElement(request, app: app) {
         if button == "left", copyActionNames(element).contains(kAXPressAction as String) {
