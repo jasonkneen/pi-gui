@@ -250,8 +250,8 @@ async function assertComputerUseSettingsMatchesRealStatus(
   if (status.message) {
     await expect(settingsRow(window, "Details")).toContainText(status.message);
   }
-  await expect(settingsRow(window, "Accessibility")).toContainText(permissionLabel(status.accessibility));
-  await expect(settingsRow(window, "Screen Recording")).toContainText(permissionLabel(status.screenRecording));
+  await expectPermissionRow(window, "Accessibility", status.accessibility, "Open Accessibility");
+  await expectPermissionRow(window, "Screen Recording", status.screenRecording, "Open Screen Recording");
 
   if (lockedUseActionLogPath) {
     expect(status.helperAvailable).toBe(true);
@@ -291,4 +291,19 @@ function settingsRow(window: Page, title: string) {
   return window.locator(".settings-row").filter({
     has: window.locator(".settings-row__title", { hasText: new RegExp(`^${escapeRegExp(title)}$`) }),
   });
+}
+
+async function expectPermissionRow(
+  window: Page,
+  title: "Accessibility" | "Screen Recording",
+  status: DesktopComputerUseStatus["accessibility"],
+  actionLabel: "Open Accessibility" | "Open Screen Recording",
+): Promise<void> {
+  const row = settingsRow(window, title);
+  await expect(row).toContainText(permissionLabel(status));
+  if (status === "granted") {
+    await expect(row.getByRole("button")).toHaveCount(0);
+    return;
+  }
+  await expect(row.getByRole("button", { name: actionLabel, exact: true })).toBeVisible();
 }
