@@ -163,6 +163,7 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSwiftSource).toContain("locked_use_begin");
   expect(helperSwiftSource).toContain("locked_use_end");
   expect(helperSwiftSource).toContain("locked_use_authorization_probe");
+  expect(helperSwiftSource).toContain("hide_cursor");
   expect(helperSwiftSource).toContain("lockedUseHelperSupportsActiveTurnProtocol");
   expect(helperSwiftSource).toContain("Installed Locked Computer Use helper is stale");
   expect(helperSwiftSource).toContain("does not support active-turn authorization");
@@ -170,6 +171,8 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSwiftSource).toContain("shouldRelockAutoUnlockedDesktop");
   expect(helperSwiftSource).toContain("withAgentCursorPress");
   expect(helperSwiftSource).toContain("releaseAgentCursor");
+  expect(helperSwiftSource).toContain("maxCursorOverlayDuration = 60.0");
+  expect(helperSwiftSource).toContain("min(milliseconds / 1000, maxCursorOverlayDuration)");
   expect(helperSwiftSource).toContain(".nonactivatingPanel");
   expect(helperSwiftSource).toContain("panel.ignoresMouseEvents = true");
   expect(helperSwiftSource).toContain(".canJoinAllSpaces");
@@ -277,8 +280,13 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(extensionSource).toContain("lockedUseDesktopPid");
   expect(extensionSource).toContain("lockedUseAuthorizationSocket");
   expect(extensionSource).toContain("lockedUseCredentialsIfConfigured");
+  expect(extensionSource).toContain("PI_GUI_COMPUTER_USE_SHOW_CURSOR");
+  expect(extensionSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS");
+  expect(extensionSource).toContain("PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS");
+  expect(extensionSource).toContain("hide_cursor");
   expect(extensionSource).toContain("delete env[key]");
   expect(extensionSource).toContain("setEnvFromRuntimeConfig");
+  expect(extensionSource).toContain("setDefaultEnv");
   expect(extensionSource).toContain("turn_end");
   expect(extensionSource).toContain("session_shutdown");
   expect(extensionSource).toContain("cleanupComputerUseRuntime");

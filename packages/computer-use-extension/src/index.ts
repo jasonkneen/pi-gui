@@ -56,6 +56,11 @@ const lockedUseAuthorizationSocketEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOC
 const autoAllowEnv = "PI_GUI_COMPUTER_USE_AUTO_ALLOW";
 const appConfirmEnv = "PI_GUI_COMPUTER_USE_REQUIRE_APP_CONFIRMATION";
 const allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT";
+const cursorOverlayShowEnv = "PI_GUI_COMPUTER_USE_SHOW_CURSOR";
+const cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS";
+const cursorOverlayGlideEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS";
+const defaultCursorOverlayDurationMs = "60000";
+const defaultCursorOverlayGlideMs = "300";
 const toolTimeoutMs = 20_000;
 const maxHelperOutputBytes = 24 * 1024 * 1024;
 const allowedApps = new Set<string>();
@@ -74,6 +79,7 @@ export interface ComputerUseRuntimeConfig {
 
 interface ComputerUseRuntimeState {
   lockedUseLeaseActive: boolean;
+  agentCursorOverlayTouched: boolean;
   lockedUseTurnToken?: string;
 }
 
@@ -82,7 +88,7 @@ interface ComputerUseRuntimeBinding {
   readonly state: ComputerUseRuntimeState;
 }
 
-const fallbackRuntimeState: ComputerUseRuntimeState = { lockedUseLeaseActive: false };
+const fallbackRuntimeState: ComputerUseRuntimeState = { lockedUseLeaseActive: false, agentCursorOverlayTouched: false };
 const runtimeBindingStorage = new AsyncLocalStorage<ComputerUseRuntimeBinding>();
 
 function objectSchema(properties: Record<string, PropertySchema>): any {
@@ -365,7 +371,7 @@ export default function computerUseExtension(pi: ExtensionAPI): void {
 function registerComputerUseTools(pi: ExtensionAPI, runtimeConfig: ComputerUseRuntimeConfig): void {
   const binding = {
     config: runtimeConfig,
-    state: { lockedUseLeaseActive: false },
+    state: { lockedUseLeaseActive: false, agentCursorOverlayTouched: false },
   };
   pi.registerTool(bindRuntimeBinding(statusTool, binding));
   pi.registerTool(bindRuntimeBinding(listAppsTool, binding));
@@ -410,6 +416,7 @@ async function cleanupComputerUseRuntime(
   await runtimeBindingStorage.run(binding, async () => {
     computerUseFailureResults.clear();
     await endLockedUseLease();
+    await hideAgentCursorOverlay();
     try {
       ctx?.ui.setWidget("computer-use", undefined);
     } catch {
@@ -467,6 +474,9 @@ async function callHelper(
   try {
     if (requiresUnlockedDesktop(action)) {
       await beginLockedUseLease(toolCallId, helperPath, signal);
+    }
+    if (usesAgentCursorOverlay(action)) {
+      runtimeState().agentCursorOverlayTouched = true;
     }
     response = await runHelper(helperPath, { ...params, command: action }, signal);
   } catch (error) {
@@ -542,6 +552,33 @@ async function endLockedUseLease(): Promise<void> {
   } finally {
     delete state.lockedUseTurnToken;
   }
+}
+
+async function hideAgentCursorOverlay(): Promise<void> {
+  const state = runtimeState();
+  if (!state.agentCursorOverlayTouched) {
+    return;
+  }
+  state.agentCursorOverlayTouched = false;
+  try {
+    const helperPath = await resolveHelperPath();
+    await runHelper(helperPath, { command: "hide_cursor" }, undefined);
+  } catch {
+    // Cursor cleanup is best-effort; the next helper action refreshes or replaces stale overlay state.
+  }
+}
+
+function usesAgentCursorOverlay(action: string): boolean {
+  return [
+    "click",
+    "perform_secondary_action",
+    "set_value",
+    "select_text",
+    "scroll",
+    "drag",
+    "press_key",
+    "type_text",
+  ].includes(action);
 }
 
 function lockedUseCredentialsIfConfigured():
@@ -787,6 +824,9 @@ function helperEnvironment(): NodeJS.ProcessEnv {
   setEnvFromRuntimeConfig(env, lockedUseDesktopPidEnv, "lockedUseDesktopPid");
   setEnvFromRuntimeConfig(env, lockedUseDesktopPathEnv, "lockedUseDesktopPath");
   setEnvFromRuntimeConfig(env, lockedUseAuthorizationSocketEnv, "lockedUseAuthorizationSocket");
+  setDefaultEnv(env, cursorOverlayShowEnv, "1");
+  setDefaultEnv(env, cursorOverlayDurationEnv, defaultCursorOverlayDurationMs);
+  setDefaultEnv(env, cursorOverlayGlideEnv, defaultCursorOverlayGlideMs);
   return env;
 }
 
@@ -806,6 +846,12 @@ function setEnvFromRuntimeConfig(
   const configured = runtimeConfig()[configKey]?.trim();
   if (configured) {
     env[envKey] = configured;
+  }
+}
+
+function setDefaultEnv(env: NodeJS.ProcessEnv, envKey: string, value: string): void {
+  if (!env[envKey]?.trim()) {
+    env[envKey] = value;
   }
 }
 

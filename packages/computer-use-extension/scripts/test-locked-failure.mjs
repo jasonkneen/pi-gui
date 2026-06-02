@@ -25,6 +25,7 @@ const tempDir = await mkdtemp(join(tmpdir(), "pi-gui-computer-use-extension-"));
 const fakeHelperPath = join(tempDir, "fake-helper.mjs");
 const tokenLogPath = join(tempDir, "turn-tokens.log");
 const endTokenLogPath = join(tempDir, "ended-turn-tokens.log");
+const hideCursorLogPath = join(tempDir, "hide-cursor.log");
 const beginCountPath = join(tempDir, "begin-count.txt");
 await writeFile(
   fakeHelperPath,
@@ -43,6 +44,15 @@ process.stdin.on("end", () => {
       ok: true,
       content: [{ type: "text", text: "Locked Computer Use lease ended." }],
       details: { lockedUseLease: "ended", relockRequested: "true" },
+    };
+  } else if (request.command === "hide_cursor") {
+    if (process.env.PI_GUI_COMPUTER_USE_TEST_HIDE_CURSOR_LOG) {
+      fs.appendFileSync(process.env.PI_GUI_COMPUTER_USE_TEST_HIDE_CURSOR_LOG, "hide_cursor\\n");
+    }
+    response = {
+      ok: true,
+      content: [{ type: "text", text: "Computer Use agent cursor hidden." }],
+      details: { cursorHidden: "true" },
     };
   } else if (request.command === "locked_use_begin") {
     if (request.locked_use_turn_token && process.env.PI_GUI_COMPUTER_USE_TEST_TOKEN_LOG) {
@@ -115,7 +125,13 @@ process.stdin.on("end", () => {
     response = {
       ok: true,
       content: [{ type: "text", text: "Computer Use status (Pi GUI)\\nDesktop: locked" }],
-      details: { screenLocked: "true", lockedUse: "not_enabled" },
+      details: {
+        screenLocked: "true",
+        lockedUse: "not_enabled",
+        cursorVisible: process.env.PI_GUI_COMPUTER_USE_SHOW_CURSOR,
+        cursorDurationMs: process.env.PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS,
+        cursorGlideMs: process.env.PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS,
+      },
     };
   } else if (request.command === "get_app_state" && request.app === "LockedUseDisabled") {
     response = {
@@ -172,6 +188,7 @@ process.env.PI_GUI_COMPUTER_USE_HELPER_PATH = fakeHelperPath;
 process.env.PI_GUI_COMPUTER_USE_AUTO_ALLOW = "1";
 process.env.PI_GUI_COMPUTER_USE_TEST_TOKEN_LOG = tokenLogPath;
 process.env.PI_GUI_COMPUTER_USE_TEST_END_TOKEN_LOG = endTokenLogPath;
+process.env.PI_GUI_COMPUTER_USE_TEST_HIDE_CURSOR_LOG = hideCursorLogPath;
 
 const lockedThrown = await executeToolExpectingError(
   getAppState,
@@ -288,6 +305,9 @@ await assertFailureResult({
 const status = await tools.get("computer_use_status").execute("call-status", {}, undefined, undefined, { hasUI: false });
 const statusText = status.content.find((item) => item.type === "text")?.text ?? "";
 assert.match(statusText, /Desktop: locked/);
+assert.equal(status.details.cursorVisible, "1", "Computer Use should show the agent cursor by default");
+assert.equal(status.details.cursorDurationMs, "60000", "Computer Use should keep the cursor visible across active tool sequences");
+assert.equal(status.details.cursorGlideMs, "300", "Computer Use should glide the cursor by default");
 
 const configuredTools = new Map();
 const configuredHandlers = new Map();
@@ -323,6 +343,7 @@ await assertFailureResult({
 });
 
 await configuredHandlers.get("turn_end")({}, { ui: { setWidget() {} } });
+await waitForLineCount(hideCursorLogPath, 1);
 const secondConfiguredRuntimeThrown = await executeToolExpectingError(
   configuredTools.get("click"),
   "call-runtime-config-second-turn",
@@ -411,6 +432,7 @@ assert.deepEqual(
 delete process.env.PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN;
 delete process.env.PI_GUI_COMPUTER_USE_TEST_TOKEN_LOG;
 delete process.env.PI_GUI_COMPUTER_USE_TEST_END_TOKEN_LOG;
+delete process.env.PI_GUI_COMPUTER_USE_TEST_HIDE_CURSOR_LOG;
 
 async function executeToolExpectingError(tool, toolCallId, input, expectedMessage, assertionMessage) {
   let thrown;

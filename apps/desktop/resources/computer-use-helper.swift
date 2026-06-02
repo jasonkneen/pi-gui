@@ -113,6 +113,7 @@ private let testSkipUnlockReturnKeyEnv = "PI_GUI_COMPUTER_USE_TEST_SKIP_UNLOCK_R
 private let testForceScreenRecordingDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED"
 private let testForbidMouseWarpEnv = "PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP"
 private let defaultCursorOverlayDuration = 8.0
+private let maxCursorOverlayDuration = 60.0
 private let defaultCursorOverlayGlideDuration = 0.32
 private let defaultLockedUseLeaseSeconds: TimeInterval = 300
 private let defaultLockedUseUnlockTimeout: TimeInterval = 8.0
@@ -332,6 +333,7 @@ func readLockedUseAuthorizationDaemonTurnToken() throws -> String {
 func handle(_ request: Request) throws -> Response {
     if request.command != "list_apps",
        request.command != "status",
+       request.command != "hide_cursor",
        request.command != "locked_use_begin",
        request.command != "locked_use_end",
        request.command != "locked_use_authorization_probe" {
@@ -343,6 +345,8 @@ func handle(_ request: Request) throws -> Response {
         return try listApps()
     case "status":
         return status()
+    case "hide_cursor":
+        return hideCursor()
     case "locked_use_begin":
         return try beginLockedUse(request)
     case "locked_use_end":
@@ -407,6 +411,20 @@ func status() -> Response {
         ok: true,
         content: [.text(text)],
         details: details,
+        error: nil
+    )
+}
+
+func hideCursor() -> Response {
+    if let pid = readAgentCursorOverlayPid(), pid > 0, isAgentCursorOverlayDaemonProcess(pid) {
+        Darwin.kill(pid, SIGTERM)
+    }
+    try? FileManager.default.removeItem(at: agentCursorPidFile)
+    try? FileManager.default.removeItem(at: agentCursorPositionFile)
+    return Response(
+        ok: true,
+        content: [.text("Computer Use agent cursor hidden.")],
+        details: nil,
         error: nil
     )
 }
@@ -2510,7 +2528,7 @@ func cursorOverlayDuration() -> TimeInterval {
           milliseconds > 0 else {
         return defaultCursorOverlayDuration
     }
-    return min(milliseconds / 1000, 30)
+    return min(milliseconds / 1000, maxCursorOverlayDuration)
 }
 
 func transientCursorOverlayDuration() -> TimeInterval {
