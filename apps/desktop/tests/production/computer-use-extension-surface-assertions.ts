@@ -212,6 +212,9 @@ async function assertComputerUseSettingsMatchesRealStatus(window: Page): Promise
   const settings = window.locator(".settings-view");
   const helperRow = settingsRow(window, "Helper");
   await expect(helperRow).toContainText(status.helperAvailable ? "Available" : "Unavailable");
+  if (status.frontmostApp) {
+    await expect(settingsRow(window, "Frontmost app")).toContainText(status.frontmostApp);
+  }
 
   const lockedUseRow = settingsRow(window, "Locked computer use");
   await expect(lockedUseRow).toContainText(lockedUseLabel(status.lockedUse));

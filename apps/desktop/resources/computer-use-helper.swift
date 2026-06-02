@@ -378,6 +378,7 @@ func handle(_ request: Request) throws -> Response {
 
 func status() -> Response {
     let locked = isScreenLocked()
+    let frontmostApp = frontmostAppName()
     let accessibilityGranted = AXIsProcessTrusted()
     let screenRecordingGranted = screenRecordingStatus()
     let installerStatus = lockedUseInstallerStatus()
@@ -387,6 +388,7 @@ func status() -> Response {
 
     var text = "Computer Use status (Pi GUI)\n"
     text += "Desktop: \(locked ? "locked" : "unlocked")\n"
+    text += "Frontmost App: \(frontmostApp)\n"
     text += "Accessibility: \(accessibilityGranted ? "granted" : "not granted")\n"
     text += "Screen Recording: \(screenRecordingGranted)\n"
     text += "Locked Computer Use: \(lockSupport)\n"
@@ -396,6 +398,7 @@ func status() -> Response {
 
     var details = [
         "screenLocked": locked ? "true" : "false",
+        "frontmostApp": frontmostApp,
         "accessibility": accessibilityGranted ? "granted" : "denied",
         "screenRecording": screenRecordingGranted,
         "lockedUse": lockSupport,
@@ -413,6 +416,17 @@ func status() -> Response {
         details: details,
         error: nil
     )
+}
+
+func frontmostAppName() -> String {
+    let app = NSWorkspace.shared.frontmostApplication
+    if let name = app?.localizedName, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return name
+    }
+    if let bundleIdentifier = app?.bundleIdentifier, !bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return bundleIdentifier
+    }
+    return "unknown"
 }
 
 func hideCursor() -> Response {

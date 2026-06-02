@@ -80,7 +80,7 @@ async function main() {
   }
 
   console.log(
-    `COMPUTER_USE_LOCKED_READINESS_STATUS mode=${mode} desktop=${desktopState} locked_use=${lockedUseState} installer=${installerState} helper=${paths.helperExecutable}`,
+    `COMPUTER_USE_LOCKED_READINESS_STATUS mode=${mode} desktop=${desktopState} frontmost=${statusToken(details.frontmostApp)} locked_use=${lockedUseState} installer=${installerState} helper=${paths.helperExecutable}`,
   );
 
   if (installerState === "installed" && lockedUseState === "enabled") {
@@ -258,4 +258,9 @@ function textContent(response) {
     .map((item) => item.text ?? "")
     .join("\n")
     .trim();
+}
+
+function statusToken(value) {
+  const text = typeof value === "string" && value.trim() ? value.trim() : "unknown";
+  return text.replace(/\s+/g, "_");
 }

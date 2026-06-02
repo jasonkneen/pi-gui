@@ -41,6 +41,7 @@ export interface DesktopComputerUseStatus {
   readonly helperAvailable: boolean;
   readonly helperPath?: string;
   readonly desktop: DesktopComputerUseDesktopState;
+  readonly frontmostApp?: string;
   readonly accessibility: DesktopComputerUseStatusValue;
   readonly screenRecording: DesktopComputerUseStatusValue;
   readonly lockedUse: DesktopComputerUseLockedState;

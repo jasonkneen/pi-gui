@@ -27,6 +27,7 @@ export function SettingsComputerUseSection({
           <span className="settings-row__value">{helperLabel(status, pending)}</span>
         </SettingsRow>
         <SettingsInfoRow label="Desktop" value={desktopLabel(status?.desktop)} />
+        <SettingsInfoRow label="Frontmost app" value={frontmostAppLabel(status?.frontmostApp)} />
         <SettingsRow
           title="Locked computer use"
           description="Lets pi-gui continue an active Computer Use turn after macOS locks. macOS will ask for an administrator password."
@@ -115,6 +116,11 @@ function desktopLabel(value: DesktopComputerUseStatus["desktop"] | undefined): s
     default:
       return "Unknown";
   }
+}
+
+function frontmostAppLabel(value: string | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed || "Unknown";
 }
 
 function helperLabel(status: DesktopComputerUseStatus | undefined, pending: boolean): string {

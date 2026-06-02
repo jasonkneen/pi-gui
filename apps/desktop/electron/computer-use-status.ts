@@ -62,6 +62,7 @@ export async function getComputerUseStatus(): Promise<DesktopComputerUseStatus> 
       helperAvailable: true,
       helperPath,
       desktop: details.screenLocked === "true" ? "locked" : details.screenLocked === "false" ? "unlocked" : "unknown",
+      frontmostApp: optionalDetail(details.frontmostApp),
       accessibility: permissionStatus(details.accessibility),
       screenRecording: permissionStatus(details.screenRecording),
       lockedUse: details.lockedUse === "enabled" ? "enabled" : "not_enabled",
@@ -180,6 +181,11 @@ function lockedUseInstallerStatus(value: string | undefined): DesktopComputerUse
     default:
       return "unknown";
   }
+}
+
+function optionalDetail(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 async function requireExecutableInstaller(installerPath: string): Promise<void> {

@@ -20,6 +20,7 @@ test("shows Computer Use permission and locked-use status in Settings", async ()
     helperAvailable: true,
     helperPath: "/Applications/pi-gui.app/Contents/SharedSupport/pi-gui Computer Use.app/Contents/MacOS/pi-gui-computer-use-helper",
     desktop: "locked",
+    frontmostApp: "loginwindow",
     accessibility: "denied",
     screenRecording: "granted",
     lockedUse: "not_enabled",
@@ -46,6 +47,7 @@ test("shows Computer Use permission and locked-use status in Settings", async ()
     await expect(window.locator(".settings-view")).toContainText("Helper");
     await expect(window.locator(".settings-view")).toContainText("Available");
     await expect(window.locator(".settings-view")).toContainText("Locked");
+    await expect(window.locator(".settings-view")).toContainText("loginwindow");
     await expect(window.locator(".settings-view")).toContainText("Not enabled");
     await expect(window.locator(".settings-view")).toContainText("Not installed");
     await expect(window.locator(".settings-view")).toContainText("Turned off");
