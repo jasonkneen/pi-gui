@@ -2305,12 +2305,9 @@ func showTransientAgentCursor(at point: CGPoint, pressed: Bool) {
     guard let targetFrame = agentCursorFrame(for: point) else {
         return
     }
-    let startPoint = currentMouseLocation() ?? point
-    let startFrame = agentCursorFrame(for: startPoint) ?? targetFrame
     NSApplication.shared.setActivationPolicy(.accessory)
-    let (panel, cursorView) = makeAgentCursorPanel(frame: startFrame, pressed: false)
+    let (panel, cursorView) = makeAgentCursorPanel(frame: targetFrame, pressed: false)
     panel.orderFrontRegardless()
-    glideAgentCursor(panel, from: startFrame, to: targetFrame)
     cursorView.pressed = pressed
     RunLoop.current.run(until: Date().addingTimeInterval(transientCursorOverlayDuration()))
     panel.orderOut(nil)
@@ -2339,12 +2336,10 @@ func runAgentCursorOverlayDaemon() -> Never {
 
                 if let nextTargetFrame = agentCursorFrame(for: request.point) {
                     if panel == nil {
-                        let initialPoint = currentMouseLocation() ?? request.point
-                        let initialFrame = agentCursorFrame(for: initialPoint) ?? nextTargetFrame
-                        let cursorPanel = makeAgentCursorPanel(frame: initialFrame, pressed: request.pressed)
+                        let cursorPanel = makeAgentCursorPanel(frame: nextTargetFrame, pressed: request.pressed)
                         panel = cursorPanel.panel
                         cursorView = cursorPanel.cursorView
-                        currentFrame = initialFrame
+                        currentFrame = nextTargetFrame
                         panel?.orderFrontRegardless()
                     }
 
