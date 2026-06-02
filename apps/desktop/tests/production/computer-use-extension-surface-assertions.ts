@@ -1,4 +1,10 @@
 import { expect, type Page } from "@playwright/test";
+import type { DesktopComputerUseStatus } from "../../src/ipc";
+import {
+  lockedUseActionLabel,
+  lockedUseInstallerLabel,
+  lockedUseLabel,
+} from "../../src/settings-computer-use-section";
 import { createSessionViaIpc, selectSession, waitForWorkspaceByPath } from "../helpers/electron-app";
 
 interface ComputerUseExtensionSurfaceOptions {
@@ -40,6 +46,7 @@ export async function assertComputerUseExtensionSurface(
   await expect(window.getByTestId("settings-surface")).toBeVisible();
   await expect(window.locator(".settings-view")).toContainText("Computer Use");
   await expect(window.locator(".settings-view")).toContainText("Locked computer use");
+  await assertComputerUseSettingsMatchesRealStatus(window);
   await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
   await createSessionViaIpc(window, workspacePath, sessionTitle);
@@ -198,4 +205,43 @@ async function setRuntimeExtensionEnabled(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function assertComputerUseSettingsMatchesRealStatus(window: Page): Promise<void> {
+  const status = await getComputerUseStatus(window);
+  const settings = window.locator(".settings-view");
+  const helperRow = settingsRow(window, "Helper");
+  await expect(helperRow).toContainText(status.helperAvailable ? "Available" : "Unavailable");
+
+  const lockedUseRow = settingsRow(window, "Locked computer use");
+  await expect(lockedUseRow).toContainText(lockedUseLabel(status.lockedUse));
+  const lockedUseAction = lockedUseActionLabel(status);
+  if (lockedUseAction) {
+    await expect(lockedUseRow.getByRole("button", { name: lockedUseAction, exact: true })).toBeVisible();
+  } else {
+    await expect(lockedUseRow.getByRole("button")).toHaveCount(0);
+  }
+
+  await expect(settingsRow(window, "Locked setup")).toContainText(lockedUseInstallerLabel(status.lockedUseInstaller));
+  if (status.message) {
+    await expect(settingsRow(window, "Details")).toContainText(status.message);
+  }
+}
+
+async function getComputerUseStatus(window: Page): Promise<DesktopComputerUseStatus> {
+  return window.evaluate(async () => {
+    const app = (globalThis as typeof globalThis & { piApp?: unknown }).piApp as
+      | { getComputerUseStatus(): Promise<DesktopComputerUseStatus> }
+      | undefined;
+    if (!app) {
+      throw new Error("piApp IPC bridge is unavailable");
+    }
+    return app.getComputerUseStatus();
+  });
+}
+
+function settingsRow(window: Page, title: string) {
+  return window.locator(".settings-row").filter({
+    has: window.locator(".settings-row__title", { hasText: new RegExp(`^${escapeRegExp(title)}$`) }),
+  });
 }

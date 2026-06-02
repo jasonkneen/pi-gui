@@ -124,7 +124,7 @@ function helperLabel(status: DesktopComputerUseStatus | undefined, pending: bool
   return status.helperAvailable ? "Available" : "Unavailable";
 }
 
-function lockedUseLabel(value: DesktopComputerUseStatus["lockedUse"] | undefined): string {
+export function lockedUseLabel(value: DesktopComputerUseStatus["lockedUse"] | undefined): string {
   switch (value) {
     case "enabled":
       return "Enabled";
@@ -135,7 +135,7 @@ function lockedUseLabel(value: DesktopComputerUseStatus["lockedUse"] | undefined
   }
 }
 
-function lockedUseInstallerLabel(value: DesktopComputerUseStatus["lockedUseInstaller"] | undefined): string {
+export function lockedUseInstallerLabel(value: DesktopComputerUseStatus["lockedUseInstaller"] | undefined): string {
   switch (value) {
     case "installed":
       return "Installed";
@@ -150,7 +150,7 @@ function lockedUseInstallerLabel(value: DesktopComputerUseStatus["lockedUseInsta
   }
 }
 
-function lockedUseActionLabel(status: DesktopComputerUseStatus | undefined): string | undefined {
+export function lockedUseActionLabel(status: DesktopComputerUseStatus | undefined): string | undefined {
   if (!status?.helperAvailable) {
     return undefined;
   }
