@@ -21,6 +21,10 @@ test("shows Computer Use permission and locked-use status in Settings", async ()
     helperPath: "/Applications/pi-gui.app/Contents/SharedSupport/pi-gui Computer Use.app/Contents/MacOS/pi-gui-computer-use-helper",
     desktop: "locked",
     frontmostApp: "loginwindow",
+    cursor: "enabled",
+    cursorActive: "inactive",
+    cursorDurationMs: 60_000,
+    cursorGlideMs: 300,
     accessibility: "denied",
     screenRecording: "granted",
     lockedUse: "not_enabled",
@@ -48,6 +52,10 @@ test("shows Computer Use permission and locked-use status in Settings", async ()
     await expect(window.locator(".settings-view")).toContainText("Available");
     await expect(window.locator(".settings-view")).toContainText("Locked");
     await expect(window.locator(".settings-view")).toContainText("loginwindow");
+    await expect(window.locator(".settings-view")).toContainText("Agent cursor");
+    await expect(window.locator(".settings-view")).toContainText("Cursor overlay");
+    await expect(window.locator(".settings-view")).toContainText("60000ms");
+    await expect(window.locator(".settings-view")).toContainText("300ms");
     await expect(window.locator(".settings-view")).toContainText("Not enabled");
     await expect(window.locator(".settings-view")).toContainText("Not installed");
     await expect(window.locator(".settings-view")).toContainText("Turned off");
@@ -71,6 +79,7 @@ test("hides locked-use setup action when installer is not configured", async () 
     helperAvailable: true,
     helperPath: "/Applications/pi-gui.app/Contents/SharedSupport/pi-gui Computer Use.app/Contents/MacOS/pi-gui-computer-use-helper",
     desktop: "locked",
+    cursor: "unknown",
     accessibility: "granted",
     screenRecording: "granted",
     lockedUse: "not_enabled",

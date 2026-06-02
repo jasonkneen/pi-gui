@@ -95,6 +95,7 @@ private let cursorOverlayDaemonArgument = "--cursor-overlay-daemon"
 private let lockedUseAuthorizationDaemonArgument = "--lock-screen-authorization-daemon"
 private let lockedUseAuthorizationProtocolVersionArgument = "--lock-screen-authorization-protocol-version"
 private let lockedUseAuthorizationProtocolVersion = "pi-gui-computer-use-active-turn-v1"
+private let cursorOverlayShowEnv = "PI_GUI_COMPUTER_USE_SHOW_CURSOR"
 private let cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS"
 private let cursorOverlayGlideDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS"
 private let allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT"
@@ -385,12 +386,20 @@ func status() -> Response {
     let lockSupport = installerStatus.state == "installed" ? "enabled" : "not_enabled"
     let lockSupportMessage = lockedUseMessage(for: installerStatus)
     let daemonActive = isLockedUseAuthorizationDaemonRunning()
+    let cursorVisible = isAgentCursorOverlayVisible()
+    let cursorActive = isAgentCursorOverlayDaemonRunning()
+    let cursorDurationMs = formatMilliseconds(cursorOverlayDuration())
+    let cursorGlideMs = formatMilliseconds(cursorOverlayGlideDuration())
 
     var text = "Computer Use status (Pi GUI)\n"
     text += "Desktop: \(locked ? "locked" : "unlocked")\n"
     text += "Frontmost App: \(frontmostApp)\n"
     text += "Accessibility: \(accessibilityGranted ? "granted" : "not granted")\n"
     text += "Screen Recording: \(screenRecordingGranted)\n"
+    text += "Agent Cursor: \(cursorVisible ? "enabled" : "disabled")\n"
+    text += "Agent Cursor Overlay: \(cursorActive ? "active" : "inactive")\n"
+    text += "Agent Cursor Duration: \(cursorDurationMs)ms\n"
+    text += "Agent Cursor Glide: \(cursorGlideMs)ms\n"
     text += "Locked Computer Use: \(lockSupport)\n"
     text += "Locked Computer Use Installer: \(installerStatus.state)\n"
     text += "Locked Computer Use Authorization Service: \(daemonActive ? "active" : "inactive")\n"
@@ -401,6 +410,10 @@ func status() -> Response {
         "frontmostApp": frontmostApp,
         "accessibility": accessibilityGranted ? "granted" : "denied",
         "screenRecording": screenRecordingGranted,
+        "cursorVisible": cursorVisible ? "1" : "0",
+        "cursorActive": cursorActive ? "active" : "inactive",
+        "cursorDurationMs": cursorDurationMs,
+        "cursorGlideMs": cursorGlideMs,
         "lockedUse": lockSupport,
         "lockedUseAuthorizationService": daemonActive ? "active" : "inactive",
         "lockedUseInstaller": installerStatus.state,
@@ -416,6 +429,10 @@ func status() -> Response {
         details: details,
         error: nil
     )
+}
+
+func isAgentCursorOverlayVisible() -> Bool {
+    ProcessInfo.processInfo.environment[cursorOverlayShowEnv] != cursorOverlayDisabledValue
 }
 
 func frontmostAppName() -> String {
@@ -1865,7 +1882,7 @@ func showAgentCursor(for element: AXUIElement, pressed: Bool) -> Bool {
 
 @discardableResult
 func showAgentCursor(at point: CGPoint, pressed: Bool) -> Bool {
-    guard ProcessInfo.processInfo.environment["PI_GUI_COMPUTER_USE_SHOW_CURSOR"] != cursorOverlayDisabledValue,
+    guard ProcessInfo.processInfo.environment[cursorOverlayShowEnv] != cursorOverlayDisabledValue,
           agentCursorFrame(for: point) != nil else {
         return false
     }
@@ -1922,7 +1939,7 @@ func releaseAgentCursor(at point: CGPoint?) {
 }
 
 func waitForAgentCursorGlide() {
-    guard ProcessInfo.processInfo.environment["PI_GUI_COMPUTER_USE_SHOW_CURSOR"] != cursorOverlayDisabledValue else {
+    guard ProcessInfo.processInfo.environment[cursorOverlayShowEnv] != cursorOverlayDisabledValue else {
         return
     }
     let delay = min(cursorOverlayGlideDuration(), 0.35)
@@ -3154,6 +3171,10 @@ func formatCoordinate(_ value: Double) -> String {
         return String(format: "%.0f", value)
     }
     return String(format: "%.1f", value)
+}
+
+func formatMilliseconds(_ seconds: TimeInterval) -> String {
+    String(format: "%.0f", seconds * 1000)
 }
 
 func emit(_ response: Response) -> Never {

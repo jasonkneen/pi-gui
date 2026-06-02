@@ -28,6 +28,10 @@ export function SettingsComputerUseSection({
         </SettingsRow>
         <SettingsInfoRow label="Desktop" value={desktopLabel(status?.desktop)} />
         <SettingsInfoRow label="Frontmost app" value={frontmostAppLabel(status?.frontmostApp)} />
+        <SettingsInfoRow label="Agent cursor" value={cursorLabel(status?.cursor)} />
+        <SettingsInfoRow label="Cursor overlay" value={cursorActivityLabel(status?.cursorActive)} />
+        <SettingsInfoRow label="Cursor hold" value={durationLabel(status?.cursorDurationMs)} />
+        <SettingsInfoRow label="Cursor glide" value={durationLabel(status?.cursorGlideMs)} />
         <SettingsRow
           title="Locked computer use"
           description="Lets pi-gui continue an active Computer Use turn after macOS locks. macOS will ask for an administrator password."
@@ -121,6 +125,32 @@ function desktopLabel(value: DesktopComputerUseStatus["desktop"] | undefined): s
 function frontmostAppLabel(value: string | undefined): string {
   const trimmed = value?.trim();
   return trimmed || "Unknown";
+}
+
+export function cursorLabel(value: DesktopComputerUseStatus["cursor"] | undefined): string {
+  switch (value) {
+    case "enabled":
+      return "Enabled";
+    case "disabled":
+      return "Disabled";
+    default:
+      return "Unknown";
+  }
+}
+
+export function cursorActivityLabel(value: DesktopComputerUseStatus["cursorActive"] | undefined): string {
+  switch (value) {
+    case "active":
+      return "Active";
+    case "inactive":
+      return "Inactive";
+    default:
+      return "Unknown";
+  }
+}
+
+export function durationLabel(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${value}ms` : "Unknown";
 }
 
 function helperLabel(status: DesktopComputerUseStatus | undefined, pending: boolean): string {

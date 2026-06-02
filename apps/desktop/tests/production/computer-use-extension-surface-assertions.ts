@@ -1,6 +1,9 @@
 import { expect, type Page } from "@playwright/test";
 import type { DesktopComputerUseStatus } from "../../src/ipc";
 import {
+  cursorActivityLabel,
+  cursorLabel,
+  durationLabel,
   lockedUseActionLabel,
   lockedUseInstallerLabel,
   lockedUseLabel,
@@ -214,6 +217,16 @@ async function assertComputerUseSettingsMatchesRealStatus(window: Page): Promise
   await expect(helperRow).toContainText(status.helperAvailable ? "Available" : "Unavailable");
   if (status.frontmostApp) {
     await expect(settingsRow(window, "Frontmost app")).toContainText(status.frontmostApp);
+  }
+  await expect(settingsRow(window, "Agent cursor")).toContainText(cursorLabel(status.cursor));
+  if (status.cursorActive) {
+    await expect(settingsRow(window, "Cursor overlay")).toContainText(cursorActivityLabel(status.cursorActive));
+  }
+  if (status.cursorDurationMs) {
+    await expect(settingsRow(window, "Cursor hold")).toContainText(durationLabel(status.cursorDurationMs));
+  }
+  if (status.cursorGlideMs !== undefined) {
+    await expect(settingsRow(window, "Cursor glide")).toContainText(durationLabel(status.cursorGlideMs));
   }
 
   const lockedUseRow = settingsRow(window, "Locked computer use");

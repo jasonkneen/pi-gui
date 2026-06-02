@@ -7,6 +7,8 @@ import { shell } from "electron";
 import type {
   DesktopComputerUsePrivacyPane,
   DesktopComputerUseStatus,
+  DesktopComputerUseCursorActivity,
+  DesktopComputerUseCursorState,
   DesktopComputerUseLockedInstallerState,
   DesktopComputerUseStatusValue,
 } from "../src/ipc";
@@ -23,6 +25,11 @@ const computerUsePrivateEnvKeys = [
 const statusOverrideEnv = "PI_APP_TEST_COMPUTER_USE_STATUS_JSON";
 const settingsLogPathEnv = "PI_APP_TEST_COMPUTER_USE_SETTINGS_LOG_PATH";
 const lockedUseActionLogPathEnv = "PI_APP_TEST_COMPUTER_USE_LOCKED_USE_ACTION_LOG_PATH";
+const cursorOverlayShowEnv = "PI_GUI_COMPUTER_USE_SHOW_CURSOR";
+const cursorOverlayDurationEnv = "PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS";
+const cursorOverlayGlideEnv = "PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS";
+const defaultCursorOverlayDurationMs = "60000";
+const defaultCursorOverlayGlideMs = "300";
 const helperStatusTimeoutMs = 5_000;
 const lockedUseInstallerTimeoutMs = 120_000;
 const lockedUseInstallerConfirmFlag = "--confirm-system-login-change";
@@ -45,6 +52,7 @@ export async function getComputerUseStatus(): Promise<DesktopComputerUseStatus> 
     return {
       helperAvailable: false,
       desktop: "unknown",
+      cursor: "unknown",
       accessibility: "unknown",
       screenRecording: "unknown",
       lockedUse: "not_enabled",
@@ -63,6 +71,10 @@ export async function getComputerUseStatus(): Promise<DesktopComputerUseStatus> 
       helperPath,
       desktop: details.screenLocked === "true" ? "locked" : details.screenLocked === "false" ? "unlocked" : "unknown",
       frontmostApp: optionalDetail(details.frontmostApp),
+      cursor: cursorStatus(details.cursorVisible),
+      cursorActive: cursorActivity(details.cursorActive),
+      cursorDurationMs: positiveIntegerDetail(details.cursorDurationMs),
+      cursorGlideMs: nonnegativeIntegerDetail(details.cursorGlideMs),
       accessibility: permissionStatus(details.accessibility),
       screenRecording: permissionStatus(details.screenRecording),
       lockedUse: details.lockedUse === "enabled" ? "enabled" : "not_enabled",
@@ -75,6 +87,7 @@ export async function getComputerUseStatus(): Promise<DesktopComputerUseStatus> 
       helperAvailable: false,
       helperPath,
       desktop: "unknown",
+      cursor: "unknown",
       accessibility: "unknown",
       screenRecording: "unknown",
       lockedUse: "not_enabled",
@@ -183,9 +196,50 @@ function lockedUseInstallerStatus(value: string | undefined): DesktopComputerUse
   }
 }
 
+function cursorStatus(value: string | undefined): DesktopComputerUseCursorState {
+  switch (value) {
+    case "1":
+    case "enabled":
+      return "enabled";
+    case "0":
+    case "disabled":
+      return "disabled";
+    default:
+      return "unknown";
+  }
+}
+
+function cursorActivity(value: string | undefined): DesktopComputerUseCursorActivity {
+  switch (value) {
+    case "active":
+    case "inactive":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+
 function optionalDetail(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function positiveIntegerDetail(value: string | undefined): number | undefined {
+  const parsed = integerDetail(value);
+  return parsed && parsed > 0 ? parsed : undefined;
+}
+
+function nonnegativeIntegerDetail(value: string | undefined): number | undefined {
+  const parsed = integerDetail(value);
+  return parsed !== undefined && parsed >= 0 ? parsed : undefined;
+}
+
+function integerDetail(value: string | undefined): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  return Number.parseInt(trimmed, 10);
 }
 
 async function requireExecutableInstaller(installerPath: string): Promise<void> {
@@ -272,5 +326,14 @@ function helperEnvironment(): NodeJS.ProcessEnv {
   for (const key of computerUsePrivateEnvKeys) {
     delete env[key];
   }
+  setDefaultEnv(env, cursorOverlayShowEnv, "1");
+  setDefaultEnv(env, cursorOverlayDurationEnv, defaultCursorOverlayDurationMs);
+  setDefaultEnv(env, cursorOverlayGlideEnv, defaultCursorOverlayGlideMs);
   return env;
+}
+
+function setDefaultEnv(env: NodeJS.ProcessEnv, key: string, value: string): void {
+  if (!env[key]?.trim()) {
+    env[key] = value;
+  }
 }

@@ -28,6 +28,8 @@ export type DesktopNotificationPermissionStatus =
 
 export type DesktopComputerUseStatusValue = "granted" | "denied" | "unknown";
 export type DesktopComputerUseDesktopState = "locked" | "unlocked" | "unknown";
+export type DesktopComputerUseCursorState = "enabled" | "disabled" | "unknown";
+export type DesktopComputerUseCursorActivity = "active" | "inactive" | "unknown";
 export type DesktopComputerUseLockedState = "enabled" | "not_enabled" | "unknown";
 export type DesktopComputerUseLockedInstallerState =
   | "installed"
@@ -42,6 +44,10 @@ export interface DesktopComputerUseStatus {
   readonly helperPath?: string;
   readonly desktop: DesktopComputerUseDesktopState;
   readonly frontmostApp?: string;
+  readonly cursor: DesktopComputerUseCursorState;
+  readonly cursorActive?: DesktopComputerUseCursorActivity;
+  readonly cursorDurationMs?: number;
+  readonly cursorGlideMs?: number;
   readonly accessibility: DesktopComputerUseStatusValue;
   readonly screenRecording: DesktopComputerUseStatusValue;
   readonly lockedUse: DesktopComputerUseLockedState;

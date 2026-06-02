@@ -302,7 +302,12 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperStatus.ok).toBe(true);
   expect(helperStatus.content?.[0]?.text).toContain("Computer Use status");
   expect(helperStatus.content?.[0]?.text).toContain("Locked Computer Use");
+  expect(helperStatus.content?.[0]?.text).toContain("Agent Cursor");
   expect(helperStatus.details?.frontmostApp).toBeTruthy();
+  expect(helperStatus.details?.cursorVisible).toMatch(/^[01]$/);
+  expect(helperStatus.details?.cursorActive).toMatch(/^(active|inactive)$/);
+  expect(helperStatus.details?.cursorDurationMs).toMatch(/^\d+$/);
+  expect(helperStatus.details?.cursorGlideMs).toMatch(/^\d+$/);
 
   const lockedUseInstallerStatus = await runLockedUseInstallerStatus(lockedUseInstallerExecutable);
   expect(lockedUseInstallerStatus).toMatch(/^OK: (installed|not-installed|partial)$/);
