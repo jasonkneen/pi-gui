@@ -27,6 +27,7 @@ const workspaceRuntimePackages = [
 ];
 const realAuthEnvVar = "PI_APP_REAL_AUTH";
 const realAuthSourceDirEnvVar = "PI_APP_REAL_AUTH_SOURCE_DIR";
+const lockScreenE2eEnvVar = "PI_APP_LOCK_SCREEN_E2E";
 
 try {
   await main();
@@ -101,6 +102,21 @@ async function main() {
     },
   );
 
+  await runStep(
+    "installed-helper-capabilities",
+    process.execPath,
+    ["scripts/computer-use-background-probe.mjs", "--installed", "--capabilities-only"],
+    {
+      cwd: desktopDir,
+    },
+  );
+
+  const lockedReadiness = await runInstalledLockedReadinessStatus();
+  if (!lockedReadiness.ready) {
+    throw lockedUseNotReadyForInstalledParityError();
+  }
+  assertLockScreenE2eConfirmedForInstalledParity();
+
   await runPnpmStep(
     "installed-locked-use-self-test",
     [
@@ -122,20 +138,9 @@ async function main() {
     },
   );
 
-  await runStep(
-    "installed-helper-capabilities",
-    process.execPath,
-    ["scripts/computer-use-background-probe.mjs", "--installed", "--capabilities-only"],
-    {
-      cwd: desktopDir,
-    },
-  );
-
-  const lockedReadiness = await runInstalledLockedReadinessStatus();
-
   const liveLockState = await desktopLockStateForInstalledLive();
   if (liveLockState.locked) {
-    throw lockedDesktopForInstalledLiveError(lockedReadiness.ready);
+    throw lockedDesktopForInstalledLiveError();
   }
 
   await runStep(
@@ -175,8 +180,12 @@ async function main() {
     },
   );
 
+  await runStep("installed-locked-live", process.execPath, ["scripts/run-installed-computer-use-locked-live-gate.mjs"], {
+    cwd: desktopDir,
+  });
+
   console.log(
-    "COMPUTER_USE_INSTALLED_PARITY_GATE_OK installed-app-freshness-extension-surface-failure-timeline-locked-use-helper-capabilities-background-probe-live-background-cursor",
+    "COMPUTER_USE_INSTALLED_PARITY_GATE_OK installed-app-freshness-extension-surface-failure-timeline-locked-use-helper-capabilities-background-probe-live-background-cursor-locked-live",
   );
 }
 
@@ -322,17 +331,38 @@ async function desktopLockStateForInstalledLive() {
   return { locked };
 }
 
-function lockedDesktopForInstalledLiveError(lockedReadinessReady) {
-  const lockedReadinessDetail = lockedReadinessReady
-    ? "Locked Computer Use readiness is enabled, but this installed parity gate still needs an unlocked desktop for the active-user background cursor/focus E2E."
-    : "Locked Computer Use readiness is not enabled yet; the status check above reports the exact installer and helper state.";
+function lockedDesktopForInstalledLiveError() {
   return new Error(
     [
       "COMPUTER_USE_INSTALLED_PARITY_GATE_BLOCKED desktop=locked reason=installed-live-requires-unlocked-active-desktop",
       "Installed Computer Use parity requires a real installed-app live background cursor/focus E2E.",
-      lockedReadinessDetail,
+      "Locked Computer Use readiness is enabled, but this gate still needs an unlocked desktop before the active-user background cursor/focus E2E and the controlled locked-live E2E.",
       "Installed-app checks completed before the blocked live E2E: current app payload freshness, extension failure shaping, timeline failure UI, top-level @ extension surface, locked-use active-turn self-test, helper background-safety capabilities, and locked-readiness status.",
-      "Unlock the desktop, keep the installed app idle/closed, and rerun test:prod:installed-computer-use-parity.",
+      "Unlock the desktop, keep the installed app idle/closed, and rerun test:prod:installed-computer-use-parity with PI_APP_LOCK_SCREEN_E2E=1 plus real auth.",
+    ].join("\n"),
+  );
+}
+
+function lockedUseNotReadyForInstalledParityError() {
+  return new Error(
+    [
+      "COMPUTER_USE_INSTALLED_PARITY_GATE_BLOCKED locked_use=not_ready reason=installed-locked-use-not-ready",
+      "Installed Computer Use parity cannot pass until Locked Computer Use is enabled and the real locked-screen E2E can run.",
+      "The installed locked-readiness status above reports the exact installer and helper state.",
+      "Enable Locked Computer Use in pi-gui Settings > Computer Use, then rerun test:prod:installed-computer-use-parity with PI_APP_LOCK_SCREEN_E2E=1 plus real auth.",
+    ].join("\n"),
+  );
+}
+
+function assertLockScreenE2eConfirmedForInstalledParity() {
+  if (process.env[lockScreenE2eEnvVar] === "1") {
+    return;
+  }
+  throw new Error(
+    [
+      "COMPUTER_USE_INSTALLED_PARITY_GATE_BLOCKED lock_screen_e2e=not_confirmed reason=requires-explicit-lock-screen-confirmation",
+      "Installed Computer Use parity includes a controlled real desktop lock and relock E2E.",
+      `Set ${lockScreenE2eEnvVar}=1 to allow test:prod:installed-computer-use-parity to lock the desktop during the installed-app E2E.`,
     ].join("\n"),
   );
 }
