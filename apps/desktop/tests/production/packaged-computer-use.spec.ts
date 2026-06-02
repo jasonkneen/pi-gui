@@ -164,6 +164,8 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   expect(helperSwiftSource).toContain("locked_use_end");
   expect(helperSwiftSource).toContain("locked_use_authorization_probe");
   expect(helperSwiftSource).toContain("PI_GUI_COMPUTER_USE_TEST_INCLUDE_PHYSICAL_MOUSE_STATUS");
+  expect(helperSwiftSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_UNLOCKED");
+  expect(helperSwiftSource).toContain("PI_GUI_COMPUTER_USE_TEST_FORCE_ACCESSIBILITY_DENIED");
   expect(helperSwiftSource).toContain("physicalMouseX");
   expect(helperSwiftSource).toContain("physicalMouseY");
   expect(helperSwiftSource).toContain("hide_cursor");
@@ -443,6 +445,27 @@ test("packaged app carries the built-in Computer Use helper and extension", asyn
   );
   expect(screenRecordingDeniedStatus.ok).toBe(true);
   expect(screenRecordingDeniedStatus.details?.screenRecording).toBe("denied");
+
+  const accessibilityDeniedStatus = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "status" },
+    { PI_GUI_COMPUTER_USE_TEST_FORCE_ACCESSIBILITY_DENIED: "1" },
+  );
+  expect(accessibilityDeniedStatus.ok).toBe(true);
+  expect(accessibilityDeniedStatus.details?.accessibility).toBe("denied");
+
+  const accessibilityDeniedState = await runPackagedHelper(
+    helperAppExecutable,
+    { command: "get_app_state", app: "Finder" },
+    {
+      PI_GUI_COMPUTER_USE_TEST_FORCE_UNLOCKED: "1",
+      PI_GUI_COMPUTER_USE_TEST_FORCE_ACCESSIBILITY_DENIED: "1",
+    },
+  );
+  expect(accessibilityDeniedState.ok).toBe(false);
+  expect(accessibilityDeniedState.error).toContain("Accessibility permission is not granted");
+  expect(accessibilityDeniedState.details?.errorCode).toBe("accessibility_denied");
+  expect(accessibilityDeniedState.details?.accessibility).toBe("denied");
 
   if (screenRecordingDeniedStatus.details?.screenLocked === "false") {
     const screenRecordingDeniedClick = await runPackagedHelper(

@@ -111,6 +111,8 @@ private let testLockedUseInstallerStateEnv = "PI_GUI_COMPUTER_USE_TEST_LOCKED_US
 private let testAssumeUnlockedAfterAuthorizationEnv = "PI_GUI_COMPUTER_USE_TEST_ASSUME_UNLOCKED_AFTER_AUTHORIZATION"
 private let testSkipRelockEnv = "PI_GUI_COMPUTER_USE_TEST_SKIP_RELOCK"
 private let testSkipUnlockReturnKeyEnv = "PI_GUI_COMPUTER_USE_TEST_SKIP_UNLOCK_RETURN_KEY"
+private let testForceUnlockedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_UNLOCKED"
+private let testForceAccessibilityDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_ACCESSIBILITY_DENIED"
 private let testForceScreenRecordingDeniedEnv = "PI_GUI_COMPUTER_USE_TEST_FORCE_SCREEN_RECORDING_DENIED"
 private let testForbidMouseWarpEnv = "PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP"
 private let testIncludePhysicalMouseStatusEnv = "PI_GUI_COMPUTER_USE_TEST_INCLUDE_PHYSICAL_MOUSE_STATUS"
@@ -381,7 +383,7 @@ func handle(_ request: Request) throws -> Response {
 func status() -> Response {
     let locked = isScreenLocked()
     let frontmostApp = frontmostAppName()
-    let accessibilityGranted = AXIsProcessTrusted()
+    let accessibilityGranted = isAccessibilityTrusted()
     let screenRecordingGranted = screenRecordingStatus()
     let installerStatus = lockedUseInstallerStatus()
     let lockSupport = installerStatus.state == "installed" ? "enabled" : "not_enabled"
@@ -943,10 +945,20 @@ func isScreenLocked() -> Bool {
     if ProcessInfo.processInfo.environment[testForceLockedEnv] == "1" {
         return true
     }
+    if ProcessInfo.processInfo.environment[testForceUnlockedEnv] == "1" {
+        return false
+    }
     guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else {
         return false
     }
     return (session["CGSSessionScreenIsLocked"] as? Bool) == true
+}
+
+func isAccessibilityTrusted() -> Bool {
+    if ProcessInfo.processInfo.environment[testForceAccessibilityDeniedEnv] == "1" {
+        return false
+    }
+    return AXIsProcessTrusted()
 }
 
 func helperErrorDetails(for error: Error) -> [String: String]? {
@@ -1334,7 +1346,7 @@ func typeText(_ request: Request) throws -> Response {
 }
 
 func stateResponse(for app: ResolvedApp) throws -> Response {
-    if !AXIsProcessTrusted() {
+    if !isAccessibilityTrusted() {
         requestAccessibilityPermission()
         throw HelperError.message(
             "Accessibility permission is not granted for \(permissionAppName()). In macOS System Settings > Privacy & Security > Accessibility, enable pi-gui and pi-gui Computer Use. If either entry is already enabled after replacing or rebuilding the app, toggle it off and back on, then relaunch pi-gui."
@@ -1381,6 +1393,9 @@ func stateResponse(for app: ResolvedApp) throws -> Response {
 }
 
 func requestAccessibilityPermission() {
+    if ProcessInfo.processInfo.environment[testForceAccessibilityDeniedEnv] == "1" {
+        return
+    }
     let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
     AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
 }
