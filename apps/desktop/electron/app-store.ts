@@ -128,6 +128,13 @@ export interface DesktopAppStoreOptions {
   ) => Promise<string | null | undefined>;
 }
 
+export interface DesktopAppViewState {
+  readonly selectedWorkspaceId?: string;
+  readonly selectedSessionId?: string;
+  readonly activeView?: AppView;
+  readonly sidebarCollapsed?: boolean;
+}
+
 export class DesktopAppStore implements AppStoreInternals {
   state = createEmptyDesktopAppState();
   private readonly listeners = new Set<StateListener>();
@@ -186,6 +193,11 @@ export class DesktopAppStore implements AppStoreInternals {
     return structuredClone(this.state);
   }
 
+  async getStateForView(view: DesktopAppViewState): Promise<DesktopAppState> {
+    await this.initialize();
+    return this.projectStateForView(view);
+  }
+
   async getSelectedTranscript(): Promise<SelectedTranscriptRecord | null> {
     await this.initialize();
     const sessionRef = this.selectedSessionRef();
@@ -194,6 +206,44 @@ export class DesktopAppStore implements AppStoreInternals {
     }
     await this.ensureTranscriptLoaded(sessionRef);
     return this.buildSelectedTranscriptRecord(sessionRef);
+  }
+
+  async getSelectedTranscriptForView(view: DesktopAppViewState): Promise<SelectedTranscriptRecord | null> {
+    await this.initialize();
+    const sessionRef = this.selectedSessionRefForView(view);
+    if (!sessionRef) {
+      return null;
+    }
+    await this.ensureTranscriptLoaded(sessionRef);
+    return this.buildSelectedTranscriptRecord(sessionRef);
+  }
+
+  projectStateForView(view: DesktopAppViewState, state: DesktopAppState = this.state): DesktopAppState {
+    const selectedWorkspaceId = this.resolveViewWorkspaceId(view.selectedWorkspaceId, state);
+    const selectedSessionId = this.resolveViewSessionId(selectedWorkspaceId, view.selectedSessionId, state);
+    const activeView = view.activeView ?? state.activeView;
+    const sidebarCollapsed = view.sidebarCollapsed ?? state.sidebarCollapsed;
+
+    return {
+      ...structuredClone(state),
+      selectedWorkspaceId,
+      selectedSessionId,
+      activeView,
+      sidebarCollapsed,
+      composerDraft: this.resolveComposerDraft(selectedWorkspaceId, selectedSessionId),
+      composerDraftSyncSource:
+        selectedWorkspaceId !== state.selectedWorkspaceId || selectedSessionId !== state.selectedSessionId
+          ? "selection"
+          : state.composerDraftSyncSource,
+      composerDraftSyncNonce:
+        selectedWorkspaceId !== state.selectedWorkspaceId || selectedSessionId !== state.selectedSessionId
+          ? state.composerDraftSyncNonce + 1
+          : state.composerDraftSyncNonce,
+      composerAttachments: this.resolveComposerAttachments(selectedWorkspaceId, selectedSessionId),
+      queuedComposerMessages: this.resolveQueuedComposerMessages(selectedWorkspaceId, selectedSessionId),
+      editingQueuedMessageId: this.resolveEditingQueuedMessageId(selectedWorkspaceId, selectedSessionId),
+      lastError: this.resolveSelectedSessionError(selectedWorkspaceId, selectedSessionId, false),
+    };
   }
 
   async flushPersistence(): Promise<void> {
@@ -1599,6 +1649,50 @@ export class DesktopAppStore implements AppStoreInternals {
       workspaceId: this.state.selectedWorkspaceId,
       sessionId: this.state.selectedSessionId,
     });
+  }
+
+  private selectedSessionRefForView(view: DesktopAppViewState): SessionRef | undefined {
+    const selectedWorkspaceId = this.resolveViewWorkspaceId(view.selectedWorkspaceId, this.state);
+    const selectedSessionId = this.resolveViewSessionId(selectedWorkspaceId, view.selectedSessionId, this.state);
+    if (!selectedWorkspaceId || !selectedSessionId) {
+      return undefined;
+    }
+
+    return toSessionRef({
+      workspaceId: selectedWorkspaceId,
+      sessionId: selectedSessionId,
+    });
+  }
+
+  private resolveViewWorkspaceId(
+    preferredWorkspaceId: string | undefined,
+    state: DesktopAppState,
+  ): string {
+    if (preferredWorkspaceId && state.workspaces.some((workspace) => workspace.id === preferredWorkspaceId)) {
+      return preferredWorkspaceId;
+    }
+    if (state.selectedWorkspaceId && state.workspaces.some((workspace) => workspace.id === state.selectedWorkspaceId)) {
+      return state.selectedWorkspaceId;
+    }
+    return state.workspaces[0]?.id ?? "";
+  }
+
+  private resolveViewSessionId(
+    selectedWorkspaceId: string,
+    preferredSessionId: string | undefined,
+    state: DesktopAppState,
+  ): string {
+    const workspace = state.workspaces.find((entry) => entry.id === selectedWorkspaceId);
+    if (!workspace) {
+      return "";
+    }
+    if (preferredSessionId && workspace.sessions.some((session) => session.id === preferredSessionId)) {
+      return preferredSessionId;
+    }
+    if (state.selectedWorkspaceId === selectedWorkspaceId && workspace.sessions.some((session) => session.id === state.selectedSessionId)) {
+      return state.selectedSessionId;
+    }
+    return workspace.sessions[0]?.id ?? "";
   }
 
   sessionFromState(sessionRef: SessionRef) {
