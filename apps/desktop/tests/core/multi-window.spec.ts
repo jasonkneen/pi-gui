@@ -326,7 +326,7 @@ test("projects sender state emissions from the in-flight selection", async () =>
   }
 });
 
-test("keeps awaited sender actions scoped after another window focuses", async () => {
+test("keeps sender dialog actions scoped without blocking another window", async () => {
   test.setTimeout(120_000);
 
   const userDataDir = await makeUserDataDir();
@@ -368,6 +368,16 @@ test("keeps awaited sender actions scoped after another window focuses", async (
       targetWindow?.focus();
       targetWindow?.emit("focus");
     }, secondWindowIndex);
+
+    await Promise.race([
+      selectSessionViaIpc(secondWindow, "Attachment sender thread"),
+      secondWindow.waitForTimeout(2_000).then(() => {
+        throw new Error("Second window selection was blocked by the first window attachment dialog.");
+      }),
+    ]);
+    await expectSelected(secondWindow, workspacePath, "Attachment sender thread");
+    await selectSessionViaIpc(secondWindow, "Attachment focused thread");
+    await expectSelected(secondWindow, workspacePath, "Attachment focused thread");
 
     await resolveDelayedOpenDialog(harness);
     await pickPromise;

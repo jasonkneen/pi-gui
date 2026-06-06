@@ -184,7 +184,7 @@ function createWindow(): BrowserWindow {
 
     if (platformModifier && !input.shift && lowerKey === "o") {
       event.preventDefault();
-      void runWindowScopedForWindow(window, () => pickWorkspaceViaDialog(window));
+      void pickWorkspaceViaDialog(window);
       return;
     }
 
@@ -456,6 +456,20 @@ function runWindowScopedForEvent(
   return runWindowScopedForWindow(BrowserWindow.fromWebContents(event.sender), action);
 }
 
+async function runUnscopedStateResultForWindow(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<DesktopAppState>,
+): Promise<DesktopAppState> {
+  const state = await action();
+  if (!window || !canPublishToWindow(window)) {
+    return state;
+  }
+  const webContentsId = window.webContents.id;
+  const projected = projectStateForWindow(webContentsId, state);
+  rememberWindowView(webContentsId, projected);
+  return projected;
+}
+
 async function runWindowScopedStateResult<T extends { readonly state: DesktopAppState }>(
   window: BrowserWindow | null | undefined,
   action: () => Promise<T>,
@@ -597,13 +611,25 @@ function resolveWindowTestMode(): "foreground" | "background" {
   return process.env.PI_APP_TEST_MODE?.trim().toLowerCase() === "background" ? "background" : "foreground";
 }
 
-async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Promise<DesktopAppState> {
-  const window =
-    parentWindow && canPublishToWindow(parentWindow)
-      ? parentWindow
-      : mainWindow && canPublishToWindow(mainWindow)
-        ? mainWindow
-        : undefined;
+function resolveDialogWindow(parentWindow?: BrowserWindow | null): BrowserWindow | undefined {
+  if (parentWindow && canPublishToWindow(parentWindow)) {
+    return parentWindow;
+  }
+  if (mainWindow && canPublishToWindow(mainWindow)) {
+    return mainWindow;
+  }
+  return undefined;
+}
+
+async function stateForWindow(window?: BrowserWindow | null): Promise<DesktopAppState> {
+  if (window && canPublishToWindow(window)) {
+    return store.getStateForView(viewForWebContents(window.webContents.id));
+  }
+  return store.getState();
+}
+
+async function pickWorkspacePathViaDialog(parentWindow?: BrowserWindow | null): Promise<string | undefined> {
+  const window = resolveDialogWindow(parentWindow);
   const result = window
     ? await dialog.showOpenDialog(window, {
         properties: ["openDirectory"],
@@ -614,9 +640,13 @@ async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Prom
         title: "Open workspace folder",
       });
   if (result.canceled || result.filePaths.length === 0) {
-    return store.getState();
+    return undefined;
   }
-  const nextState = await store.addWorkspace(result.filePaths[0] as string);
+  return result.filePaths[0] as string;
+}
+
+async function addPickedWorkspace(window: BrowserWindow | null | undefined, workspacePath: string): Promise<DesktopAppState> {
+  const nextState = await store.addWorkspace(workspacePath);
   if (!nextState.selectedWorkspaceId) {
     return nextState;
   }
@@ -626,6 +656,15 @@ async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Prom
     window.webContents.send(desktopIpc.workspacePicked, nextState.selectedWorkspaceId);
   }
   return newThreadState;
+}
+
+async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Promise<DesktopAppState> {
+  const window = resolveDialogWindow(parentWindow);
+  const workspacePath = await pickWorkspacePathViaDialog(window);
+  if (!workspacePath) {
+    return stateForWindow(window);
+  }
+  return runWindowScopedForWindow(window, () => addPickedWorkspace(window, workspacePath));
 }
 
 async function runManualUpdateCheck(): Promise<void> {
@@ -710,7 +749,7 @@ function installApplicationMenu(): void {
           label: "Open Folder…",
           accelerator: "Command+O",
           click: () => {
-            void runWindowScopedForWindow(mainWindow, () => pickWorkspaceViaDialog(mainWindow));
+            void pickWorkspaceViaDialog(mainWindow);
           },
         },
         { type: "separator" },
@@ -874,7 +913,7 @@ app.whenReady().then(async () => {
     runWindowScopedForEvent(event, () => store.addWorkspace(workspacePath)),
   );
   ipcMain.handle(desktopIpc.pickWorkspace, (event) =>
-    runWindowScopedForEvent(event, () => pickWorkspaceViaDialog(BrowserWindow.fromWebContents(event.sender))),
+    pickWorkspaceViaDialog(BrowserWindow.fromWebContents(event.sender)),
   );
   ipcMain.handle(desktopIpc.selectWorkspace, (event, workspaceId: string) =>
     runWindowScopedForEvent(event, () => store.selectWorkspace(workspaceId)),
@@ -941,9 +980,12 @@ app.whenReady().then(async () => {
     (event, workspaceId: string, sessionId: string, thinkingLevel) =>
       runWindowScopedForEvent(event, () => store.setSessionThinkingLevel({ workspaceId, sessionId }, thinkingLevel)),
   );
-  ipcMain.handle(desktopIpc.loginProvider, (event, workspaceId: string, providerId: string) =>
-    runWindowScopedForEvent(event, () => store.loginProvider(workspaceId, providerId, createRuntimeLoginCallbacks())),
-  );
+  ipcMain.handle(desktopIpc.loginProvider, (event, workspaceId: string, providerId: string) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return runUnscopedStateResultForWindow(window, () =>
+      store.loginProvider(workspaceId, providerId, createRuntimeLoginCallbacks(window)),
+    );
+  });
   ipcMain.handle(desktopIpc.logoutProvider, (event, workspaceId: string, providerId: string) =>
     runWindowScopedForEvent(event, () => store.logoutProvider(workspaceId, providerId)),
   );
@@ -1041,26 +1083,24 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.cancelCurrentRun, (event) =>
     runWindowScopedForEvent(event, () => store.cancelCurrentRun()),
   );
-  ipcMain.handle(desktopIpc.pickComposerAttachments, (event) =>
-    runWindowScopedForEvent(event, async () => {
-      const window = BrowserWindow.fromWebContents(event.sender);
-      const result =
-        window && canPublishToWindow(window)
-          ? await dialog.showOpenDialog(window, {
-              properties: ["openFile", "multiSelections"],
-              title: "Attach files",
-            })
-          : await dialog.showOpenDialog({
-              properties: ["openFile", "multiSelections"],
-              title: "Attach files",
-            });
-      if (result.canceled || result.filePaths.length === 0) {
-        return store.getState();
-      }
-      const attachments = await Promise.all(result.filePaths.map(readComposerAttachment));
-      return store.addComposerAttachments(attachments);
-    }),
-  );
+  ipcMain.handle(desktopIpc.pickComposerAttachments, async (event) => {
+    const window = resolveDialogWindow(BrowserWindow.fromWebContents(event.sender));
+    const result =
+      window
+        ? await dialog.showOpenDialog(window, {
+            properties: ["openFile", "multiSelections"],
+            title: "Attach files",
+          })
+        : await dialog.showOpenDialog({
+            properties: ["openFile", "multiSelections"],
+            title: "Attach files",
+          });
+    if (result.canceled || result.filePaths.length === 0) {
+      return stateForWindow(window);
+    }
+    const attachments = await Promise.all(result.filePaths.map(readComposerAttachment));
+    return runWindowScopedForWindow(window, () => store.addComposerAttachments(attachments));
+  });
   ipcMain.on(desktopIpc.readClipboardImage, (event) => {
     event.returnValue = readClipboardImageAttachment();
   });
@@ -1287,19 +1327,19 @@ function validateComposerAttachmentPayload(attachment: ComposerAttachment): Comp
   return [normalized];
 }
 
-function createRuntimeLoginCallbacks() {
+function createRuntimeLoginCallbacks(window?: BrowserWindow | null) {
   return {
     onAuth: async ({ url, instructions: _instructions }: { readonly url: string; readonly instructions?: string }) => {
       await shell.openExternal(url);
     },
     onPrompt: async ({ message, placeholder }: { readonly message: string; readonly placeholder?: string }) =>
-      promptForText(message, placeholder),
+      promptForText(window, message, placeholder),
   };
 }
 
-async function promptForText(message: string, placeholder = ""): Promise<string> {
-  const window = mainWindow;
-  if (!window || window.isDestroyed()) {
+async function promptForText(parentWindow: BrowserWindow | null | undefined, message: string, placeholder = ""): Promise<string> {
+  const window = resolveDialogWindow(parentWindow);
+  if (!window) {
     throw new Error("Main window is not available for login.");
   }
   window.show();
