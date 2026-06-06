@@ -184,20 +184,35 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
     electronApp,
     firstWindow: () => getWindow(),
     focusWindow: async () => {
-      await electronApp.evaluate(({ BrowserWindow }) => {
+      await electronApp.evaluate(({ BrowserWindow, app }) => {
         const window = BrowserWindow.getAllWindows()[0];
         window?.restore();
         window?.show();
+        app.focus({ steal: true });
         window?.focus();
       });
-      await (await getWindow()).bringToFront();
+      if (process.platform === "darwin") {
+        await focusElectronAppProcess(electronApp);
+      }
+      await electronApp.evaluate(({ BrowserWindow, app }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        app.focus({ steal: true });
+        window?.focus();
+      });
+      const appPage = await getWindow();
+      await appPage.bringToFront();
       await expect
         .poll(
-          () =>
-            electronApp.evaluate(({ BrowserWindow }) => {
+          async () => {
+            const nativeFocused = await electronApp.evaluate(({ BrowserWindow }) => {
               const window = BrowserWindow.getAllWindows()[0];
               return window?.isFocused() ?? false;
-            }),
+            });
+            if (nativeFocused) {
+              return true;
+            }
+            return appPage.evaluate(() => document.hasFocus());
+          },
           { timeout: 5_000 },
         )
         .toBe(true);
@@ -206,6 +221,26 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
       await electronApp.close();
     },
   };
+}
+
+async function focusElectronAppProcess(electronApp: ElectronApplication): Promise<void> {
+  const pid = await electronApp.evaluate(() => process.pid);
+  try {
+    await execFileAsync(
+      "osascript",
+      [
+        "-e",
+        `tell application "System Events"
+          set targetProcess to first application process whose unix id is ${pid}
+          set frontmost of targetProcess to true
+          return name of targetProcess
+        end tell`,
+      ],
+      { timeout: 5_000 },
+    );
+  } catch {
+    // Fall back to Electron/Playwright focus APIs when System Events access is unavailable.
+  }
 }
 
 function buildDesktopLaunchEnv(

@@ -47,7 +47,7 @@ import type {
 } from "../src/desktop-state";
 import type { SessionDriverEvent } from "@pi-gui/session-driver";
 import type { GenerateThreadTitleOptions } from "@pi-gui/pi-sdk-driver";
-import type { WorkspaceRef } from "@pi-gui/session-driver";
+import type { SessionRef, WorkspaceRef } from "@pi-gui/session-driver";
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
 const windowTestMode = resolveWindowTestMode();
@@ -80,6 +80,7 @@ const terminalFocusedWebContentsIds = new Set<number>();
 let quittingAfterStoreFlush = false;
 let windowScopedActionQueue: Promise<void> = Promise.resolve();
 let currentComposerDraftPersistOriginWebContentsId: number | undefined;
+let currentWindowScopedWebContentsId: number | undefined;
 
 const SUPPORTED_IMAGE_TYPES = SUPPORTED_COMPOSER_IMAGE_TYPES;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_IMAGE_TYPES.map((type) => type.mimeType));
@@ -337,6 +338,27 @@ function restoreStoreToForegroundUnlessSender(senderWebContentsId: number | unde
   restoreStoreToView(viewForWebContents(foregroundWindow.webContents.id));
 }
 
+function isSessionVisibleInAnotherWindow(sessionRef: SessionRef): boolean {
+  for (const window of appWindows) {
+    if (!canPublishToWindow(window) || window.isMinimized() || !window.isVisible()) {
+      continue;
+    }
+    const webContentsId = window.webContents.id;
+    if (webContentsId === currentWindowScopedWebContentsId) {
+      continue;
+    }
+    const view = windowViews.get(webContentsId);
+    if (
+      view?.activeView === "threads" &&
+      view.selectedWorkspaceId === sessionRef.workspaceId &&
+      view.selectedSessionId === sessionRef.sessionId
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function enqueueWindowScopedAction<T>(action: () => Promise<T>): Promise<T> {
   const run = windowScopedActionQueue.then(action, action);
   windowScopedActionQueue = run.then(
@@ -371,6 +393,8 @@ async function runWindowScopedForWindow(
       applyWindowViewToStore(webContentsId);
     }
 
+    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
+    currentWindowScopedWebContentsId = webContentsId;
     try {
       const state = await action();
       if (!window || webContentsId === undefined) {
@@ -384,6 +408,7 @@ async function runWindowScopedForWindow(
       void publishSelectedTranscriptToWindow(window);
       return projected;
     } finally {
+      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
       restoreStoreToForegroundUnlessSender(webContentsId);
     }
   });
@@ -417,6 +442,8 @@ async function runWindowScopedStateResult<T extends { readonly state: DesktopApp
       applyWindowViewToStore(webContentsId);
     }
 
+    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
+    currentWindowScopedWebContentsId = webContentsId;
     try {
       const result = await action();
       if (!window || webContentsId === undefined) {
@@ -430,6 +457,7 @@ async function runWindowScopedStateResult<T extends { readonly state: DesktopApp
       void publishSelectedTranscriptToWindow(window);
       return { ...result, state: projected };
     } finally {
+      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
       restoreStoreToForegroundUnlessSender(webContentsId);
     }
   });
@@ -454,6 +482,7 @@ function createAppWindow(sourceView?: DesktopAppViewState): BrowserWindow {
       mainWindow = [...appWindows].find((candidate) => !candidate.isDestroyed()) ?? null;
       if (mainWindow) {
         setActiveWindow(mainWindow);
+        applyWindowViewToStore(mainWindow.webContents.id);
       }
     }
     if (appWindows.size === 0) {
@@ -713,6 +742,7 @@ app.whenReady().then(async () => {
     userDataDir: configuredUserDataDir,
     initialWorkspacePaths: resolveInitialWorkspacePaths(),
     getWindow: () => mainWindow,
+    shouldKeepSessionDialogs: (sessionRef) => isSessionVisibleInAnotherWindow(sessionRef),
     ...(computerUseRuntimeDriverOptions ? { driverOptions: computerUseRuntimeDriverOptions } : {}),
     generateThreadTitleOverride: async (workspace, options) => generateThreadTitleOverride?.(workspace, options),
   });

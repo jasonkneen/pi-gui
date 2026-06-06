@@ -93,7 +93,7 @@ import { GitWorktreeManager } from "./worktree-manager";
 import * as workspace from "./app-store-workspace";
 import * as worktree from "./app-store-worktree";
 import * as composer from "./app-store-composer";
-import { isSessionActivelyViewed } from "./session-visibility";
+import { isSessionActivelyViewed, isSessionVisibleInWindow } from "./session-visibility";
 
 type StateListener = (state: DesktopAppState) => void;
 type SelectedTranscriptListener = (payload: SelectedTranscriptRecord | null) => void;
@@ -121,6 +121,7 @@ export interface DesktopAppStoreOptions {
   readonly userDataDir: string;
   readonly initialWorkspacePaths: readonly string[];
   readonly getWindow?: () => BrowserWindow | null;
+  readonly shouldKeepSessionDialogs?: (sessionRef: SessionRef) => boolean;
   readonly driverOptions?: Pick<PiSdkDriverConfig, "extensionFactories" | "inlineExtensionMetadata">;
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
@@ -153,6 +154,7 @@ export class DesktopAppStore implements AppStoreInternals {
   private readonly reportedCompatibilityIssuesBySession = new Map<string, Set<string>>();
   private readonly initialWorkspacePaths: readonly string[];
   private readonly getWindow: () => BrowserWindow | null;
+  private readonly shouldKeepSessionDialogs: (sessionRef: SessionRef) => boolean;
   private composerDraftSyncTarget: SessionRef | undefined;
   private composerDraftProjectionNonce = 0;
   private persistUiStateTimer: NodeJS.Timeout | undefined;
@@ -179,6 +181,7 @@ export class DesktopAppStore implements AppStoreInternals {
     this.attachmentStore = new JsonFileStore<ComposerAttachment[]>(options.userDataDir, "attachments");
     this.initialWorkspacePaths = options.initialWorkspacePaths;
     this.getWindow = options.getWindow ?? (() => null);
+    this.shouldKeepSessionDialogs = options.shouldKeepSessionDialogs ?? (() => false);
   }
 
   /* ── Lifecycle ──────────────────────────────────────────── */
@@ -1179,6 +1182,9 @@ export class DesktopAppStore implements AppStoreInternals {
   }
 
   async cancelPendingDialogsForSession(sessionRef: SessionRef): Promise<void> {
+    if (this.shouldKeepSessionDialogs(sessionRef)) {
+      return;
+    }
     const key = sessionKey(sessionRef);
     const uiState = this.sessionState.extensionUiBySession.get(key);
     if (!uiState || uiState.pendingDialogs.length === 0) {
@@ -2095,7 +2101,7 @@ export class DesktopAppStore implements AppStoreInternals {
       workspaceId: this.state.selectedWorkspaceId,
       sessionId: this.state.selectedSessionId,
     } satisfies SessionRef;
-    if (!isSessionActivelyViewed(this.state, sessionRef, this.getWindow())) {
+    if (!isSessionVisibleInWindow(this.state, sessionRef, this.getWindow())) {
       return false;
     }
 
