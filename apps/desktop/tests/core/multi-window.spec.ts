@@ -33,12 +33,32 @@ async function waitForWindowCount(harness: DesktopHarness, count: number): Promi
   await expect.poll(() => harness.electronApp.windows().length, { timeout: 15_000 }).toBe(count);
 }
 
-async function openWindowViaShortcut(harness: DesktopHarness, source: Page): Promise<Page> {
-  const existing = new Set(harness.electronApp.windows());
-  const sourceIndex = harness.electronApp.windows().indexOf(source);
-  if (sourceIndex === -1) {
+async function browserWindowIndexForPage(harness: DesktopHarness, source: Page): Promise<number> {
+  const marker = `pi-gui-window-${Date.now()}-${Math.random()}`;
+  await source.evaluate((value) => {
+    Object.assign(window, { __piGuiTestWindowMarker: value });
+  }, marker);
+  const index = await harness.electronApp.evaluate(async ({ BrowserWindow }, value) => {
+    const windows = BrowserWindow.getAllWindows();
+    for (const [candidateIndex, candidateWindow] of windows.entries()) {
+      const candidateMarker = await candidateWindow.webContents
+        .executeJavaScript("window.__piGuiTestWindowMarker", true)
+        .catch(() => undefined);
+      if (candidateMarker === value) {
+        return candidateIndex;
+      }
+    }
+    return -1;
+  }, marker);
+  if (index === -1) {
     throw new Error("Expected source page to belong to the Electron app.");
   }
+  return index;
+}
+
+async function openWindowViaShortcut(harness: DesktopHarness, source: Page): Promise<Page> {
+  const existing = new Set(harness.electronApp.windows());
+  const sourceIndex = await browserWindowIndexForPage(harness, source);
   await harness.electronApp.evaluate(({ BrowserWindow }, payload) => {
     BrowserWindow.getAllWindows()[payload.sourceIndex]?.webContents.sendInputEvent({
       type: "keyDown",
@@ -55,11 +75,18 @@ async function openWindowViaShortcut(harness: DesktopHarness, source: Page): Pro
   return opened;
 }
 
-async function openWindowViaSecondInstanceEvent(harness: DesktopHarness): Promise<Page> {
+async function openWindowViaSecondInstanceEvent(harness: DesktopHarness, source?: Page): Promise<Page> {
   const existing = new Set(harness.electronApp.windows());
-  await harness.electronApp.evaluate(({ app }) => {
+  const sourceIndex = source ? await browserWindowIndexForPage(harness, source) : -1;
+  await harness.electronApp.evaluate(({ app, BrowserWindow }, index) => {
+    if (index >= 0) {
+      const window = BrowserWindow.getAllWindows()[index];
+      window?.show();
+      window?.focus();
+      window?.emit("focus");
+    }
     app.emit("second-instance");
-  });
+  }, sourceIndex);
   await waitForWindowCount(harness, existing.size + 1);
   const opened = harness.electronApp.windows().find((candidate) => !existing.has(candidate));
   if (!opened) {
@@ -168,9 +195,49 @@ test("opens multiple app windows with independent workspace and thread selection
     await expectSelected(firstWindow, alphaPath, "Alpha thread");
     await expectSelected(secondWindow, betaPath, "Beta follow-up");
 
-    const thirdWindow = await openWindowViaSecondInstanceEvent(harness);
+    const thirdWindow = await openWindowViaSecondInstanceEvent(harness, firstWindow);
     await expectSelected(thirdWindow, alphaPath, "Alpha thread");
     await waitForWindowCount(harness, 3);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("keeps a background window composer draft when another window changes selection", async () => {
+  test.setTimeout(120_000);
+
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("multi-window-draft-sync");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const workspaceName = basename(workspacePath);
+    const firstWindow = await harness.firstWindow();
+    await waitForWorkspaceByPath(firstWindow, workspacePath);
+
+    await createNamedThread(firstWindow, "Draft source one", { workspaceName });
+    await createNamedThread(firstWindow, "Draft target two", { workspaceName });
+    await createNamedThread(firstWindow, "Draft source three", { workspaceName });
+    await selectSession(firstWindow, "Draft source one");
+
+    const secondWindow = await openWindowViaShortcut(harness, firstWindow);
+    await selectSession(secondWindow, "Draft target two");
+    await expectSelected(firstWindow, workspacePath, "Draft source one");
+    await expectSelected(secondWindow, workspacePath, "Draft target two");
+
+    const secondComposer = secondWindow.getByTestId("composer");
+    const unsavedDraft = "unsaved background draft";
+    await secondComposer.fill(unsavedDraft);
+    await expect(secondComposer).toHaveValue(unsavedDraft);
+
+    await selectSession(firstWindow, "Draft source three");
+    await expectSelected(firstWindow, workspacePath, "Draft source three");
+    await expectSelected(secondWindow, workspacePath, "Draft target two");
+    await secondWindow.waitForTimeout(500);
+    await expect(secondComposer).toHaveValue(unsavedDraft);
   } finally {
     await harness.close();
   }

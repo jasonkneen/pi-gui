@@ -244,8 +244,13 @@ function applyWindowViewToStore(webContentsId: number): void {
   store.state = store.projectStateForView(viewForWebContents(webContentsId), store.state);
 }
 
-function projectStateForWindow(webContentsId: number, state: DesktopAppState = store.state): DesktopAppState {
-  return store.projectStateForView(viewForWebContents(webContentsId), state);
+function projectStateForWindow(
+  webContentsId: number,
+  state: DesktopAppState = store.state,
+  view: WindowViewState = viewForWebContents(webContentsId),
+  previousView: WindowViewState | undefined = windowViews.get(webContentsId),
+): DesktopAppState {
+  return store.projectStateForView(view, state, previousView);
 }
 
 function publishStateToWindow(window: BrowserWindow, state: DesktopAppState = store.state): void {
@@ -277,6 +282,22 @@ function setActiveWindow(window: BrowserWindow): void {
   notificationPermissionService?.trackWindow(window);
 }
 
+function getForegroundAppWindow(): BrowserWindow | null {
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  if (focusedWindow && windowViews.has(focusedWindow.webContents.id) && canPublishToWindow(focusedWindow)) {
+    return focusedWindow;
+  }
+  if (mainWindow && canPublishToWindow(mainWindow)) {
+    return mainWindow;
+  }
+  return [...appWindows].find((window) => canPublishToWindow(window)) ?? null;
+}
+
+function getForegroundAppView(): DesktopAppViewState | undefined {
+  const window = getForegroundAppWindow();
+  return window ? viewForWebContents(window.webContents.id) : undefined;
+}
+
 function enqueueWindowScopedAction<T>(action: () => Promise<T>): Promise<T> {
   const run = windowScopedActionQueue.then(action, action);
   windowScopedActionQueue = run.then(
@@ -293,7 +314,9 @@ async function runWindowScopedForWindow(
   return enqueueWindowScopedAction(async () => {
     const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
     if (window && webContentsId !== undefined) {
-      setActiveWindow(window);
+      if (window.isFocused()) {
+        setActiveWindow(window);
+      }
       applyWindowViewToStore(webContentsId);
     }
 
@@ -302,8 +325,8 @@ async function runWindowScopedForWindow(
       return state;
     }
 
-    rememberWindowView(webContentsId, state);
-    const projected = projectStateForWindow(webContentsId, state);
+    const previousView = windowViews.get(webContentsId);
+    const projected = projectStateForWindow(webContentsId, state, viewFromState(state), previousView);
     rememberWindowView(webContentsId, projected);
     publishStateToWindow(window, projected);
     void publishSelectedTranscriptToWindow(window);
@@ -325,7 +348,9 @@ async function runWindowScopedStateResult<T extends { readonly state: DesktopApp
   return enqueueWindowScopedAction(async () => {
     const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
     if (window && webContentsId !== undefined) {
-      setActiveWindow(window);
+      if (window.isFocused()) {
+        setActiveWindow(window);
+      }
       applyWindowViewToStore(webContentsId);
     }
 
@@ -334,8 +359,8 @@ async function runWindowScopedStateResult<T extends { readonly state: DesktopApp
       return result;
     }
 
-    rememberWindowView(webContentsId, result.state);
-    const projected = projectStateForWindow(webContentsId, result.state);
+    const previousView = windowViews.get(webContentsId);
+    const projected = projectStateForWindow(webContentsId, result.state, viewFromState(result.state), previousView);
     rememberWindowView(webContentsId, projected);
     publishStateToWindow(window, projected);
     void publishSelectedTranscriptToWindow(window);
@@ -540,7 +565,7 @@ function installApplicationMenu(): void {
           label: "New Window",
           accelerator: "CommandOrControl+N",
           click: () => {
-            createAppWindow(mainWindow ? viewForWebContents(mainWindow.webContents.id) : undefined);
+            createAppWindow(getForegroundAppView());
           },
         },
         { type: "separator" },
@@ -582,7 +607,7 @@ app.on("second-instance", () => {
     }
     return;
   }
-  const window = createAppWindow(mainWindow ? viewForWebContents(mainWindow.webContents.id) : undefined);
+  const window = createAppWindow(getForegroundAppView());
   if (window.isMinimized()) {
     window.restore();
   }

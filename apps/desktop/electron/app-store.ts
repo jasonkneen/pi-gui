@@ -218,9 +218,23 @@ export class DesktopAppStore implements AppStoreInternals {
     return this.buildSelectedTranscriptRecord(sessionRef);
   }
 
-  projectStateForView(view: DesktopAppViewState, state: DesktopAppState = this.state): DesktopAppState {
+  projectStateForView(
+    view: DesktopAppViewState,
+    state: DesktopAppState = this.state,
+    previousView?: DesktopAppViewState,
+  ): DesktopAppState {
     const selectedWorkspaceId = this.resolveViewWorkspaceId(view.selectedWorkspaceId, state);
     const selectedSessionId = this.resolveViewSessionId(selectedWorkspaceId, view.selectedSessionId, state);
+    const previousWorkspaceId = previousView
+      ? this.resolveViewWorkspaceId(previousView.selectedWorkspaceId, state)
+      : selectedWorkspaceId;
+    const previousSessionId = previousView
+      ? this.resolveViewSessionId(previousWorkspaceId, previousView.selectedSessionId, state)
+      : selectedSessionId;
+    const selectionChanged =
+      selectedWorkspaceId !== previousWorkspaceId || selectedSessionId !== previousSessionId;
+    const matchesStateSelection =
+      selectedWorkspaceId === state.selectedWorkspaceId && selectedSessionId === state.selectedSessionId;
     const activeView = view.activeView ?? state.activeView;
     const sidebarCollapsed = view.sidebarCollapsed ?? state.sidebarCollapsed;
 
@@ -231,14 +245,12 @@ export class DesktopAppStore implements AppStoreInternals {
       activeView,
       sidebarCollapsed,
       composerDraft: this.resolveComposerDraft(selectedWorkspaceId, selectedSessionId),
-      composerDraftSyncSource:
-        selectedWorkspaceId !== state.selectedWorkspaceId || selectedSessionId !== state.selectedSessionId
-          ? "selection"
-          : state.composerDraftSyncSource,
-      composerDraftSyncNonce:
-        selectedWorkspaceId !== state.selectedWorkspaceId || selectedSessionId !== state.selectedSessionId
-          ? state.composerDraftSyncNonce + 1
-          : state.composerDraftSyncNonce,
+      composerDraftSyncSource: selectionChanged
+        ? "selection"
+        : matchesStateSelection
+          ? state.composerDraftSyncSource
+          : "state",
+      composerDraftSyncNonce: selectionChanged ? state.composerDraftSyncNonce + 1 : state.composerDraftSyncNonce,
       composerAttachments: this.resolveComposerAttachments(selectedWorkspaceId, selectedSessionId),
       queuedComposerMessages: this.resolveQueuedComposerMessages(selectedWorkspaceId, selectedSessionId),
       editingQueuedMessageId: this.resolveEditingQueuedMessageId(selectedWorkspaceId, selectedSessionId),
