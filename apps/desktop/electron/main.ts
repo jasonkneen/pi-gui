@@ -371,8 +371,15 @@ async function runWindowScopedForWindow(
       applyWindowViewToStore(webContentsId);
     }
 
+    let actionPromise: Promise<DesktopAppState>;
     try {
-      const state = await action();
+      actionPromise = action();
+    } finally {
+      restoreStoreToForegroundUnlessSender(webContentsId);
+    }
+
+    try {
+      const state = await actionPromise;
       if (!window || webContentsId === undefined) {
         return state;
       }
@@ -417,8 +424,15 @@ async function runWindowScopedStateResult<T extends { readonly state: DesktopApp
       applyWindowViewToStore(webContentsId);
     }
 
+    let actionPromise: Promise<T>;
     try {
-      const result = await action();
+      actionPromise = action();
+    } finally {
+      restoreStoreToForegroundUnlessSender(webContentsId);
+    }
+
+    try {
+      const result = await actionPromise;
       if (!window || webContentsId === undefined) {
         return result;
       }
