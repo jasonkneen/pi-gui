@@ -355,6 +355,11 @@ function restoreStoreToView(view: DesktopAppViewState | undefined): void {
   store.state = store.projectStateForView(view, store.state);
 }
 
+function restoreStoreToViewAndEmit(view: DesktopAppViewState | undefined): void {
+  restoreStoreToView(view);
+  store.emit();
+}
+
 function restoreStoreToForegroundUnlessSender(senderWebContentsId: number | undefined): void {
   const foregroundWindow = getForegroundAppWindow();
   if (!foregroundWindow) {
@@ -363,7 +368,7 @@ function restoreStoreToForegroundUnlessSender(senderWebContentsId: number | unde
   if (senderWebContentsId !== undefined && foregroundWindow.webContents.id === senderWebContentsId) {
     return;
   }
-  restoreStoreToView(viewForWebContents(foregroundWindow.webContents.id));
+  restoreStoreToViewAndEmit(viewForWebContents(foregroundWindow.webContents.id));
 }
 
 function isSessionVisibleInAnotherWindow(sessionRef: SessionRef): boolean {
