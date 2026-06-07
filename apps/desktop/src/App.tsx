@@ -8,6 +8,7 @@ import {
   type ComposerAttachment,
   type ComposerImageAttachment,
   type DesktopAppState,
+  type ForkThreadInput,
   type NewThreadEnvironment,
   type SelectedTranscriptRecord,
   type StartThreadInput,
@@ -44,6 +45,7 @@ import { useThreadSearch } from "./hooks/use-thread-search";
 import { useWorkspaceMenu } from "./hooks/use-workspace-menu";
 import { buildExtensionDockModel, ExtensionDialog, hasExtensionDockContent } from "./extension-session-ui";
 import { TreeModal } from "./tree-modal";
+import { ForkModal } from "./fork-modal";
 import { getEffectiveModelRuntime } from "./model-settings";
 import { resolveRepoWorkspaceId } from "./workspace-roots";
 import {
@@ -180,6 +182,17 @@ export default function App() {
     open: false,
     loading: false,
     submitting: false,
+  });
+  const [forkModalState, setForkModalState] = useState<{
+    readonly open: boolean;
+    readonly submitting: boolean;
+    readonly userMessageIndex: number;
+    readonly messagePreview?: string;
+    readonly error?: string;
+  }>({
+    open: false,
+    submitting: false,
+    userMessageIndex: 0,
   });
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const newThreadComposerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -754,6 +767,73 @@ export default function App() {
         });
     },
     [api, selectedSession, selectedWorkspace],
+  );
+
+  const closeForkModal = useCallback(() => {
+    setForkModalState((current) =>
+      current.submitting
+        ? current
+        : {
+            open: false,
+            submitting: false,
+            userMessageIndex: 0,
+          },
+    );
+  }, []);
+
+  const openForkModal = useCallback(
+    (turnIndex: number, preview?: string) => {
+      if (!api || !selectedWorkspace || !selectedSession) {
+        return;
+      }
+      const trimmed = preview?.trim();
+      setForkModalState({
+        open: true,
+        submitting: false,
+        userMessageIndex: turnIndex,
+        messagePreview: trimmed ? trimmed.slice(0, 280) : undefined,
+      });
+    },
+    [api, selectedSession, selectedWorkspace],
+  );
+
+  const handleForkSubmit = useCallback(
+    (environment: NewThreadEnvironment) => {
+      if (!api || !selectedWorkspace || !selectedSession) {
+        return;
+      }
+      const rootWorkspaceId =
+        (snapshot ? resolveRepoWorkspaceId(snapshot.workspaces, selectedWorkspace.id) : undefined) ??
+        selectedWorkspace.id;
+      const input: ForkThreadInput = {
+        sourceWorkspaceId: selectedWorkspace.id,
+        sourceSessionId: selectedSession.id,
+        rootWorkspaceId,
+        environment,
+        userMessageIndex: forkModalState.userMessageIndex,
+        position: "after",
+      };
+      setForkModalState((current) => ({ ...current, submitting: true, error: undefined }));
+      void api
+        .forkThread(input)
+        .then((state) => {
+          setSnapshot(state);
+          setForkModalState({
+            open: false,
+            submitting: false,
+            userMessageIndex: 0,
+          });
+          focusComposer();
+        })
+        .catch((error) => {
+          setForkModalState((current) => ({
+            ...current,
+            submitting: false,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+    },
+    [api, forkModalState.userMessageIndex, selectedSession, selectedWorkspace, snapshot],
   );
 
   const slashMenu = useSlashMenu({
@@ -2142,6 +2222,7 @@ export default function App() {
                   onJumpToLatest={jumpToLatest}
                   onContentHeightChange={handleTimelineContentHeightChange}
                   onViewFileInDiff={handleViewFileInDiff}
+                  onForkFromMessage={openForkModal}
                 />
               </div>
             </section>
@@ -2211,6 +2292,16 @@ export default function App() {
                 tree={treeModalState.tree}
                 onClose={closeTreeModal}
                 onNavigate={navigateTreeSelection}
+              />
+            ) : null}
+            {forkModalState.open ? (
+              <ForkModal
+                error={forkModalState.error}
+                submitting={forkModalState.submitting}
+                messagePreview={forkModalState.messagePreview}
+                canUseWorktree={Boolean(rootWorkspace)}
+                onClose={closeForkModal}
+                onSubmit={handleForkSubmit}
               />
             ) : null}
           </>

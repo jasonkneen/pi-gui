@@ -121,6 +121,28 @@ export interface CreateSessionOptions {
   readonly initialThinkingLevel?: string;
 }
 
+export type ForkPosition = "before" | "at" | "after";
+
+export interface ForkSessionOptions {
+  /** Target workspace for the forked session (the source workspace, or a new worktree). */
+  readonly targetWorkspace: WorkspaceRef;
+  /** 0-based index of the user message to fork from, counted within the source branch. */
+  readonly userMessageIndex: number;
+  /**
+   * "before" (default) forks before the selected user message so it can be edited and
+   * re-sent; "at" keeps the selected user message in the forked history.
+   */
+  readonly position?: ForkPosition;
+  /** Optional title for the forked session. Defaults to the source session title. */
+  readonly title?: string;
+}
+
+export interface ForkSessionResult {
+  readonly snapshot: SessionSnapshot;
+  /** When forking "before", the text of the selected user message for composer prefill. */
+  readonly selectedText?: string;
+}
+
 export interface SessionEventBase {
   readonly type: string;
   readonly sessionRef: SessionRef;
@@ -306,6 +328,7 @@ export type Unsubscribe = () => void;
 
 export interface SessionDriver {
   createSession(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot>;
+  forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult>;
   openSession(sessionRef: SessionRef): Promise<SessionSnapshot>;
   archiveSession(sessionRef: SessionRef): Promise<void>;
   unarchiveSession(sessionRef: SessionRef): Promise<void>;

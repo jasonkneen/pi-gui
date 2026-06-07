@@ -34,6 +34,7 @@ import type {
   ComposerImageAttachment,
   CreateSessionInput,
   CreateWorktreeInput,
+  ForkThreadInput,
   RemoveWorktreeInput,
   StartThreadInput,
   WorkspaceSessionTarget,
@@ -631,6 +632,7 @@ app.whenReady().then(async () => {
     store.createSession(input),
   );
   ipcMain.handle(desktopIpc.startThread, (_event, input: StartThreadInput) => store.startThread(input));
+  ipcMain.handle(desktopIpc.forkThread, (_event, input: ForkThreadInput) => store.forkThread(input));
   ipcMain.handle(desktopIpc.openSkillInFinder, async (_event, workspaceId: string, filePath: string) => {
     const resolved = store.getSkillFilePath(workspaceId, filePath);
     if (!resolved) {

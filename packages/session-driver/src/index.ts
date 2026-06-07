@@ -1,6 +1,9 @@
 export type {
   AssistantDeltaEvent,
   CreateSessionOptions,
+  ForkPosition,
+  ForkSessionOptions,
+  ForkSessionResult,
   ExtensionCompatibilityIssue,
   ExtensionCompatibilityIssueEvent,
   HostUiResponse,

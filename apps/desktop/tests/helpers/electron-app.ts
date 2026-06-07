@@ -59,6 +59,8 @@ export interface LaunchDesktopOptions {
   readonly scrubProviderEnv?: boolean;
   readonly envOverrides?: Readonly<Record<string, string | undefined>>;
   readonly inheritParentEnv?: boolean;
+  readonly recordVideoDir?: string;
+  readonly recordVideoSize?: { readonly width: number; readonly height: number };
 }
 
 export interface SeedAgentDirOptions {
@@ -106,6 +108,14 @@ export async function launchDesktop(
     args: [desktopDir],
     cwd: desktopDir,
     env,
+    ...(normalized.recordVideoDir
+      ? {
+          recordVideo: {
+            dir: normalized.recordVideoDir,
+            ...(normalized.recordVideoSize ? { size: normalized.recordVideoSize } : {}),
+          },
+        }
+      : {}),
   });
 
   return createDesktopHarness(electronApp);
@@ -630,6 +640,57 @@ export async function seedToolResultTreeSessionFixture(
     return {
       sessionId: sessionManager.getSessionId(),
       title: "Tree tool fixture session",
+    };
+  });
+}
+
+export async function seedForkSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "Fork fixture session";
+}> {
+  const { SessionManager } = (await import(
+    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  )) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendModelChange(provider: string, modelId: string): string;
+        appendSessionInfo(name: string): string;
+        appendThinkingLevelChange(thinkingLevel: string): string;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+    const appendUser = (content: string) =>
+      sessionManager.appendMessage({ role: "user", content, timestamp: nextTimestamp() });
+    const appendAssistant = (content: string) =>
+      sessionManager.appendMessage({ role: "assistant", content, timestamp: nextTimestamp() });
+
+    sessionManager.appendModelChange("openai", "gpt-5.4");
+    sessionManager.appendThinkingLevelChange("high");
+    appendUser("First fork question");
+    appendAssistant("First fork answer");
+    appendUser("Second fork question");
+    appendAssistant("Second fork answer");
+    appendUser("Third fork question");
+    appendAssistant("Third fork answer");
+
+    sessionManager.appendSessionInfo("Fork fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "Fork fixture session",
     };
   });
 }

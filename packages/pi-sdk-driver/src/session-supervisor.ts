@@ -25,6 +25,8 @@ import type {
 } from "@pi-gui/session-driver/types";
 import type {
   CreateSessionOptions,
+  ForkSessionOptions,
+  ForkSessionResult,
   HostUiRequest,
   HostUiResponse,
   SessionConfig,
@@ -333,6 +335,121 @@ export class SessionSupervisor {
       snapshot,
     });
     return snapshot;
+  }
+
+  async forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
+    const sourceRecord = await this.ensureRecord(sourceRef);
+    const sourceSession = this.requireSession(sourceRecord);
+    const sourceManager = sourceSession.sessionManager;
+    const sourceFile = sourceRecord.sessionFile ?? sourceManager.getSessionFile();
+    if (!sourceFile) {
+      throw new Error(`Session ${sessionKey(sourceRef)} cannot be forked because no session file is tracked.`);
+    }
+
+    // Resolve the nth user message in the source branch (root -> leaf order).
+    const branch = sourceManager.getBranch();
+    const userEntries = branch.filter(
+      (entry): entry is Extract<typeof entry, { type: "message" }> =>
+        entry.type === "message" && entry.message.role === "user",
+    );
+    const selectedEntry = userEntries[options.userMessageIndex];
+    if (!selectedEntry) {
+      throw new Error(
+        `Cannot fork session ${sessionKey(sourceRef)}: no user message at index ${options.userMessageIndex}.`,
+      );
+    }
+
+    const position = options.position ?? "before";
+    let targetLeafId: string | undefined;
+    let selectedText: string | undefined;
+    if (position === "after") {
+      // Codex-style fork: branch at the END of the selected user message's turn so the
+      // new thread contains the full history up to and including that turn's assistant
+      // response, with an empty composer. The turn ends just before the next user message
+      // (or at the branch leaf when this is the final turn).
+      const nextUserEntry = userEntries[options.userMessageIndex + 1];
+      if (nextUserEntry) {
+        const nextIndex = branch.findIndex((entry) => entry.id === nextUserEntry.id);
+        targetLeafId = nextIndex > 0 ? branch[nextIndex - 1]?.id : selectedEntry.id;
+      } else {
+        targetLeafId = branch[branch.length - 1]?.id ?? selectedEntry.id;
+      }
+    } else if (position === "at") {
+      targetLeafId = selectedEntry.id;
+    } else {
+      targetLeafId = selectedEntry.parentId ?? undefined;
+      selectedText = messageText(selectedEntry.message as unknown as Record<string, unknown>) || undefined;
+    }
+
+    const targetWorkspace = options.targetWorkspace;
+    await this.touchWorkspace(targetWorkspace);
+    const sameWorkspace = resolve(targetWorkspace.path) === resolve(sourceRecord.workspace.path);
+
+    // Build a branched SessionManager containing only the history up to the fork point.
+    let branchedManager: SessionManager;
+    if (!targetLeafId) {
+      // Forking before the first user message: start a fresh empty session in the target.
+      branchedManager = SessionManager.create(targetWorkspace.path);
+      branchedManager.newSession({ parentSession: sourceFile });
+    } else if (sameWorkspace) {
+      const opened = SessionManager.open(sourceFile);
+      const forkedPath = opened.createBranchedSession(targetLeafId);
+      if (!forkedPath) {
+        throw new Error(`Failed to create forked session from ${sessionKey(sourceRef)}.`);
+      }
+      branchedManager = SessionManager.open(forkedPath);
+    } else {
+      const forked = SessionManager.forkFrom(sourceFile, targetWorkspace.path);
+      const forkedPath = forked.createBranchedSession(targetLeafId);
+      if (!forkedPath) {
+        throw new Error(`Failed to create forked session from ${sessionKey(sourceRef)}.`);
+      }
+      branchedManager = SessionManager.open(forkedPath);
+    }
+
+    const createOptions: CreateAgentSessionOptions = {
+      cwd: targetWorkspace.path,
+      sessionManager: branchedManager,
+      ...(this.modelRegistry ? { modelRegistry: this.modelRegistry } : {}),
+    };
+    const sourceConfig = sourceRecord.config;
+    if (sourceConfig?.provider && sourceConfig?.modelId) {
+      try {
+        createOptions.model = this.resolveModel(sourceConfig.provider, sourceConfig.modelId);
+      } catch {
+        // Source model is no longer available; fall back to the runtime default.
+      }
+    }
+    if (sourceConfig?.thinkingLevel) {
+      createOptions.thinkingLevel = sourceConfig.thinkingLevel as NonNullable<
+        CreateAgentSessionOptions["thinkingLevel"]
+      >;
+    }
+
+    const runtime = await this.createAgentSessionRuntimeImpl(createOptions);
+    const session = runtime.session;
+
+    const title = options.title ?? sourceRecord.title;
+    const record = this.createRecord(targetWorkspace, runtime, title);
+    forcePersistSession(session.sessionManager);
+    record.config = deriveSessionConfig(session.sessionManager);
+    const sessionFile = record.sessionFile ?? session.sessionManager.getSessionFile();
+    if (sessionFile) {
+      record.sessionFile = sessionFile;
+      await this.catalogs.setSessionFile(record.ref, sessionFile);
+    }
+
+    this.records.set(sessionKey(record.ref), record);
+    await this.bindSessionRuntime(record);
+    await this.persistSnapshot(record);
+    const snapshot = buildSnapshot(record);
+    await this.emit(record, {
+      type: "sessionOpened",
+      sessionRef: record.ref,
+      timestamp: nowIso(),
+      snapshot,
+    });
+    return selectedText === undefined ? { snapshot } : { snapshot, selectedText };
   }
 
   async openSession(sessionRef: SessionRef): Promise<SessionSnapshot> {

@@ -91,6 +91,20 @@ declare module "@pi-gui/session-driver" {
     readonly initialThinkingLevel?: string;
   }
 
+  export type ForkPosition = "before" | "at" | "after";
+
+  export interface ForkSessionOptions {
+    readonly targetWorkspace: WorkspaceRef;
+    readonly userMessageIndex: number;
+    readonly position?: ForkPosition;
+    readonly title?: string;
+  }
+
+  export interface ForkSessionResult {
+    readonly snapshot: SessionSnapshot;
+    readonly selectedText?: string;
+  }
+
   export interface SessionErrorInfo {
     readonly message: string;
     readonly code?: string;
@@ -301,6 +315,7 @@ declare module "@pi-gui/session-driver" {
 
   export interface SessionDriver {
     createSession(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot>;
+    forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult>;
     openSession(sessionRef: SessionRef): Promise<SessionSnapshot>;
     archiveSession(sessionRef: SessionRef): Promise<void>;
     unarchiveSession(sessionRef: SessionRef): Promise<void>;

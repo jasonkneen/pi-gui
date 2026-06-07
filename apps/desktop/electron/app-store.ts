@@ -43,6 +43,7 @@ import {
   type CreateSessionInput,
   type CreateWorktreeInput,
   type DesktopAppState,
+  type ForkThreadInput,
   type NotificationPreferences,
   type QueuedComposerMessage,
   type RemoveWorktreeInput,
@@ -333,6 +334,10 @@ export class DesktopAppStore implements AppStoreInternals {
 
   async createWorktree(input: CreateWorktreeInput): Promise<DesktopAppState> {
     return worktree.createWorktree(this, input);
+  }
+
+  async forkThread(input: ForkThreadInput): Promise<DesktopAppState> {
+    return worktree.forkThread(this, input);
   }
 
   async removeWorktree(input: RemoveWorktreeInput): Promise<DesktopAppState> {

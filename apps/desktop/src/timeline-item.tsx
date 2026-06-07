@@ -2,7 +2,7 @@ import type { SessionTranscriptMessage } from "@pi-gui/pi-sdk-driver";
 import type { TimelineActivity, TimelineToolCall, TimelineSummary, TranscriptMessage } from "./timeline-types";
 import { MessageMarkdown } from "./message-markdown";
 import { InlineDiff, extractDiffFromOutput } from "./diff-inline";
-import { ChevronRightIcon, CopyIcon, DiffIcon, FileIcon } from "./icons";
+import { ChevronRightIcon, CopyIcon, DiffIcon, FileIcon, ForkIcon } from "./icons";
 import { extensionToLanguage } from "./syntax-highlight";
 
 export function TimelineItem({
@@ -10,15 +10,25 @@ export function TimelineItem({
   expandedToolCallIds,
   onToggleToolCall,
   onViewFileInDiff,
+  forkTurnIndex,
+  onForkFromMessage,
 }: {
   readonly item: TranscriptMessage;
   readonly expandedToolCallIds?: ReadonlySet<string>;
   readonly onToggleToolCall?: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
+  readonly forkTurnIndex?: number;
+  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
 }) {
   switch (item.kind) {
     case "message":
-      return <TimelineMessage item={item} />;
+      return (
+        <TimelineMessage
+          item={item}
+          forkTurnIndex={forkTurnIndex}
+          onForkFromMessage={onForkFromMessage}
+        />
+      );
     case "activity":
       return <TimelineActivityItem item={item} />;
     case "tool":
@@ -37,7 +47,15 @@ export function TimelineItem({
   }
 }
 
-function TimelineMessage({ item }: { readonly item: SessionTranscriptMessage }) {
+function TimelineMessage({
+  item,
+  forkTurnIndex,
+  onForkFromMessage,
+}: {
+  readonly item: SessionTranscriptMessage;
+  readonly forkTurnIndex?: number;
+  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+}) {
   if (item.role === "user") {
     return (
       <article className="timeline-item timeline-item--user">
@@ -84,9 +102,25 @@ function TimelineMessage({ item }: { readonly item: SessionTranscriptMessage }) 
     );
   }
 
+  const canFork = onForkFromMessage != null && forkTurnIndex != null;
   return (
     <article className="timeline-item timeline-item--assistant">
       <MessageMarkdown text={item.text} />
+      {canFork ? (
+        <div className="timeline-item__actions">
+          <button
+            type="button"
+            className="timeline-item__action"
+            title="Fork conversation from this point"
+            aria-label="Fork conversation from this point"
+            data-testid="fork-from-message"
+            onClick={() => onForkFromMessage(forkTurnIndex, item.text)}
+          >
+            <ForkIcon />
+            <span className="timeline-item__action-label">Fork</span>
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }
