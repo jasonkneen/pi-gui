@@ -5,11 +5,9 @@ import type {
   NotificationPreferences,
 } from "../src/desktop-state";
 import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeFileAtomicQueued } from "./atomic-file-write";
 
-const uiStateWriteQueueByPath = new Map<string, Promise<void>>();
 export interface PersistedUiState {
   readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   readonly selectedWorkspaceId?: string;
@@ -88,44 +86,15 @@ export async function writePersistedUiState(
   uiStateFilePath: string,
   payload: PersistedUiState,
 ): Promise<void> {
-  await enqueueUiStateWrite(uiStateFilePath, async () => {
-    await mkdir(dirname(uiStateFilePath), { recursive: true });
-    const serialized = `${JSON.stringify(
-      {
-        version: 9,
-        ...payload,
-      } satisfies PersistedUiState,
-      null,
-      2,
-    )}\n`;
-    const tmpPath = `${uiStateFilePath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(tmpPath, serialized, "utf8");
-
-    try {
-      await rename(tmpPath, uiStateFilePath);
-    } catch (error) {
-      if (!isReplaceRenameError(error)) {
-        await cleanupTempFile(tmpPath);
-        throw error;
-      }
-
-      try {
-        await unlink(uiStateFilePath);
-      } catch (unlinkError) {
-        if (!isMissingFileError(unlinkError)) {
-          await cleanupTempFile(tmpPath);
-          throw unlinkError;
-        }
-      }
-
-      try {
-        await rename(tmpPath, uiStateFilePath);
-      } catch (renameError) {
-        await cleanupTempFile(tmpPath);
-        throw renameError;
-      }
-    }
-  });
+  const serialized = `${JSON.stringify(
+    {
+      version: 9,
+      ...payload,
+    } satisfies PersistedUiState,
+    null,
+    2,
+  )}\n`;
+  await writeFileAtomicQueued(uiStateFilePath, serialized);
 }
 
 function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot | undefined {
@@ -146,34 +115,3 @@ function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot
   };
 }
 
-function isMissingFileError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function isReplaceRenameError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error.code === "EEXIST" || error.code === "EPERM");
-}
-
-async function cleanupTempFile(filePath: string): Promise<void> {
-  try {
-    await unlink(filePath);
-  } catch (error) {
-    if (!isMissingFileError(error)) {
-      throw error;
-    }
-  }
-}
-
-async function enqueueUiStateWrite(uiStateFilePath: string, write: () => Promise<void>): Promise<void> {
-  const previous = uiStateWriteQueueByPath.get(uiStateFilePath) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(write);
-  uiStateWriteQueueByPath.set(uiStateFilePath, next);
-
-  try {
-    await next;
-  } finally {
-    if (uiStateWriteQueueByPath.get(uiStateFilePath) === next) {
-      uiStateWriteQueueByPath.delete(uiStateFilePath);
-    }
-  }
-}
