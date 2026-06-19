@@ -113,6 +113,44 @@ const appIconPath = app.isPackaged
   : path.join(__dirname, "..", "..", "resources", "icon.png");
 const appIcon = nativeImage.createFromPath(appIconPath);
 
+function parseExternalWebUrl(url: string): URL | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function appRendererUrl(): string {
+  if (isDev && process.env.ELECTRON_RENDERER_URL) {
+    return process.env.ELECTRON_RENDERER_URL;
+  }
+  const indexPath = path.join(__dirname, "..", "renderer", "index.html");
+  return pathToFileURL(indexPath).toString();
+}
+
+function isInAppNavigationUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const appUrl = new URL(appRendererUrl());
+    return parsed.href === appUrl.href || (isDev && parsed.origin === appUrl.origin);
+  } catch {
+    return false;
+  }
+}
+
+function openExternalWebUrl(url: string): boolean {
+  const parsed = parseExternalWebUrl(url);
+  if (!parsed) {
+    return false;
+  }
+  void shell.openExternal(parsed.toString()).catch((error) => {
+    console.error(`Failed to open external URL: ${parsed.toString()}`, error);
+  });
+  return true;
+}
+
 function readClipboardImageAttachment(): ComposerImageAttachment | null {
   const image = clipboard.readImage();
   if (image.isEmpty()) {
@@ -161,6 +199,20 @@ function createWindow(): BrowserWindow {
       // Keep hidden test windows responsive so Playwright exercises the same UI flows.
       backgroundThrottling: !backgroundTestMode,
     },
+  });
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isInAppNavigationUrl(url)) {
+      openExternalWebUrl(url);
+    }
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, url) => {
+    if (isInAppNavigationUrl(url)) {
+      return;
+    }
+    event.preventDefault();
+    openExternalWebUrl(url);
   });
 
   window.once("ready-to-show", () => {
@@ -218,8 +270,7 @@ function createWindow(): BrowserWindow {
       window.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    const indexPath = path.join(__dirname, "..", "renderer", "index.html");
-    void window.loadURL(pathToFileURL(indexPath).toString());
+    void window.loadURL(appRendererUrl());
   }
 
   return window;
@@ -922,11 +973,11 @@ app.whenReady().then(async () => {
     return mode;
   });
   ipcMain.handle(desktopIpc.openExternal, (_event, url: string) => {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
+    const parsed = parseExternalWebUrl(url);
+    if (!parsed) {
       throw new Error(`Refusing to open unsupported URL: ${url}`);
     }
-    return shell.openExternal(url);
+    return shell.openExternal(parsed.toString());
   });
   ipcMain.handle(desktopIpc.stateRequest, (event) => store.getStateForView(viewForWebContents(event.sender.id)));
   ipcMain.handle(desktopIpc.selectedTranscriptRequest, (event) =>

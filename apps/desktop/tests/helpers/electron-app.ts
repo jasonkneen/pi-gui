@@ -702,6 +702,53 @@ export async function seedBranchedTreeSessionFixture(
   });
 }
 
+export async function seedExternalLinkSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "External link fixture session";
+}> {
+  const { SessionManager } = (await import(
+    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  )) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendSessionInfo(name: string): string;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+
+    sessionManager.appendMessage({
+      role: "user",
+      content: "Show me the related issue.",
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendMessage({
+      role: "assistant",
+      content:
+        "Track this in [GitHub issue](https://github.com/minghinmatthewlam/pi-gui/issues/20). Ignore [email fallback](mailto:test@example.com).",
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendSessionInfo("External link fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "External link fixture session",
+    };
+  });
+}
+
 export async function seedToolResultTreeSessionFixture(
   agentDir: string,
   workspacePath: string,
