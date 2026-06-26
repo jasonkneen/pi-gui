@@ -726,6 +726,7 @@
 }
 
 .orchestrated-workbench__eyebrow,
+.evidence-ledger__eyebrow,
 .orchestration-panel__eyebrow,
 .preview-workbench__eyebrow {
   color: var(--muted-soft);
@@ -736,6 +737,8 @@
 }
 
 .orchestrated-workbench__header h2,
+.evidence-ledger h2,
+.evidence-record h3,
 .orchestration-panel h2,
 .orchestration-detail h3,
 .preview-workbench__header h2 {
@@ -748,7 +751,7 @@
 
 .orchestrated-workbench__tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -761,6 +764,34 @@
   color: var(--muted-strong);
   font-size: 12px;
   font-weight: 650;
+}
+
+.orchestrated-workbench__tab {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 6px;
+}
+
+.orchestrated-workbench__tab span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orchestrated-workbench__tab strong {
+  flex: 0 0 auto;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .orchestrated-workbench__tab--active,
@@ -785,7 +816,18 @@
   overflow: hidden;
 }
 
+.evidence-ledger {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(70px, auto) minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  overflow: hidden;
+}
+
 .orchestration-panel__head,
+.evidence-ledger__head,
 .orchestration-detail__head,
 .orchestration-child-row__top,
 .preview-workbench__header {
@@ -806,6 +848,146 @@
   font-size: 12px;
   font-weight: 650;
   text-align: center;
+}
+
+.evidence-ledger__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.evidence-ledger__metric {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.evidence-ledger__metric span,
+.evidence-record__top,
+.evidence-record__meta {
+  color: var(--muted-soft);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.evidence-ledger__metric strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-strong);
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.evidence-ledger__children,
+.evidence-ledger__records {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+}
+
+.evidence-ledger__children {
+  max-height: 116px;
+}
+
+.evidence-ledger__child {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  text-align: left;
+}
+
+.evidence-ledger__child span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-ledger__child strong {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.evidence-ledger__child--active {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+.evidence-record {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.evidence-record--failed,
+.evidence-record--blocked {
+  border-color: rgba(196, 86, 102, 0.35);
+}
+
+.evidence-record__top,
+.evidence-record__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evidence-record h3 {
+  font-size: 13px;
+}
+
+.evidence-record p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.42;
+}
+
+.evidence-record__source,
+.evidence-record__meta span {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-record__source--worker-reported {
+  background: rgba(63, 131, 248, 0.11);
+  color: #2b5fb8;
+}
+
+.evidence-record__source--orchestrator-accepted {
+  background: rgba(46, 160, 67, 0.12);
+  color: #287d3c;
+}
+
+.evidence-record__source--orchestrator-observed,
+.evidence-record__source--orchestrator-action {
+  background: rgba(102, 112, 133, 0.12);
+  color: var(--muted-strong);
+}
+
+.evidence-record__source--blocker {
+  background: rgba(196, 86, 102, 0.12);
+  color: var(--error-ink);
 }
 
 .orchestration-follow-up {
@@ -1102,6 +1284,8 @@
 
 .file-workbench__viewer-modes {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 

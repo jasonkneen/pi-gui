@@ -1893,6 +1893,15 @@ export default function App() {
     );
   };
 
+  const handleSetChildSupervisionLoop = (childThreadId: string, gate: "continue" | "stop") => {
+    void updateSnapshot(api, setSnapshot, () =>
+      api.setChildSupervisionLoop({
+        childThreadId,
+        gate,
+      }),
+    );
+  };
+
   const handleOpenChildThread = (child: OrchestrationChildThread) => {
     if (!child.childSessionId) {
       return;
@@ -2414,6 +2423,7 @@ export default function App() {
             fileContexts={fileWorkbenchContexts}
             onSelectMode={setWorkbenchMode}
             onSendFollowUp={handleSendChildThreadFollowUp}
+            onSetSupervisionLoop={handleSetChildSupervisionLoop}
             onOpenChild={handleOpenChildThread}
             onAttachPreviewEvidence={handleAttachPreviewEvidence}
           />

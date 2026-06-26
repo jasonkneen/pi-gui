@@ -32,6 +32,7 @@ import type {
   NotificationPreferences,
   RemoveWorktreeInput,
   SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   SelectedTranscriptRecord,
   StartThreadInput,
   WorkspaceSessionTarget,
@@ -151,6 +152,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.startThread, input) as Promise<DesktopAppState>,
   sendChildThreadFollowUp: (input: SendChildThreadFollowUpInput) =>
     ipcRenderer.invoke(desktopIpc.sendChildThreadFollowUp, input) as Promise<DesktopAppState>,
+  setChildSupervisionLoop: (input: SetChildSupervisionLoopInput) =>
+    ipcRenderer.invoke(desktopIpc.setChildSupervisionLoop, input) as Promise<DesktopAppState>,
   cancelCurrentRun: () => ipcRenderer.invoke(desktopIpc.cancelCurrentRun) as Promise<DesktopAppState>,
   setActiveView: (view: AppView) =>
     ipcRenderer.invoke(desktopIpc.setActiveView, view) as Promise<DesktopAppState>,

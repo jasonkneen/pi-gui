@@ -50,6 +50,7 @@ import type {
   CreateWorktreeInput,
   RemoveWorktreeInput,
   SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   StartThreadInput,
   WorkspaceSessionTarget,
 } from "../src/desktop-state";
@@ -1261,6 +1262,9 @@ app.whenReady().then(async () => {
   );
   ipcMain.handle(desktopIpc.sendChildThreadFollowUp, (event, input: SendChildThreadFollowUpInput) =>
     runWindowScopedForEvent(event, () => store.sendChildThreadFollowUp(input)),
+  );
+  ipcMain.handle(desktopIpc.setChildSupervisionLoop, (event, input: SetChildSupervisionLoopInput) =>
+    runWindowScopedForEvent(event, () => store.setChildSupervisionLoop(input)),
   );
   ipcMain.handle(desktopIpc.openSkillInFinder, async (_event, workspaceId: string, filePath: string) => {
     const resolved = store.getSkillFilePath(workspaceId, filePath);

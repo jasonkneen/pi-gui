@@ -43,6 +43,11 @@ interface DiffPanelProps {
   readonly sessionStatus: string | undefined;
   readonly fileRequest?: DiffPanelFileRequest | null;
   readonly contexts: readonly FileWorkbenchContext[];
+  readonly onAttachEvidence?: (evidence: {
+    readonly source: "file";
+    readonly title: string;
+    readonly detail: string;
+  }) => void;
 }
 
 export function DiffPanel({
@@ -52,6 +57,7 @@ export function DiffPanel({
   sessionStatus,
   fileRequest,
   contexts,
+  onAttachEvidence,
 }: DiffPanelProps) {
   const [filesByWorkspace, setFilesByWorkspace] = useState<Readonly<Record<string, readonly string[]>>>({});
   const [changedByWorkspace, setChangedByWorkspace] =
@@ -271,6 +277,9 @@ export function DiffPanel({
     () => changedRows.reduce((acc, file) => acc + (reviewed.has(reviewedFileKey(file.workspaceId, file.path)) ? 1 : 0), 0),
     [changedRows, reviewed],
   );
+  const selectedContext = selectedFile
+    ? contexts.find((context) => context.workspace.id === selectedFile.workspaceId)
+    : undefined;
 
   return (
     <section className="diff-panel file-workbench">
@@ -432,6 +441,29 @@ export function DiffPanel({
               >
                 Diff
               </button>
+              {onAttachEvidence ? (
+                <button
+                  className="file-workbench__mode"
+                  type="button"
+                  disabled={viewerLoading}
+                  onClick={() => {
+                    onAttachEvidence({
+                      source: "file",
+                      title: selectedFile.path,
+                      detail: buildFileEvidenceDetail({
+                        selectedFile,
+                        selectedContext,
+                        viewerMode,
+                        preview,
+                        diffText,
+                        viewerError,
+                      }),
+                    });
+                  }}
+                >
+                  Add evidence
+                </button>
+              ) : null}
             </span>
           ) : null}
         </div>
@@ -634,4 +666,54 @@ function buildSubtitle(context: FileWorkbenchContext | undefined): string {
 function statusLabel(file: WorkbenchChangedFile): string {
   const branch = file.branchName ? ` · ${file.branchName}` : "";
   return `${file.status}${branch}`;
+}
+
+function buildFileEvidenceDetail({
+  selectedFile,
+  selectedContext,
+  viewerMode,
+  preview,
+  diffText,
+  viewerError,
+}: {
+  readonly selectedFile: FileSelection;
+  readonly selectedContext: FileWorkbenchContext | undefined;
+  readonly viewerMode: "preview" | "diff";
+  readonly preview: WorkspaceFilePreview | null;
+  readonly diffText: string;
+  readonly viewerError: string | null;
+}): string {
+  const workspaceLabel = selectedContext ? contextLabel(selectedContext) : selectedFile.workspaceId;
+  const lines = [
+    `- Workspace: ${workspaceLabel}`,
+    `- File: ${selectedFile.path}`,
+    `- View: ${viewerMode}`,
+  ];
+
+  if (viewerError) {
+    lines.push(`- Error: ${viewerError}`);
+    return lines.join("\n");
+  }
+
+  if (viewerMode === "diff") {
+    lines.push(`- Diff: ${diffText ? "available in file workbench" : "not available"}`);
+    return lines.join("\n");
+  }
+
+  if (!preview) {
+    lines.push("- Preview: not loaded");
+    return lines.join("\n");
+  }
+
+  if (preview.binary) {
+    lines.push("- Preview: binary or directory");
+    return lines.join("\n");
+  }
+
+  const firstLine = preview.content.split("\n").find((line) => line.trim())?.trim();
+  lines.push(`- Preview: ${preview.truncated ? "truncated text" : "text"}`);
+  if (firstLine) {
+    lines.push(`- First line: ${firstLine.slice(0, 160)}`);
+  }
+  return lines.join("\n");
 }

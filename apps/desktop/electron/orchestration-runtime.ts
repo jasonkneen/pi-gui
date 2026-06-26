@@ -35,6 +35,9 @@ export interface OrchestrationThreadListEntry {
   readonly updatedAt: string;
   readonly preview: string;
   readonly childThreadId?: string;
+  readonly supervisionGate?: "continue" | "wake" | "stop";
+  readonly supervisionReason?: string;
+  readonly nextSupervisionRunAt?: string;
 }
 
 export interface OrchestrationThreadTranscriptMessage {

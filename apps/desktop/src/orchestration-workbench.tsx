@@ -5,12 +5,14 @@ import { formatRelativeTime } from "./string-utils";
 interface OrchestrationWorkbenchProps {
   readonly childrenThreads: readonly OrchestrationChildThread[];
   readonly onSendFollowUp: (childThreadId: string, text: string) => void;
+  readonly onSetSupervisionLoop: (childThreadId: string, gate: "continue" | "stop") => void;
   readonly onOpenChild: (child: OrchestrationChildThread) => void;
 }
 
 export function OrchestrationWorkbench({
   childrenThreads,
   onSendFollowUp,
+  onSetSupervisionLoop,
   onOpenChild,
 }: OrchestrationWorkbenchProps) {
   const [followUpDraft, setFollowUpDraft] = useState("");
@@ -69,6 +71,7 @@ export function OrchestrationWorkbench({
                 </span>
               </span>
               <span className="orchestration-child-row__meta">
+                {child.supervisionLoop ? `${child.supervisionLoop.gate} gate · ` : ""}
                 {formatRelativeTime(child.updatedAt)}
               </span>
               <span className="orchestration-child-row__preview">{child.latestTranscript}</span>
@@ -94,6 +97,41 @@ export function OrchestrationWorkbench({
           >
             Open thread
           </button>
+          {selectedChild.supervisionLoop ? (
+            <section className="orchestration-loop" data-testid="child-supervision-loop">
+              <div className="orchestration-loop__head">
+                <span className={`orchestration-loop__gate orchestration-loop__gate--${selectedChild.supervisionLoop.gate}`}>
+                  {selectedChild.supervisionLoop.gate}
+                </span>
+                <span className="orchestration-loop__status">{selectedChild.supervisionLoop.status}</span>
+              </div>
+              <div className="orchestration-loop__reason">{selectedChild.supervisionLoop.reason}</div>
+              <div className="orchestration-loop__meta">
+                Checked {formatRelativeTime(selectedChild.supervisionLoop.lastCheckedAt)}
+                {selectedChild.supervisionLoop.nextRunAt
+                  ? ` · Next ${formatRelativeTime(selectedChild.supervisionLoop.nextRunAt)}`
+                  : ""}
+              </div>
+              <div className="orchestration-loop__actions">
+                <button
+                  className="button"
+                  disabled={selectedChild.supervisionLoop.gate !== "wake"}
+                  type="button"
+                  onClick={() => onSetSupervisionLoop(selectedChild.id, "continue")}
+                >
+                  Continue
+                </button>
+                <button
+                  className="button"
+                  disabled={selectedChild.supervisionLoop.gate === "stop"}
+                  type="button"
+                  onClick={() => onSetSupervisionLoop(selectedChild.id, "stop")}
+                >
+                  Stop
+                </button>
+              </div>
+            </section>
+          ) : null}
           <div className="orchestration-detail__goal">{selectedChild.goal}</div>
           <div className="orchestration-transcript" data-testid="child-thread-transcript">
             {selectedChild.transcript.map((message) => (

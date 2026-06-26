@@ -15,6 +15,7 @@ import type {
   NotificationPreferences,
   RemoveWorktreeInput,
   SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   SelectedTranscriptRecord,
   StartThreadInput,
   WorkspaceSessionTarget,
@@ -83,6 +84,7 @@ export const desktopIpc = {
   createSession: "pi-gui:create-session",
   startThread: "pi-gui:start-thread",
   sendChildThreadFollowUp: "pi-gui:send-child-thread-follow-up",
+  setChildSupervisionLoop: "pi-gui:set-child-supervision-loop",
   cancelCurrentRun: "pi-gui:cancel-current-run",
   setActiveView: "pi-gui:set-active-view",
   setSidebarCollapsed: "pi-gui:set-sidebar-collapsed",
@@ -287,6 +289,7 @@ export interface PiDesktopApi {
   createSession(input: CreateSessionInput): Promise<DesktopAppState>;
   startThread(input: StartThreadInput): Promise<DesktopAppState>;
   sendChildThreadFollowUp(input: SendChildThreadFollowUpInput): Promise<DesktopAppState>;
+  setChildSupervisionLoop(input: SetChildSupervisionLoopInput): Promise<DesktopAppState>;
   cancelCurrentRun(): Promise<DesktopAppState>;
   setActiveView(view: AppView): Promise<DesktopAppState>;
   setSidebarCollapsed(collapsed: boolean): Promise<DesktopAppState>;

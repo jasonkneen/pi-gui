@@ -1,4 +1,3 @@
-import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -40,15 +39,24 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
   const outsideFile = join(outsideDir, "secret.txt");
   await writeFile(outsideFile, "outside workspace\n", "utf8");
   await symlink(outsideFile, join(workspacePath, "escape-link.txt"));
-  const previewServer = await startPreviewServer();
+  const previewUrl = "http://127.0.0.1:30475/";
 
   const firstRun = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath, unrelatedWorkspacePath],
     testMode: "background",
+    envOverrides: {
+      PI_APP_ORCHESTRATION_SUPERVISION_INTERVAL_MS: "250",
+    },
   });
 
   try {
     const window = await firstRun.firstWindow();
+    await window.route(previewUrl, async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: "<!doctype html><title>Workbench preview</title><main>Preview ready</main>",
+      });
+    });
     const parentWorkspace = await waitForWorkspaceByPath(window, workspacePath);
     await waitForWorkspaceByPath(window, unrelatedWorkspacePath);
     await createNamedThread(window, "Parent orchestration session", {
@@ -113,11 +121,16 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
     await expect(window.getByTestId("child-thread-row")).toHaveCount(1);
     await expect(window.getByTestId("child-thread-row")).toContainText("Audit the renderer state ownership boundary");
     await expect(window.getByTestId("child-thread-row")).not.toContainText("Mocked");
+    await expect(window.getByTestId("child-supervision-loop")).toBeVisible();
     await expect(window.locator(".session-row__select", { hasText: "Audit the renderer state ownership boundary" }).first()).toBeVisible();
     const child = await waitForChildThread(window);
     expect(child.id).toBe(createChildDetails.childThreadId);
     expect(child.childWorkspaceId).toBe(createChildDetails.childWorkspaceId);
     expect(child.childSessionId).toBe(createChildDetails.childSessionId);
+    await emitChildRunningSnapshot(firstRun, window, child);
+    await expect(window.getByTestId("child-thread-detail")).toContainText("running");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("Continue");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("Stop");
     await expect
       .poll(async () => (await waitForChildThread(window)).transcript.map((message) => message.text))
       .toContain("Audit the renderer state ownership boundary");
@@ -125,6 +138,7 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
     const listThreadsCallId = "list-threads-test";
     const listThreadsToolResult = await runOrchestrationRuntimeTool(firstRun, parentRef, listThreadsToolName, {});
     expect(toolResultText(listThreadsToolResult)).toContain(child.id);
+    expect(["continue", "wake"]).toContain(threadDetailsForChild(listThreadsToolResult, child.id)?.supervisionGate);
     expect(toolResultText(listThreadsToolResult)).toContain("Parent orchestration session");
     expect(toolResultText(listThreadsToolResult)).not.toContain("Unrelated isolated session");
     await emitRuntimeToolCall(firstRun, parentRef, listThreadsToolName, listThreadsCallId, {}, {
@@ -172,9 +186,15 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
       .poll(async () => toolOutputText(window, readThreadCallId))
       .toContain("Audit the renderer state ownership boundary");
 
+    await emitChildFailedSnapshot(firstRun, window, child);
     await expect(window.getByTestId("child-thread-detail")).toContainText("failed");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("wake");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("Child failed");
+    await window.getByTestId("child-supervision-loop").getByRole("button", { name: "Continue" }).click();
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("continue");
     await emitChildRunningSnapshot(firstRun, window, child);
     await expect(window.getByTestId("child-thread-detail")).toContainText("running");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("continue");
 
     const runtimeFollowUp = "Report whether IPC boundaries stay tight";
     const sendMessageCallId = "send-message-to-child-thread-test";
@@ -199,6 +219,9 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
       .poll(async () => toolOutputText(window, sendMessageCallId))
       .toContain("Queued message to thread");
     await expect(window.getByTestId("child-thread-detail")).toContainText("waiting");
+    await window.getByTestId("child-supervision-loop").getByRole("button", { name: "Stop" }).click();
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("stop");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("stopped");
     await window.getByTestId("child-thread-open").click();
     await expect(window.locator(".topbar__session")).toHaveText("Audit the renderer state ownership boundary");
     await expect(window.getByTestId("queued-composer-message")).toContainText(runtimeFollowUp);
@@ -212,6 +235,10 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
 
     await fileWorkbench.getByTestId("file-workbench-tree").getByText("workbench-notes.txt").click();
     await expect(fileWorkbench.getByTestId("file-workbench-preview")).toContainText("orchestrated file preview");
+    await fileWorkbench.getByRole("button", { name: "Add evidence" }).click();
+    await expect(window.getByTestId("composer")).toHaveValue(/Workbench evidence/);
+    await expect(window.getByTestId("composer")).toHaveValue(/workbench-notes.txt/);
+    await expect(window.getByTestId("composer")).toHaveValue(/First line: orchestrated file preview/);
 
     await expect
       .poll(async () =>
@@ -237,7 +264,7 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
 
     await window.getByTestId("workbench-tab-preview").click();
     await expect(window.getByTestId("preview-workbench")).toBeVisible();
-    await window.getByLabel("Preview URL").fill(previewServer.url);
+    await window.getByLabel("Preview URL").fill(previewUrl);
     await window.getByRole("button", { name: "Load" }).click();
     await expect(window.getByTestId("preview-frame")).toBeVisible();
     await expect(window.getByTestId("preview-status")).toContainText("Ready");
@@ -255,9 +282,17 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
         }
       })
       .toContain("childSessionId");
+    await expect
+      .poll(async () => {
+        try {
+          return await readFile(join(userDataDir, "ui-state.json"), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .toContain("supervisionLoop");
   } finally {
     await firstRun.close();
-    await previewServer.close();
   }
 
   const secondRun = await launchDesktop(userDataDir, { testMode: "background" });
@@ -266,6 +301,7 @@ test("integrates real child threads, files, preview evidence, and relaunch persi
     await expect(window.getByTestId("orchestrated-workbench")).toBeVisible();
     await expect(window.getByTestId("child-thread-row")).toContainText("Audit the renderer state ownership boundary");
     await expect(window.getByTestId("child-thread-row")).not.toContainText("Mocked");
+    await expect(window.getByTestId("child-supervision-loop")).toContainText("stop");
     await expect(window.getByTestId("child-thread-transcript")).toContainText("Audit the renderer state ownership boundary");
     await window.getByTestId("child-thread-open").click();
     await expect(window.locator(".topbar__session")).toHaveText("Audit the renderer state ownership boundary");
@@ -375,16 +411,46 @@ function toolResultDetails(result: unknown): Record<string, unknown> {
   return details as Record<string, unknown>;
 }
 
+function threadDetailsForChild(result: unknown, childThreadId: string): Record<string, unknown> | undefined {
+  const details = toolResultDetails(result);
+  if (!Array.isArray(details.threads)) {
+    return undefined;
+  }
+  return details.threads.find((thread): thread is Record<string, unknown> =>
+    typeof thread === "object" &&
+    thread !== null &&
+    "childThreadId" in thread &&
+    thread.childThreadId === childThreadId,
+  );
+}
+
 async function emitChildRunningSnapshot(
   harness: Awaited<ReturnType<typeof launchDesktop>>,
   window: Parameters<typeof getDesktopState>[0],
   child: OrchestrationChildThread,
 ): Promise<void> {
+  await emitChildStatusSnapshot(harness, window, child, "running");
+}
+
+async function emitChildFailedSnapshot(
+  harness: Awaited<ReturnType<typeof launchDesktop>>,
+  window: Parameters<typeof getDesktopState>[0],
+  child: OrchestrationChildThread,
+): Promise<void> {
+  await emitChildStatusSnapshot(harness, window, child, "failed");
+}
+
+async function emitChildStatusSnapshot(
+  harness: Awaited<ReturnType<typeof launchDesktop>>,
+  window: Parameters<typeof getDesktopState>[0],
+  child: OrchestrationChildThread,
+  status: "running" | "failed",
+): Promise<void> {
   const state = await getDesktopState(window);
   const workspace = state.workspaces.find((entry) => entry.id === child.childWorkspaceId);
   const session = workspace?.sessions.find((entry) => entry.id === child.childSessionId);
   if (!workspace || !session) {
-    throw new Error("Expected child session to exist before emitting running snapshot");
+    throw new Error(`Expected child session to exist before emitting ${status} snapshot`);
   }
 
   const sessionRef: SessionRef = {
@@ -397,58 +463,22 @@ async function emitChildRunningSnapshot(
     displayName: workspace.name,
   };
   const timestamp = new Date().toISOString();
+  const runId = status === "running" ? "orchestrated-workbench-child-run" : undefined;
   const event: Extract<SessionDriverEvent, { type: "sessionUpdated" }> = {
     type: "sessionUpdated",
     sessionRef,
     timestamp,
-    runId: "orchestrated-workbench-child-run",
+    ...(runId ? { runId } : {}),
     snapshot: {
       ref: sessionRef,
       workspace: workspaceRef,
       title: session.title,
-      status: "running",
+      status,
       updatedAt: timestamp,
       preview: session.preview,
-      runningRunId: "orchestrated-workbench-child-run",
+      ...(runId ? { runningRunId: runId } : {}),
       queuedMessages: [],
     },
   };
   await emitTestSessionEvent(harness, event);
-}
-
-async function startPreviewServer(): Promise<{ readonly url: string; readonly close: () => Promise<void> }> {
-  const server = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "text/html" });
-    response.end("<!doctype html><title>Workbench preview</title><main>Preview ready</main>");
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Preview server did not bind to a TCP port.");
-  }
-
-  return {
-    url: `http://127.0.0.1:${address.port}/`,
-    close: () => closeServer(server),
-  };
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
-  });
 }

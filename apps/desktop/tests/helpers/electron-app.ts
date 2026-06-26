@@ -107,9 +107,7 @@ export async function getAvailableRealAuthModelPatterns(
   sourceDir: string,
   preferredPatterns: readonly string[] = preferredRealAuthComputerUseModelPatterns,
 ): Promise<readonly string[]> {
-  const { AuthStorage, ModelRegistry } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/index.js"
-  )) as {
+  const { AuthStorage, ModelRegistry } = (await import("@earendil-works/pi-coding-agent")) as {
     AuthStorage: {
       create(authPath: string): unknown;
     };
@@ -638,9 +636,7 @@ export async function seedBranchedTreeSessionFixture(
   readonly sessionId: string;
   readonly title: "Tree fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
@@ -709,9 +705,7 @@ export async function seedExternalLinkSessionFixture(
   readonly sessionId: string;
   readonly title: "External link fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
@@ -756,9 +750,7 @@ export async function seedToolResultTreeSessionFixture(
   readonly sessionId: string;
   readonly title: "Tree tool fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: Record<string, unknown>): string;

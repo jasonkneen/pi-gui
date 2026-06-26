@@ -3,15 +3,17 @@ import type {
   ExtensionCommandCompatibilityRecord,
   ModelSettingsScopeMode,
   NotificationPreferences,
+  OrchestrationEvidenceRecord,
   OrchestrationChildThread,
   OrchestrationChildTranscriptMessage,
+  OrchestrationSupervisionLoop,
 } from "../src/desktop-state";
 import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
 import { readFile } from "node:fs/promises";
 import { writeFileAtomicQueued } from "./atomic-file-write";
 
 export interface PersistedUiState {
-  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
+  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
   readonly selectedWorkspaceId?: string;
   readonly selectedSessionId?: string;
   readonly activeView?: AppView;
@@ -41,7 +43,9 @@ export async function readPersistedUiState(uiStateFilePath: string): Promise<Leg
     const parsed = JSON.parse(raw) as LegacyPersistedUiState;
     return {
       version:
-        parsed.version === 11
+        parsed.version === 12
+          ? 12
+          : parsed.version === 11
           ? 11
           : parsed.version === 10
           ? 10
@@ -97,7 +101,7 @@ export async function writePersistedUiState(
   const serialized = `${JSON.stringify(
     {
       ...payload,
-      version: 11,
+      version: 12,
     } satisfies PersistedUiState,
     null,
     2,
@@ -150,6 +154,8 @@ function toPersistedOrchestrationChildren(value: unknown): OrchestrationChildThr
     const retainedTranscript = transcript.slice(-MAX_PERSISTED_ORCHESTRATION_TRANSCRIPT_MESSAGES);
 
     const sourceToolCallId = stringValue(candidate.sourceToolCallId);
+    const status = toOrchestrationStatus(candidate.status);
+    const supervisionLoop = toPersistedSupervisionLoop(candidate.supervisionLoop, status);
     return [
       {
         id,
@@ -160,9 +166,11 @@ function toPersistedOrchestrationChildren(value: unknown): OrchestrationChildThr
         childSessionId,
         title,
         goal,
-        status: toOrchestrationStatus(candidate.status),
+        status,
         latestTranscript: stringValue(candidate.latestTranscript) || retainedTranscript.at(-1)?.text || goal,
         transcript: retainedTranscript,
+        evidence: toPersistedEvidence(candidate.evidence, id),
+        ...(supervisionLoop ? { supervisionLoop } : {}),
         createdAt,
         updatedAt,
       },
@@ -170,12 +178,159 @@ function toPersistedOrchestrationChildren(value: unknown): OrchestrationChildThr
   });
 }
 
+function toPersistedEvidence(value: unknown, childThreadId: string): OrchestrationEvidenceRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const records = value.flatMap((entry): OrchestrationEvidenceRecord[] => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+    const candidate = entry as Record<string, unknown>;
+    const id = stringValue(candidate.id);
+    const kind = toEvidenceKind(candidate.kind);
+    const source = toEvidenceSource(candidate.source);
+    const status = toEvidenceStatus(candidate.status);
+    const title = stringValue(candidate.title);
+    const createdAt = stringValue(candidate.createdAt);
+    if (!id || !kind || !source || !status || !title || !createdAt) {
+      return [];
+    }
+
+    const gitCandidate = candidate.git;
+    const git = gitCandidate && typeof gitCandidate === "object"
+      ? toEvidenceGit(gitCandidate as Record<string, unknown>)
+      : undefined;
+
+    return [
+      {
+        id,
+        childThreadId,
+        kind,
+        source,
+        status,
+        title,
+        ...(stringValue(candidate.detail) ? { detail: stringValue(candidate.detail) } : {}),
+        ...(stringValue(candidate.command) ? { command: stringValue(candidate.command) } : {}),
+        ...(stringValue(candidate.toolName) ? { toolName: stringValue(candidate.toolName) } : {}),
+        ...(toEvidenceSeverity(candidate.severity) ? { severity: toEvidenceSeverity(candidate.severity) } : {}),
+        ...(stringValue(candidate.parentSessionId) ? { parentSessionId: stringValue(candidate.parentSessionId) } : {}),
+        ...(stringValue(candidate.childSessionId) ? { childSessionId: stringValue(candidate.childSessionId) } : {}),
+        ...(git ? { git } : {}),
+        createdAt,
+        ...(stringValue(candidate.updatedAt) ? { updatedAt: stringValue(candidate.updatedAt) } : {}),
+      },
+    ];
+  });
+  return records.slice(0, MAX_PERSISTED_ORCHESTRATION_EVIDENCE_RECORDS);
+}
+
+function toEvidenceGit(value: Record<string, unknown>): OrchestrationEvidenceRecord["git"] | undefined {
+  const workspaceId = stringValue(value.workspaceId);
+  if (!workspaceId) {
+    return undefined;
+  }
+  return {
+    workspaceId,
+    ...(stringValue(value.branchName) ? { branchName: stringValue(value.branchName) } : {}),
+    ...(stringValue(value.headSha) ? { headSha: stringValue(value.headSha) } : {}),
+  };
+}
+
+function toEvidenceKind(value: unknown): OrchestrationEvidenceRecord["kind"] | undefined {
+  return value === "worker_report" ||
+    value === "orchestrator_acceptance" ||
+    value === "orchestrator_observation" ||
+    value === "orchestrator_action" ||
+    value === "command" ||
+    value === "review_finding" ||
+    value === "blocker"
+    ? value
+    : undefined;
+}
+
+function toEvidenceSource(value: unknown): OrchestrationEvidenceRecord["source"] | undefined {
+  return value === "worker-reported" ||
+    value === "orchestrator-accepted" ||
+    value === "orchestrator-observed" ||
+    value === "orchestrator-action" ||
+    value === "command" ||
+    value === "review" ||
+    value === "blocker"
+    ? value
+    : undefined;
+}
+
+function toEvidenceStatus(value: unknown): OrchestrationEvidenceRecord["status"] | undefined {
+  return value === "reported" ||
+    value === "accepted" ||
+    value === "running" ||
+    value === "passed" ||
+    value === "failed" ||
+    value === "blocked"
+    ? value
+    : undefined;
+}
+
+function toEvidenceSeverity(value: unknown): OrchestrationEvidenceRecord["severity"] | undefined {
+  return value === "P0" || value === "P1" || value === "P2" || value === "P3" ? value : undefined;
+}
+
+function toPersistedSupervisionLoop(
+  value: unknown,
+  lastChildStatus: OrchestrationChildThread["status"],
+): OrchestrationSupervisionLoop | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  const id = stringValue(candidate.id);
+  const status = toSupervisionStatus(candidate.status);
+  const gate = toSupervisionGate(candidate.gate);
+  const intervalMs = numberValue(candidate.intervalMs);
+  const iterationCount = numberValue(candidate.iterationCount);
+  const lastCheckedAt = stringValue(candidate.lastCheckedAt);
+  const reason = stringValue(candidate.reason);
+  if (!id || !status || !gate || !intervalMs || iterationCount === undefined || !lastCheckedAt || !reason) {
+    return undefined;
+  }
+  return {
+    id,
+    status,
+    gate,
+    intervalMs,
+    iterationCount,
+    lastCheckedAt,
+    ...(stringValue(candidate.nextRunAt) ? { nextRunAt: stringValue(candidate.nextRunAt) } : {}),
+    reason,
+    lastChildStatus: toOptionalOrchestrationStatus(candidate.lastChildStatus) ?? lastChildStatus,
+    ...(stringValue(candidate.stoppedAt) ? { stoppedAt: stringValue(candidate.stoppedAt) } : {}),
+  };
+}
+
+function toSupervisionStatus(value: unknown): OrchestrationSupervisionLoop["status"] | undefined {
+  return value === "monitoring" || value === "attention" || value === "stopped" ? value : undefined;
+}
+
+function toSupervisionGate(value: unknown): OrchestrationSupervisionLoop["gate"] | undefined {
+  return value === "continue" || value === "stop" || value === "wake" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
 function toOrchestrationStatus(value: unknown): OrchestrationChildThread["status"] {
-  return value === "waiting" || value === "complete" || value === "failed" ? value : "running";
+  return toOptionalOrchestrationStatus(value) ?? "running";
+}
+
+function toOptionalOrchestrationStatus(value: unknown): OrchestrationChildThread["status"] | undefined {
+  return value === "waiting" || value === "complete" || value === "failed" || value === "running" ? value : undefined;
 }
 
 function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot | undefined {
@@ -196,3 +351,4 @@ function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot
   };
 }
 const MAX_PERSISTED_ORCHESTRATION_TRANSCRIPT_MESSAGES = 40;
+const MAX_PERSISTED_ORCHESTRATION_EVIDENCE_RECORDS = 80;

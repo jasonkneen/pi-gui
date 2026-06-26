@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { sessionKey } from "@pi-gui/pi-sdk-driver";
 import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
 import type {
   DesktopAppState,
+  OrchestrationEvidenceRecord,
   OrchestrationChildThread,
   OrchestrationChildThreadStatus,
   OrchestrationChildTranscriptMessage,
+  OrchestrationSupervisionLoop,
+  OrchestrationSupervisionStatus,
   SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   TimelineToolCall,
   TranscriptMessage,
 } from "../src/desktop-state";
@@ -39,7 +45,11 @@ import type {
 const CHILD_TITLE_LIMIT = 56;
 const MAX_CHILD_TRANSCRIPT_MESSAGES = 40;
 const MAX_READ_THREAD_MESSAGES = 60;
+const MAX_EVIDENCE_RECORDS_PER_CHILD = 80;
+const DEFAULT_SUPERVISION_INTERVAL_MS = 60_000;
+const MIN_SUPERVISION_INTERVAL_MS = 250;
 const pendingCreateChildThreadToolCalls = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 interface SpawnChildThreadInput {
   readonly parentWorkspaceId: string;
@@ -110,6 +120,8 @@ async function createChildThreadRecord(
     await store.ensureSessionSubscription(childRef);
 
     const now = new Date().toISOString();
+    const git = await workspaceGitRef(input.parentWorkspaceId, workspace.path);
+    const status = toOrchestrationStatus(session.status, childRef, store);
     const child: OrchestrationChildThread = {
       id: randomUUID(),
       ...(input.sourceToolCallId ? { sourceToolCallId: input.sourceToolCallId } : {}),
@@ -119,16 +131,36 @@ async function createChildThreadRecord(
       childSessionId: childRef.sessionId,
       title: session.title || titleFromPrompt(prompt),
       goal: prompt,
-      status: toOrchestrationStatus(session.status, childRef, store),
+      status,
       latestTranscript: session.preview || prompt,
       transcript: [],
+      evidence: [
+        {
+          id: evidenceId("created", input.sourceToolCallId ?? childRef.sessionId),
+          childThreadId: "",
+          kind: "orchestrator_acceptance",
+          source: "orchestrator-accepted",
+          status: "accepted",
+          title: "Child thread created",
+          detail: prompt,
+          parentSessionId: input.parentSessionId,
+          childSessionId: childRef.sessionId,
+          ...(git ? { git } : {}),
+          createdAt: now,
+        },
+      ],
+      supervisionLoop: createSupervisionLoop(status, now),
       createdAt: now,
       updatedAt: session.updatedAt || now,
+    };
+    const childWithEvidence = {
+      ...child,
+      evidence: child.evidence.map((record) => ({ ...record, childThreadId: child.id })),
     };
 
     store.state = {
       ...store.state,
-      orchestrationChildren: projectOrchestrationChildren(store, [child, ...store.state.orchestrationChildren]),
+      orchestrationChildren: projectOrchestrationChildren(store, [childWithEvidence, ...store.state.orchestrationChildren]),
     };
     await store.refreshState({
       selectedWorkspaceId: input.parentWorkspaceId,
@@ -147,7 +179,7 @@ async function createChildThreadRecord(
       void store.withError(error);
     });
 
-    return store.state.orchestrationChildren.find((entry) => entry.id === child.id) ?? child;
+    return store.state.orchestrationChildren.find((entry) => entry.id === child.id) ?? childWithEvidence;
   } finally {
     if (pendingKey) {
       pendingCreateChildThreadToolCalls.delete(pendingKey);
@@ -218,16 +250,19 @@ export async function handleOrchestrationThreadToolResult(
 
   if (tool.toolName === listThreadsToolName && listThreadsRequestedFromToolOutput(event.output)) {
     updateListThreadsToolOutput(store, event);
+    refreshParentOrchestrationEvidence(store, event.sessionRef);
     return true;
   }
 
   if (tool.toolName === readThreadToolName) {
     await updateReadThreadToolOutput(store, event);
+    refreshParentOrchestrationEvidence(store, event.sessionRef);
     return true;
   }
 
   if (tool.toolName === sendMessageToThreadToolName) {
     await updateSendMessageToThreadToolOutput(store, event);
+    refreshParentOrchestrationEvidence(store, event.sessionRef);
     return true;
   }
 
@@ -257,10 +292,35 @@ export async function sendChildThreadFollowUp(
     return store.withError("Child thread session is no longer available.");
   }
 
-  return submitComposerToSession(store, childRef, text, [], {
+  await submitComposerToSession(store, childRef, text, [], {
     deliverAs: "followUp",
     allowCommands: false,
   });
+  updateChildSupervisionLoop(store, child.id, "continue", "Follow-up sent; monitoring child progress.");
+  await store.persistUiState();
+  return store.emit();
+}
+
+export async function setChildSupervisionLoopGate(
+  store: AppStoreInternals,
+  input: SetChildSupervisionLoopInput,
+): Promise<DesktopAppState> {
+  await store.initialize();
+  const child = store.state.orchestrationChildren.find((entry) => entry.id === input.childThreadId);
+  if (!child) {
+    return store.withError("Unknown child thread.");
+  }
+
+  updateChildSupervisionLoop(
+    store,
+    input.childThreadId,
+    input.gate,
+    input.gate === "stop"
+      ? "Parent stopped app-owned supervision for this child."
+      : "Parent continued app-owned supervision.",
+  );
+  await store.persistUiState();
+  return store.emit();
 }
 
 export async function createChildThreadToolResult(
@@ -359,6 +419,10 @@ export function listThreadsToolResult(
   store: AppStoreInternals,
   parentRef: SessionRef,
 ): AgentToolResult<ListThreadsToolDetails> {
+  store.state = {
+    ...store.state,
+    orchestrationChildren: projectOrchestrationChildren(store),
+  };
   const threads = listThreadsForContext(store, parentRef);
   return {
     content: [{ type: "text", text: formatThreadList(threads) }],
@@ -421,6 +485,10 @@ export async function sendMessageToThreadToolResult(
     deliverAs: "followUp",
     allowCommands: false,
   });
+  if (target.child) {
+    updateChildSupervisionLoop(store, target.child.id, "continue", "Follow-up sent; monitoring child progress.");
+    await store.persistUiState();
+  }
 
   const queuedMessages = store.getQueuedComposerMessages(target.sessionRef);
   const status = queuedMessages.length > 0 ? "queued" : "sent";
@@ -444,27 +512,64 @@ export function projectOrchestrationChildren(
   store: AppStoreInternals,
   children: readonly OrchestrationChildThread[] = store.state.orchestrationChildren,
 ): readonly OrchestrationChildThread[] {
-  return children.map((child) => {
-    if (!child.childSessionId) {
-      return child;
-    }
-    const childRef = childSessionRef(child);
-    const key = sessionKey(childRef);
-    const session = store.sessionFromState(childRef);
-    const rawTranscript = recentTranscriptItems(store.sessionState.transcriptCache.get(key) ?? []);
-    const transcript = toChildTranscript(rawTranscript, MAX_CHILD_TRANSCRIPT_MESSAGES);
-    const latestTranscript = session?.preview || previewFromTranscript(rawTranscript) || child.goal;
-    const updatedAt = latestSessionActivityAt(session?.updatedAt ?? child.updatedAt, rawTranscript);
+  const now = new Date().toISOString();
+  const parentEvidenceByChild = parentEvidenceIndex(store, children);
+  return children.map((child) => projectOrchestrationChild(store, child, now, parentEvidenceByChild.get(child.id) ?? []));
+}
 
-    return {
-      ...child,
-      title: session?.title || child.title,
-      status: session ? toOrchestrationStatus(session.status, childRef, store) : child.status,
-      latestTranscript,
-      transcript,
-      updatedAt,
+export function projectOrchestrationChildrenForSession(
+  store: AppStoreInternals,
+  sessionRef: SessionRef,
+): readonly OrchestrationChildThread[] {
+  const now = new Date().toISOString();
+  const parentEvidenceByChild = parentEvidenceIndex(store, store.state.orchestrationChildren);
+  return store.state.orchestrationChildren.map((child) =>
+    child.childWorkspaceId === sessionRef.workspaceId && child.childSessionId === sessionRef.sessionId
+      ? projectOrchestrationChild(store, child, now, parentEvidenceByChild.get(child.id) ?? [])
+      : child,
+  );
+}
+
+export function reconcileDueSupervisionLoops(
+  store: AppStoreInternals,
+  now: Date = new Date(),
+): { readonly changed: boolean; readonly nextRunAt?: string } {
+  let shouldPublish = false;
+  const nowMs = now.getTime();
+  const nowIso = now.toISOString();
+  const parentEvidenceByChild = parentEvidenceIndex(store, store.state.orchestrationChildren);
+  const children = store.state.orchestrationChildren.map((child) => {
+    const beforeKey = supervisionPublishKey(child);
+    const projectedChild = projectOrchestrationChild(store, child, nowIso, parentEvidenceByChild.get(child.id) ?? []);
+    if (supervisionPublishKey(projectedChild) !== beforeKey) {
+      shouldPublish = true;
+    }
+    if (!projectedChild.childSessionId || projectedChild.supervisionLoop?.status === "stopped") {
+      return projectedChild;
+    }
+    const loop = projectSupervisionLoop(projectedChild.supervisionLoop, projectedChild.status, nowIso);
+    if (!loop.nextRunAt || Date.parse(loop.nextRunAt) > nowMs) {
+      return loop === projectedChild.supervisionLoop ? projectedChild : { ...projectedChild, supervisionLoop: loop };
+    }
+    const advancedChild = {
+      ...projectedChild,
+      supervisionLoop: advanceSupervisionLoop(loop, projectedChild.status, now),
     };
+    if (supervisionPublishKey(advancedChild) !== beforeKey) {
+      shouldPublish = true;
+    }
+    return advancedChild;
   });
+
+  store.state = {
+    ...store.state,
+    orchestrationChildren: children,
+  };
+
+  return {
+    changed: shouldPublish,
+    nextRunAt: nextSupervisionRunAt(children),
+  };
 }
 
 export async function hydrateOrchestrationChildren(store: AppStoreInternals): Promise<void> {
@@ -511,6 +616,17 @@ export function hasOrchestrationChildSession(
   );
 }
 
+export function hasOrchestrationParentSession(
+  children: readonly OrchestrationChildThread[],
+  sessionRef: SessionRef,
+): boolean {
+  return children.some(
+    (child) =>
+      child.parentWorkspaceId === sessionRef.workspaceId &&
+      child.parentSessionId === sessionRef.sessionId,
+  );
+}
+
 export function toPersistedOrchestrationChildren(
   children: readonly OrchestrationChildThread[],
 ): readonly OrchestrationChildThread[] | undefined {
@@ -521,7 +637,22 @@ export function toPersistedOrchestrationChildren(
     ...child,
     latestTranscript: child.childSessionId ? child.goal : child.latestTranscript,
     transcript: child.childSessionId ? [] : child.transcript,
+    evidence: capEvidenceRecords(child.evidence),
   }));
+}
+
+export function nextSupervisionRunAt(
+  children: readonly OrchestrationChildThread[],
+): string | undefined {
+  return children
+    .flatMap((child) =>
+      child.supervisionLoop?.status !== "stopped" &&
+      child.supervisionLoop?.nextRunAt &&
+      Number.isFinite(Date.parse(child.supervisionLoop.nextRunAt))
+        ? [child.supervisionLoop.nextRunAt]
+        : [],
+    )
+    .sort()[0];
 }
 
 function childSessionRef(child: OrchestrationChildThread): SessionRef {
@@ -529,6 +660,183 @@ function childSessionRef(child: OrchestrationChildThread): SessionRef {
     workspaceId: child.childWorkspaceId,
     sessionId: child.childSessionId,
   };
+}
+
+function projectOrchestrationChild(
+  store: AppStoreInternals,
+  child: OrchestrationChildThread,
+  nowIso: string,
+  parentEvidence: readonly OrchestrationEvidenceRecord[],
+): OrchestrationChildThread {
+  if (!child.childSessionId) {
+    return child;
+  }
+  const childRef = childSessionRef(child);
+  const key = sessionKey(childRef);
+  const session = store.sessionFromState(childRef);
+  const rawTranscript = recentTranscriptItems(store.sessionState.transcriptCache.get(key) ?? []);
+  const transcript = toChildTranscript(rawTranscript, MAX_CHILD_TRANSCRIPT_MESSAGES);
+  const latestTranscript = session?.preview || previewFromTranscript(rawTranscript) || child.goal;
+  const updatedAt = latestSessionActivityAt(session?.updatedAt ?? child.updatedAt, rawTranscript);
+  const status = session ? toOrchestrationStatus(session.status, childRef, store) : child.status;
+
+  return {
+    ...child,
+    title: session?.title || child.title,
+    status,
+    latestTranscript,
+    transcript,
+    evidence: mergeEvidenceRecords(child.evidence, [
+      ...evidenceFromChildTranscript(child, rawTranscript),
+      ...parentEvidence,
+      ...blockerEvidenceFromChildStatus(child, status, updatedAt),
+    ]),
+    supervisionLoop: projectSupervisionLoop(child.supervisionLoop, status, nowIso),
+    updatedAt,
+  };
+}
+
+function createSupervisionLoop(
+  status: OrchestrationChildThreadStatus,
+  nowIso: string,
+): OrchestrationSupervisionLoop {
+  const intervalMs = supervisionIntervalMs();
+  return {
+    id: randomUUID(),
+    status: "monitoring",
+    gate: "continue",
+    intervalMs,
+    iterationCount: 0,
+    lastCheckedAt: nowIso,
+    nextRunAt: nextIso(nowIso, intervalMs),
+    reason: monitoringReason(status),
+    lastChildStatus: status,
+  };
+}
+
+function projectSupervisionLoop(
+  loop: OrchestrationSupervisionLoop | undefined,
+  status: OrchestrationChildThreadStatus,
+  nowIso: string,
+): OrchestrationSupervisionLoop {
+  if (!loop) {
+    return createSupervisionLoop(status, nowIso);
+  }
+  if (loop.status === "stopped" || loop.gate === "stop") {
+    return loop;
+  }
+  if (status === "complete" || status === "failed") {
+    if (loop.gate === "wake" && loop.lastChildStatus === status) {
+      return loop;
+    }
+    return {
+      ...loop,
+      status: "attention",
+      gate: "wake",
+      lastCheckedAt: nowIso,
+      nextRunAt: undefined,
+      reason: status === "failed" ? "Child failed; parent review is needed." : "Child completed; parent review is ready.",
+      lastChildStatus: status,
+    };
+  }
+  if (loop.gate !== "continue" || loop.status !== "monitoring" || loop.lastChildStatus !== status) {
+    return {
+      ...loop,
+      status: "monitoring",
+      gate: "continue",
+      lastCheckedAt: nowIso,
+      nextRunAt: loop.nextRunAt ?? nextIso(nowIso, loop.intervalMs),
+      reason: monitoringReason(status),
+      lastChildStatus: status,
+    };
+  }
+  return loop;
+}
+
+function advanceSupervisionLoop(
+  loop: OrchestrationSupervisionLoop,
+  status: OrchestrationChildThreadStatus,
+  now: Date,
+): OrchestrationSupervisionLoop {
+  const nowIso = now.toISOString();
+  const projected = projectSupervisionLoop(loop, status, nowIso);
+  if (projected.gate === "wake" || projected.status === "stopped") {
+    return {
+      ...projected,
+      iterationCount: loop.iterationCount + 1,
+    };
+  }
+  return {
+    ...projected,
+    iterationCount: loop.iterationCount + 1,
+    lastCheckedAt: nowIso,
+    nextRunAt: nextIso(nowIso, projected.intervalMs),
+    reason: monitoringReason(status),
+    lastChildStatus: status,
+  };
+}
+
+function monitoringReason(status: OrchestrationChildThreadStatus): string {
+  return status === "waiting" ? "Child has queued follow-up; waiting for the run to continue." : "Monitoring child thread.";
+}
+
+function supervisionPublishKey(child: OrchestrationChildThread): string {
+  const loop = child.supervisionLoop;
+  return [
+    child.id,
+    child.status,
+    loop?.status ?? "",
+    loop?.gate ?? "",
+    loop?.reason ?? "",
+    loop?.lastChildStatus ?? "",
+    loop?.stoppedAt ?? "",
+  ].join("\0");
+}
+
+function updateChildSupervisionLoop(
+  store: AppStoreInternals,
+  childThreadId: string,
+  gate: SetChildSupervisionLoopInput["gate"],
+  reason: string,
+): void {
+  const nowIso = new Date().toISOString();
+  store.state = {
+    ...store.state,
+    orchestrationChildren: store.state.orchestrationChildren.map((child) => {
+      if (child.id !== childThreadId) {
+        return child;
+      }
+      const existing = child.supervisionLoop ?? createSupervisionLoop(child.status, nowIso);
+      const intervalMs = existing.intervalMs || supervisionIntervalMs();
+      const status: OrchestrationSupervisionStatus = gate === "stop" ? "stopped" : "monitoring";
+      return {
+        ...child,
+        supervisionLoop: {
+          ...existing,
+          status,
+          gate,
+          intervalMs,
+          lastCheckedAt: nowIso,
+          nextRunAt: gate === "stop" ? undefined : nextIso(nowIso, intervalMs),
+          reason,
+          lastChildStatus: child.status,
+          ...(gate === "stop" ? { stoppedAt: nowIso } : { stoppedAt: undefined }),
+        },
+      };
+    }),
+  };
+}
+
+function supervisionIntervalMs(): number {
+  const configured = Number(process.env.PI_APP_ORCHESTRATION_SUPERVISION_INTERVAL_MS);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return DEFAULT_SUPERVISION_INTERVAL_MS;
+  }
+  return Math.max(MIN_SUPERVISION_INTERVAL_MS, Math.floor(configured));
+}
+
+function nextIso(fromIso: string, intervalMs: number): string {
+  return new Date(Date.parse(fromIso) + intervalMs).toISOString();
 }
 
 function updateCreateChildThreadToolOutput(
@@ -583,6 +891,18 @@ function updateThreadToolOutput(
     },
   };
   store.sessionState.transcriptCache.set(key, transcript);
+}
+
+function refreshParentOrchestrationEvidence(store: AppStoreInternals, parentRef: SessionRef): void {
+  if (!store.state.orchestrationChildren.some(
+    (child) => child.parentWorkspaceId === parentRef.workspaceId && child.parentSessionId === parentRef.sessionId,
+  )) {
+    return;
+  }
+  store.state = {
+    ...store.state,
+    orchestrationChildren: projectOrchestrationChildren(store),
+  };
 }
 
 function toolCallForFinishedEvent(
@@ -766,6 +1086,7 @@ function listThreadsForContext(store: AppStoreInternals, parentRef: SessionRef):
         sessionId: session.id,
         title: child?.title ?? session.title,
         status: child?.status ?? session.status,
+        ...(child ? threadListSupervisionFields(child) : {}),
         relationship: child ? "child" : session.id === parentRef.sessionId && workspace.id === parentRef.workspaceId ? "current" : "workspace",
         updatedAt: child?.updatedAt ?? session.updatedAt,
         preview: child?.latestTranscript ?? session.preview,
@@ -785,6 +1106,7 @@ function listThreadsForContext(store: AppStoreInternals, parentRef: SessionRef):
       sessionId: child.childSessionId,
       title: child.title,
       status: child.status,
+      ...threadListSupervisionFields(child),
       relationship: "child",
       updatedAt: child.updatedAt,
       preview: child.latestTranscript,
@@ -812,6 +1134,19 @@ function relationshipRank(relationship: ThreadListEntry["relationship"]): number
     return 1;
   }
   return 2;
+}
+
+function threadListSupervisionFields(
+  child: OrchestrationChildThread,
+): Pick<ThreadListEntry, "supervisionGate" | "supervisionReason" | "nextSupervisionRunAt"> {
+  if (!child.supervisionLoop) {
+    return {};
+  }
+  return {
+    supervisionGate: child.supervisionLoop.gate,
+    supervisionReason: child.supervisionLoop.reason,
+    ...(child.supervisionLoop.nextRunAt ? { nextSupervisionRunAt: child.supervisionLoop.nextRunAt } : {}),
+  };
 }
 
 function resolveThreadTarget(
@@ -855,6 +1190,7 @@ function formatThreadList(threads: readonly ThreadListEntry[]): string {
     "Visible threads:",
     ...threads.map((thread) =>
       `- ${thread.threadId} (${thread.relationship}, ${thread.status}): ${thread.title}` +
+      (thread.supervisionGate ? ` [gate=${thread.supervisionGate}: ${thread.supervisionReason ?? "monitoring"}]` : "") +
       (thread.preview ? ` - ${thread.preview}` : ""),
     ),
   ].join("\n");
@@ -896,6 +1232,287 @@ function formatSendMessageToThreadResult(result: SendMessageToThreadToolDetails)
 
 function toThreadReadMessages(transcript: readonly TranscriptMessage[]): readonly OrchestrationChildTranscriptMessage[] {
   return toChildTranscript(transcript, MAX_READ_THREAD_MESSAGES);
+}
+
+function mergeEvidenceRecords(
+  existing: readonly OrchestrationEvidenceRecord[] = [],
+  derived: readonly OrchestrationEvidenceRecord[],
+): readonly OrchestrationEvidenceRecord[] {
+  const records = new Map<string, OrchestrationEvidenceRecord>();
+  for (const record of existing) {
+    records.set(record.id, record);
+  }
+  for (const record of derived) {
+    records.set(record.id, {
+      ...records.get(record.id),
+      ...record,
+    });
+  }
+  return capEvidenceRecords([...records.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
+}
+
+function capEvidenceRecords(records: readonly OrchestrationEvidenceRecord[]): readonly OrchestrationEvidenceRecord[] {
+  if (records.length <= MAX_EVIDENCE_RECORDS_PER_CHILD) {
+    return records;
+  }
+  const priority = records.filter((record) =>
+    record.status === "blocked" ||
+    record.status === "failed" ||
+    record.source === "orchestrator-accepted",
+  );
+  const remaining = records.filter((record) => !priority.includes(record));
+  return [...priority, ...remaining].slice(0, MAX_EVIDENCE_RECORDS_PER_CHILD);
+}
+
+function parentEvidenceIndex(
+  store: AppStoreInternals,
+  children: readonly OrchestrationChildThread[],
+): ReadonlyMap<string, readonly OrchestrationEvidenceRecord[]> {
+  const childById = new Map(children.map((child) => [child.id, child] as const));
+  const parentKeys = new Set(children.map((child) => sessionKey({
+    workspaceId: child.parentWorkspaceId,
+    sessionId: child.parentSessionId,
+  })));
+  const index = new Map<string, OrchestrationEvidenceRecord[]>();
+  for (const key of parentKeys) {
+    const transcript = store.sessionState.transcriptCache.get(key) ?? [];
+    for (const record of evidenceFromParentTranscript(childById, transcript)) {
+      const bucket = index.get(record.childThreadId) ?? [];
+      bucket.push(record);
+      index.set(record.childThreadId, bucket);
+    }
+  }
+  return index;
+}
+
+function evidenceFromChildTranscript(
+  child: OrchestrationChildThread,
+  transcript: readonly TranscriptMessage[],
+): readonly OrchestrationEvidenceRecord[] {
+  return transcript.flatMap((message): readonly OrchestrationEvidenceRecord[] => {
+    if (message.kind === "tool") {
+      return [commandEvidenceFromTool(child, message)];
+    }
+    if (message.kind !== "message" || message.role !== "assistant") {
+      return [];
+    }
+    const text = message.text.trim();
+    if (!text) {
+      return [];
+    }
+    const severity = severityFromText(text);
+    const isBlocker = looksLikeBlocker(text);
+    return [
+      {
+        id: evidenceId("worker", message.id),
+        childThreadId: child.id,
+        kind: isBlocker ? "blocker" : severity ? "review_finding" : "worker_report",
+        source: "worker-reported",
+        status: isBlocker ? "blocked" : "reported",
+        title: isBlocker ? "Worker reported blocker" : severity ? `${severity} review finding` : "Worker reported output",
+        detail: truncateEvidenceDetail(text),
+        ...(severity ? { severity } : {}),
+        parentSessionId: child.parentSessionId,
+        childSessionId: child.childSessionId,
+        createdAt: message.createdAt,
+      },
+    ];
+  });
+}
+
+function commandEvidenceFromTool(
+  child: OrchestrationChildThread,
+  tool: TimelineToolCall,
+): OrchestrationEvidenceRecord {
+  const command = commandFromToolInput(tool.input);
+  return {
+    id: evidenceId("command", tool.callId),
+    childThreadId: child.id,
+    kind: "command",
+    source: "command",
+    status: tool.status === "running" ? "running" : tool.status === "error" ? "failed" : "passed",
+    title: command && looksLikeTestCommand(command) ? "Test command run" : "Command or tool run",
+    detail: tool.detail ? truncateEvidenceDetail(tool.detail) : tool.label,
+    ...(command ? { command } : {}),
+    toolName: tool.toolName,
+    parentSessionId: child.parentSessionId,
+    childSessionId: child.childSessionId,
+    createdAt: tool.createdAt,
+  };
+}
+
+function evidenceFromParentTranscript(
+  childById: ReadonlyMap<string, OrchestrationChildThread>,
+  transcript: readonly TranscriptMessage[],
+): readonly OrchestrationEvidenceRecord[] {
+  return transcript.flatMap((message): readonly OrchestrationEvidenceRecord[] => {
+    if (message.kind === "message" && message.role === "assistant") {
+      return explicitAcceptanceEvidenceFromParentMessage(childById, message);
+    }
+    if (message.kind !== "tool" || message.status !== "success" || !isRecord(message.output)) {
+      return [];
+    }
+    const details = isRecord(message.output.details) ? message.output.details : undefined;
+    if (!details) {
+      return [];
+    }
+    const childId = typeof details.childThreadId === "string"
+      ? details.childThreadId
+      : typeof details.threadId === "string"
+        ? details.threadId
+        : undefined;
+    const child = childId ? childById.get(childId) : undefined;
+    if (!child) {
+      return [];
+    }
+    if (details.action === readThreadAction && details.childThreadId === child.id) {
+      return [
+        {
+          id: evidenceId("observed-read", message.callId),
+          childThreadId: child.id,
+          kind: "orchestrator_observation",
+          source: "orchestrator-observed",
+          status: "reported",
+          title: "Orchestrator read child output",
+          detail: truncateEvidenceDetail(textFromToolOutput(message.output)),
+          parentSessionId: child.parentSessionId,
+          childSessionId: child.childSessionId,
+          createdAt: message.createdAt,
+        },
+      ];
+    }
+    if (details.action === sendMessageToThreadAction && details.threadId === child.id) {
+      return [
+        {
+          id: evidenceId("follow-up", message.callId),
+          childThreadId: child.id,
+          kind: "orchestrator_action",
+          source: "orchestrator-action",
+          status: "reported",
+          title: "Orchestrator sent follow-up",
+          ...(typeof details.message === "string" ? { detail: truncateEvidenceDetail(details.message) } : {}),
+          parentSessionId: child.parentSessionId,
+          childSessionId: child.childSessionId,
+          createdAt: message.createdAt,
+        },
+      ];
+    }
+    return [];
+  });
+}
+
+function explicitAcceptanceEvidenceFromParentMessage(
+  childById: ReadonlyMap<string, OrchestrationChildThread>,
+  message: Extract<TranscriptMessage, { kind: "message" }>,
+): readonly OrchestrationEvidenceRecord[] {
+  const records: OrchestrationEvidenceRecord[] = [];
+  for (const line of message.text.split("\n")) {
+    const match = /^orchestrator-accepted:\s*(\S+)\s*(.*)$/i.exec(line.trim());
+    if (!match) {
+      continue;
+    }
+    const child = childById.get(match[1] ?? "");
+    if (!child) {
+      continue;
+    }
+    records.push({
+      id: evidenceId("accepted", `${message.id}:${child.id}`),
+      childThreadId: child.id,
+      kind: "orchestrator_acceptance",
+      source: "orchestrator-accepted",
+      status: "accepted",
+      title: "Orchestrator accepted child evidence",
+      detail: truncateEvidenceDetail(match[2] || message.text),
+      parentSessionId: child.parentSessionId,
+      childSessionId: child.childSessionId,
+      createdAt: message.createdAt,
+    });
+  }
+  return records;
+}
+
+function blockerEvidenceFromChildStatus(
+  child: OrchestrationChildThread,
+  status: OrchestrationChildThreadStatus,
+  updatedAt: string,
+): readonly OrchestrationEvidenceRecord[] {
+  if (status !== "failed") {
+    return [];
+  }
+  return [
+    {
+      id: evidenceId("blocker-status", child.id),
+      childThreadId: child.id,
+      kind: "blocker",
+      source: "blocker",
+      status: "blocked",
+      title: "Child thread failed",
+      detail: child.latestTranscript,
+      parentSessionId: child.parentSessionId,
+      childSessionId: child.childSessionId,
+      createdAt: updatedAt,
+    },
+  ];
+}
+
+function commandFromToolInput(input: unknown): string | undefined {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+  for (const key of ["cmd", "command", "script"]) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function looksLikeTestCommand(command: string): boolean {
+  return /\b(test|spec|typecheck|build|playwright|vitest|jest|tsc)\b/i.test(command);
+}
+
+function looksLikeBlocker(text: string): boolean {
+  return /^\s*(?:\[?BLOCKER\]?|blocked)\s*:/i.test(text);
+}
+
+function severityFromText(text: string): OrchestrationEvidenceRecord["severity"] | undefined {
+  const match = /^\s*\[?(P[0-3])\]?\s*:/.exec(text);
+  return match?.[1] as OrchestrationEvidenceRecord["severity"] | undefined;
+}
+
+function truncateEvidenceDetail(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > 260 ? `${normalized.slice(0, 257)}...` : normalized;
+}
+
+function evidenceId(prefix: string, sourceId: string): string {
+  return `${prefix}:${sourceId}`;
+}
+
+async function workspaceGitRef(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<OrchestrationEvidenceRecord["git"] | undefined> {
+  const [branch, head] = await gitOutputLines(workspacePath, ["rev-parse", "--abbrev-ref", "HEAD", "HEAD"]);
+  const branchName = branch && branch !== "HEAD" ? branch : undefined;
+  if (!branchName && !head) {
+    return undefined;
+  }
+  return {
+    workspaceId,
+    ...(branchName ? { branchName } : {}),
+    ...(head ? { headSha: head } : {}),
+  };
+}
+
+async function gitOutputLines(workspacePath: string, args: readonly string[]): Promise<readonly string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd: workspacePath });
+    return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function childForToolCall(

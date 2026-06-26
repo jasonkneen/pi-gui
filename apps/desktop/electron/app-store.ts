@@ -47,6 +47,7 @@ import {
   type QueuedComposerMessage,
   type RemoveWorktreeInput,
   type SendChildThreadFollowUpInput,
+  type SetChildSupervisionLoopInput,
   type SelectedTranscriptRecord,
   type StartThreadInput,
   type TranscriptMessage,
@@ -145,6 +146,8 @@ export class DesktopAppStore implements AppStoreInternals {
   private composerDraftSyncTarget: SessionRef | undefined;
   private composerDraftProjectionNonce = 0;
   private persistUiStateTimer: NodeJS.Timeout | undefined;
+  private orchestrationSupervisionTimer: NodeJS.Timeout | undefined;
+  private scheduledOrchestrationSupervisionRunAt: string | undefined;
   private readonly extensionDialogTimeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly restoredSelectedSessionKeysAwaitingSelection = new Set<string>();
   private initPromise: Promise<void> | undefined;
@@ -266,6 +269,38 @@ export class DesktopAppStore implements AppStoreInternals {
     }
 
     await this.persistUiState();
+  }
+
+  private scheduleOrchestrationSupervision(): void {
+    const nextRunAt = orchestration.nextSupervisionRunAt(this.state.orchestrationChildren);
+    if (nextRunAt && nextRunAt === this.scheduledOrchestrationSupervisionRunAt && this.orchestrationSupervisionTimer) {
+      return;
+    }
+    if (this.orchestrationSupervisionTimer) {
+      clearTimeout(this.orchestrationSupervisionTimer);
+      this.orchestrationSupervisionTimer = undefined;
+    }
+    this.scheduledOrchestrationSupervisionRunAt = nextRunAt;
+    if (!nextRunAt) {
+      return;
+    }
+    const delayMs = Math.max(0, Date.parse(nextRunAt) - Date.now());
+    this.orchestrationSupervisionTimer = setTimeout(() => {
+      this.orchestrationSupervisionTimer = undefined;
+      this.scheduledOrchestrationSupervisionRunAt = undefined;
+      void this.runOrchestrationSupervisionTick();
+    }, delayMs);
+    this.orchestrationSupervisionTimer.unref?.();
+  }
+
+  private async runOrchestrationSupervisionTick(): Promise<void> {
+    await this.initialize();
+    const result = orchestration.reconcileDueSupervisionLoops(this);
+    if (result.changed) {
+      await this.persistUiState();
+      this.emit();
+    }
+    this.scheduleOrchestrationSupervision();
   }
 
   async emitTestSessionEvent(event: SessionDriverEvent): Promise<void> {
@@ -479,7 +514,15 @@ export class DesktopAppStore implements AppStoreInternals {
   }
 
   async sendChildThreadFollowUp(input: SendChildThreadFollowUpInput): Promise<DesktopAppState> {
-    return orchestration.sendChildThreadFollowUp(this, input);
+    const state = await orchestration.sendChildThreadFollowUp(this, input);
+    this.scheduleOrchestrationSupervision();
+    return state;
+  }
+
+  async setChildSupervisionLoop(input: SetChildSupervisionLoopInput): Promise<DesktopAppState> {
+    const state = await orchestration.setChildSupervisionLoopGate(this, input);
+    this.scheduleOrchestrationSupervision();
+    return state;
   }
 
   /* ── View / UI state ───────────────────────────────────── */
@@ -873,6 +916,7 @@ export class DesktopAppStore implements AppStoreInternals {
         this.restoredSelectedSessionKeysAwaitingSelection.add(sessionKey(restoredSessionRef));
       }
       this.startSelectedSessionHydration(restoredSessionRef, { markViewed: false });
+      this.scheduleOrchestrationSupervision();
     } catch (error) {
       this.state = {
         ...createEmptyDesktopAppState(),
@@ -1030,6 +1074,7 @@ export class DesktopAppStore implements AppStoreInternals {
         ...this.state,
         orchestrationChildren: orchestration.projectOrchestrationChildren(this),
       };
+      this.scheduleOrchestrationSupervision();
 
       if (options.markSelectedSessionViewed ?? true) {
         this.markSelectedSessionViewedIfVisible();
@@ -1618,11 +1663,15 @@ export class DesktopAppStore implements AppStoreInternals {
     }
     this.markSessionViewedIfActivelyViewed(event.sessionRef);
     this.state = this.syncDerivedSessionState(this.state, event.sessionRef);
-    if (orchestration.hasOrchestrationChildSession(this.state.orchestrationChildren, event.sessionRef)) {
+    if (
+      orchestration.hasOrchestrationChildSession(this.state.orchestrationChildren, event.sessionRef) ||
+      orchestration.hasOrchestrationParentSession(this.state.orchestrationChildren, event.sessionRef)
+    ) {
       this.state = {
         ...this.state,
-        orchestrationChildren: orchestration.projectOrchestrationChildren(this),
+        orchestrationChildren: orchestration.projectOrchestrationChildrenForSession(this, event.sessionRef),
       };
+      this.scheduleOrchestrationSupervision();
     }
     if (shouldFollowSessionMutation && event.type !== "sessionClosed") {
       this.applyFastSessionSelection(event.sessionRef);

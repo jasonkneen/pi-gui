@@ -69,6 +69,62 @@ export interface SessionRecord {
 }
 
 export type OrchestrationChildThreadStatus = "running" | "waiting" | "complete" | "failed";
+export type OrchestrationSupervisionGate = "continue" | "stop" | "wake";
+export type OrchestrationSupervisionStatus = "monitoring" | "attention" | "stopped";
+export type OrchestrationEvidenceKind =
+  | "worker_report"
+  | "orchestrator_acceptance"
+  | "orchestrator_observation"
+  | "orchestrator_action"
+  | "command"
+  | "review_finding"
+  | "blocker";
+export type OrchestrationEvidenceSource =
+  | "worker-reported"
+  | "orchestrator-accepted"
+  | "orchestrator-observed"
+  | "orchestrator-action"
+  | "command"
+  | "review"
+  | "blocker";
+export type OrchestrationEvidenceStatus = "reported" | "accepted" | "running" | "passed" | "failed" | "blocked";
+
+export interface OrchestrationEvidenceGitRef {
+  readonly workspaceId: string;
+  readonly branchName?: string;
+  readonly headSha?: string;
+}
+
+export interface OrchestrationEvidenceRecord {
+  readonly id: string;
+  readonly childThreadId: string;
+  readonly kind: OrchestrationEvidenceKind;
+  readonly source: OrchestrationEvidenceSource;
+  readonly status: OrchestrationEvidenceStatus;
+  readonly title: string;
+  readonly detail?: string;
+  readonly command?: string;
+  readonly toolName?: string;
+  readonly severity?: "P0" | "P1" | "P2" | "P3";
+  readonly parentSessionId?: string;
+  readonly childSessionId?: string;
+  readonly git?: OrchestrationEvidenceGitRef;
+  readonly createdAt: string;
+  readonly updatedAt?: string;
+}
+
+export interface OrchestrationSupervisionLoop {
+  readonly id: string;
+  readonly status: OrchestrationSupervisionStatus;
+  readonly gate: OrchestrationSupervisionGate;
+  readonly intervalMs: number;
+  readonly iterationCount: number;
+  readonly lastCheckedAt: string;
+  readonly nextRunAt?: string;
+  readonly reason: string;
+  readonly lastChildStatus: OrchestrationChildThreadStatus;
+  readonly stoppedAt?: string;
+}
 
 export interface OrchestrationChildTranscriptMessage {
   readonly id: string;
@@ -89,6 +145,8 @@ export interface OrchestrationChildThread {
   readonly status: OrchestrationChildThreadStatus;
   readonly latestTranscript: string;
   readonly transcript: readonly OrchestrationChildTranscriptMessage[];
+  readonly evidence: readonly OrchestrationEvidenceRecord[];
+  readonly supervisionLoop?: OrchestrationSupervisionLoop;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -96,6 +154,11 @@ export interface OrchestrationChildThread {
 export interface SendChildThreadFollowUpInput {
   readonly childThreadId: string;
   readonly text: string;
+}
+
+export interface SetChildSupervisionLoopInput {
+  readonly childThreadId: string;
+  readonly gate: Extract<OrchestrationSupervisionGate, "continue" | "stop">;
 }
 
 export interface SelectedTranscriptRecord {
