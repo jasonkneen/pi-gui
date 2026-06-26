@@ -45,7 +45,7 @@ test("keeps Changes visible when the integrated terminal is open and maximized",
 
     await window.getByLabel("Toggle changes").click();
     const diffPanel = window.locator(".diff-panel");
-    await expect(diffPanel.locator(".diff-panel__title")).toContainText("Files");
+    await expect(diffPanel.locator(".diff-panel__title")).toContainText("Changes");
 
     await window.getByLabel("Toggle terminal").click();
     await expectTerminalAndChangesSplit(window);

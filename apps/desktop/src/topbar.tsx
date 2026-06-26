@@ -1,6 +1,6 @@
-import type { MouseEvent as ReactMouseEvent, Dispatch, ReactNode, SetStateAction } from "react";
-import type { AppView, DesktopAppState, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
-import { BrowserPreviewIcon, DiffIcon, FolderIcon, PiGlyphIcon, TerminalIcon } from "./icons";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { AppView, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
+import { DiffIcon, FileIcon, TerminalIcon } from "./icons";
 import { getDesktopShortcutLabel, type PiDesktopApi } from "./ipc";
 import type { WorkspaceMenuState } from "./hooks/use-workspace-menu";
 
@@ -15,22 +15,14 @@ interface TopbarProps {
   readonly workspaces: readonly WorkspaceRecord[];
   readonly wsMenu: WorkspaceMenuState;
   readonly api: PiDesktopApi;
-  readonly setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>;
-  readonly updateSnapshot: (
-    api: PiDesktopApi,
-    setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-    action: () => Promise<DesktopAppState>,
-  ) => Promise<DesktopAppState>;
   readonly terminalAvailable: boolean;
   readonly terminalVisible: boolean;
   readonly onToggleTerminal: () => void;
-  readonly workbenchAvailable: boolean;
-  readonly workbenchVisible: boolean;
-  readonly onToggleWorkbench: () => void;
-  readonly showDiffPanel: boolean;
-  readonly onToggleDiffPanel: () => void;
-  readonly previewVisible: boolean;
-  readonly onTogglePreviewPanel: () => void;
+  readonly panelAvailable: boolean;
+  readonly changesVisible: boolean;
+  readonly onToggleChanges: () => void;
+  readonly filesVisible: boolean;
+  readonly onToggleFiles: () => void;
 }
 
 export function Topbar(props: TopbarProps) {
@@ -45,18 +37,14 @@ export function Topbar(props: TopbarProps) {
     workspaces,
     wsMenu,
     api,
-    setSnapshot,
-    updateSnapshot,
     terminalAvailable,
     terminalVisible,
     onToggleTerminal,
-    workbenchAvailable,
-    workbenchVisible,
-    onToggleWorkbench,
-    showDiffPanel,
-    onToggleDiffPanel,
-    previewVisible,
-    onTogglePreviewPanel,
+    panelAvailable,
+    changesVisible,
+    onToggleChanges,
+    filesVisible,
+    onToggleFiles,
   } = props;
   const terminalShortcut = getDesktopShortcutLabel(api.platform, "J");
   const diffShortcut = getDesktopShortcutLabel(api.platform, "D");
@@ -152,37 +140,20 @@ export function Topbar(props: TopbarProps) {
           onClick={onToggleTerminal}
         />
         <TopbarActionButton
-          active={workbenchVisible}
-          disabled={!workbenchAvailable}
-          icon={<PiGlyphIcon />}
-          label="Toggle workbench"
-          onClick={onToggleWorkbench}
-        />
-        <TopbarActionButton
-          active={showDiffPanel}
-          disabled={!workbenchAvailable}
+          active={changesVisible}
+          disabled={!panelAvailable}
           icon={<DiffIcon />}
           label="Toggle changes"
           shortcut={diffShortcut}
-          onClick={onToggleDiffPanel}
+          onClick={onToggleChanges}
         />
         <TopbarActionButton
-          active={previewVisible}
-          disabled={!workbenchAvailable}
-          icon={<BrowserPreviewIcon />}
-          label="Toggle preview"
-          onClick={onTogglePreviewPanel}
+          active={filesVisible}
+          disabled={!panelAvailable}
+          icon={<FileIcon />}
+          label="Toggle files"
+          onClick={onToggleFiles}
         />
-        <button
-          aria-label="Add folder"
-          className="icon-button topbar__icon"
-          type="button"
-          onClick={() => {
-            void updateSnapshot(api, setSnapshot, () => api.pickWorkspace());
-          }}
-        >
-          <FolderIcon />
-        </button>
       </div>
     </header>
   );

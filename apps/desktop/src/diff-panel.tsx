@@ -37,27 +37,23 @@ export interface FileWorkbenchContext {
 }
 
 interface DiffPanelProps {
+  readonly panelMode: "changes" | "files";
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly api: PiDesktopApi;
   readonly sessionStatus: string | undefined;
   readonly fileRequest?: DiffPanelFileRequest | null;
   readonly contexts: readonly FileWorkbenchContext[];
-  readonly onAttachEvidence?: (evidence: {
-    readonly source: "file";
-    readonly title: string;
-    readonly detail: string;
-  }) => void;
 }
 
 export function DiffPanel({
+  panelMode,
   workspaceId,
   sessionId,
   api,
   sessionStatus,
   fileRequest,
   contexts,
-  onAttachEvidence,
 }: DiffPanelProps) {
   const [filesByWorkspace, setFilesByWorkspace] = useState<Readonly<Record<string, readonly string[]>>>({});
   const [changedByWorkspace, setChangedByWorkspace] =
@@ -277,15 +273,13 @@ export function DiffPanel({
     () => changedRows.reduce((acc, file) => acc + (reviewed.has(reviewedFileKey(file.workspaceId, file.path)) ? 1 : 0), 0),
     [changedRows, reviewed],
   );
-  const selectedContext = selectedFile
-    ? contexts.find((context) => context.workspace.id === selectedFile.workspaceId)
-    : undefined;
+  const showFileTree = panelMode === "files";
 
   return (
-    <section className="diff-panel file-workbench">
+    <section className={`diff-panel file-workbench file-workbench--${panelMode}`}>
       <div className="diff-panel__header file-workbench__header">
         <div className="file-workbench__heading">
-          <h2 className="diff-panel__title">Files</h2>
+          <h2 className="diff-panel__title">{panelMode === "changes" ? "Changes" : "Files"}</h2>
           <span className="file-workbench__subtitle">{buildSubtitle(activeContext)}</span>
         </div>
         {changedRows.length > 0 ? (
@@ -304,7 +298,7 @@ export function DiffPanel({
         </button>
       </div>
 
-      <div className="file-workbench__context-strip" aria-label="Workbench scopes">
+      <div className="file-workbench__context-strip" aria-label="File scopes">
         {contexts.map((context) => {
           const isActive = activeContext?.workspace.id === context.workspace.id;
           const changeCount = changedByWorkspace[context.workspace.id]?.length ?? 0;
@@ -322,33 +316,35 @@ export function DiffPanel({
         })}
       </div>
 
-      <div className="file-workbench__body">
-        <section className="file-workbench__section file-workbench__section--tree" aria-label="Workspace file tree">
-          <div className="file-workbench__section-header">
-            <span>Workspace tree</span>
-            <span>{activeFiles.length}</span>
-          </div>
-          {activeTree.length === 0 ? (
-            <div className="diff-panel__empty">No indexed files</div>
-          ) : (
-            <div className="file-workbench__tree" data-testid="file-workbench-tree">
-              {activeTree.map((node) => (
-                <FileTreeRow
-                  key={node.path || node.name}
-                  node={node}
-                  depth={0}
-                  selectedFile={selectedFile}
-                  activeWorkspaceId={activeContext?.workspace.id ?? workspaceId}
-                  onSelect={(path) => {
-                    const nextWorkspaceId = activeContext?.workspace.id ?? workspaceId;
-                    setViewerMode("preview");
-                    setSelectedFile({ workspaceId: nextWorkspaceId, path });
-                  }}
-                />
-              ))}
+      <div className={`file-workbench__body ${showFileTree ? "" : "file-workbench__body--changes"}`}>
+        {showFileTree ? (
+          <section className="file-workbench__section file-workbench__section--tree" aria-label="Workspace file tree">
+            <div className="file-workbench__section-header">
+              <span>Workspace tree</span>
+              <span>{activeFiles.length}</span>
             </div>
-          )}
-        </section>
+            {activeTree.length === 0 ? (
+              <div className="diff-panel__empty">No indexed files</div>
+            ) : (
+              <div className="file-workbench__tree" data-testid="file-workbench-tree">
+                {activeTree.map((node) => (
+                  <FileTreeRow
+                    key={node.path || node.name}
+                    node={node}
+                    depth={0}
+                    selectedFile={selectedFile}
+                    activeWorkspaceId={activeContext?.workspace.id ?? workspaceId}
+                    onSelect={(path) => {
+                      const nextWorkspaceId = activeContext?.workspace.id ?? workspaceId;
+                      setViewerMode("preview");
+                      setSelectedFile({ workspaceId: nextWorkspaceId, path });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        ) : null}
 
         <section className="file-workbench__section file-workbench__section--changes" aria-label="Changed files">
           <div className="file-workbench__section-header">
@@ -441,29 +437,6 @@ export function DiffPanel({
               >
                 Diff
               </button>
-              {onAttachEvidence ? (
-                <button
-                  className="file-workbench__mode"
-                  type="button"
-                  disabled={viewerLoading}
-                  onClick={() => {
-                    onAttachEvidence({
-                      source: "file",
-                      title: selectedFile.path,
-                      detail: buildFileEvidenceDetail({
-                        selectedFile,
-                        selectedContext,
-                        viewerMode,
-                        preview,
-                        diffText,
-                        viewerError,
-                      }),
-                    });
-                  }}
-                >
-                  Add evidence
-                </button>
-              ) : null}
             </span>
           ) : null}
         </div>
@@ -666,54 +639,4 @@ function buildSubtitle(context: FileWorkbenchContext | undefined): string {
 function statusLabel(file: WorkbenchChangedFile): string {
   const branch = file.branchName ? ` · ${file.branchName}` : "";
   return `${file.status}${branch}`;
-}
-
-function buildFileEvidenceDetail({
-  selectedFile,
-  selectedContext,
-  viewerMode,
-  preview,
-  diffText,
-  viewerError,
-}: {
-  readonly selectedFile: FileSelection;
-  readonly selectedContext: FileWorkbenchContext | undefined;
-  readonly viewerMode: "preview" | "diff";
-  readonly preview: WorkspaceFilePreview | null;
-  readonly diffText: string;
-  readonly viewerError: string | null;
-}): string {
-  const workspaceLabel = selectedContext ? contextLabel(selectedContext) : selectedFile.workspaceId;
-  const lines = [
-    `- Workspace: ${workspaceLabel}`,
-    `- File: ${selectedFile.path}`,
-    `- View: ${viewerMode}`,
-  ];
-
-  if (viewerError) {
-    lines.push(`- Error: ${viewerError}`);
-    return lines.join("\n");
-  }
-
-  if (viewerMode === "diff") {
-    lines.push(`- Diff: ${diffText ? "available in file workbench" : "not available"}`);
-    return lines.join("\n");
-  }
-
-  if (!preview) {
-    lines.push("- Preview: not loaded");
-    return lines.join("\n");
-  }
-
-  if (preview.binary) {
-    lines.push("- Preview: binary or directory");
-    return lines.join("\n");
-  }
-
-  const firstLine = preview.content.split("\n").find((line) => line.trim())?.trim();
-  lines.push(`- Preview: ${preview.truncated ? "truncated text" : "text"}`);
-  if (firstLine) {
-    lines.push(`- First line: ${firstLine.slice(0, 160)}`);
-  }
-  return lines.join("\n");
 }
