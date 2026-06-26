@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import { writeFileAtomicQueued } from "./atomic-file-write";
 
 export interface PersistedUiState {
-  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
+  readonly version?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
   readonly selectedWorkspaceId?: string;
   readonly selectedSessionId?: string;
   readonly activeView?: AppView;
@@ -24,6 +24,7 @@ export interface PersistedUiState {
   readonly integratedTerminalShell?: string;
   readonly lastViewedAtBySession?: Record<string, string>;
   readonly pinnedAtBySession?: Record<string, string>;
+  readonly pinnedSessionOrder?: readonly string[];
   readonly workspaceOrder?: readonly string[];
   readonly modelSettingsScopeMode?: ModelSettingsScopeMode;
   readonly appGlobalModelSettings?: ModelSettingsSnapshot;
@@ -44,7 +45,9 @@ export async function readPersistedUiState(uiStateFilePath: string): Promise<Leg
     const parsed = JSON.parse(raw) as LegacyPersistedUiState;
     return {
       version:
-        parsed.version === 13
+        parsed.version === 14
+          ? 14
+          : parsed.version === 13
           ? 13
           : parsed.version === 12
           ? 12
@@ -80,6 +83,7 @@ export async function readPersistedUiState(uiStateFilePath: string): Promise<Leg
         typeof parsed.integratedTerminalShell === "string" ? parsed.integratedTerminalShell : undefined,
       lastViewedAtBySession: parsed.lastViewedAtBySession,
       pinnedAtBySession: toStringRecord(parsed.pinnedAtBySession),
+      pinnedSessionOrder: toStringArray(parsed.pinnedSessionOrder),
       workspaceOrder: Array.isArray(parsed.workspaceOrder) ? parsed.workspaceOrder : undefined,
       modelSettingsScopeMode:
         parsed.modelSettingsScopeMode === "per-repo" || parsed.modelSettingsScopeMode === "app-global"
@@ -105,12 +109,19 @@ export async function writePersistedUiState(
   const serialized = `${JSON.stringify(
     {
       ...payload,
-      version: 13,
+      version: 14,
     } satisfies PersistedUiState,
     null,
     2,
   )}\n`;
   await writeFileAtomicQueued(uiStateFilePath, serialized);
+}
+
+function toStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
 }
 
 function toPersistedOrchestrationChildren(value: unknown): OrchestrationChildThread[] | undefined {

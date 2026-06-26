@@ -267,6 +267,7 @@ export interface DesktopAppState {
   readonly integratedTerminalShell: string;
   readonly lastViewedAtBySession: Readonly<Record<string, string>>;
   readonly pinnedAtBySession: Readonly<Record<string, string>>;
+  readonly pinnedSessionOrder: readonly string[];
   readonly workspaceOrder: readonly string[];
   readonly modelSettingsScopeMode: ModelSettingsScopeMode;
   readonly globalModelSettings: ModelSettingsSnapshot;
@@ -311,6 +312,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
     integratedTerminalShell: "",
     lastViewedAtBySession: {},
     pinnedAtBySession: {},
+    pinnedSessionOrder: [],
     workspaceOrder: [],
     modelSettingsScopeMode: "app-global",
     globalModelSettings: {

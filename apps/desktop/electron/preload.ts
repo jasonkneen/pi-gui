@@ -128,6 +128,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.removeWorkspace, workspaceId) as Promise<DesktopAppState>,
   reorderWorkspaces: (workspaceOrder: readonly string[]) =>
     ipcRenderer.invoke(desktopIpc.reorderWorkspaces, workspaceOrder) as Promise<DesktopAppState>,
+  reorderPinnedSessions: (pinnedSessionOrder: readonly string[]) =>
+    ipcRenderer.invoke(desktopIpc.reorderPinnedSessions, pinnedSessionOrder) as Promise<DesktopAppState>,
   openWorkspaceInFinder: (workspaceId: string) =>
     ipcRenderer.invoke(desktopIpc.openWorkspaceInFinder, workspaceId) as Promise<void>,
   createWorktree: (input: CreateWorktreeInput) =>

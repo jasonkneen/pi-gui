@@ -130,7 +130,9 @@ export async function archiveSession(
   return store.withErrorHandling(async () => {
     const sessionRef = toSessionRef(target);
     store.clearPendingAutoTitle(sessionRef);
-    store.sessionState.pinnedAtBySession.delete(sessionKey(sessionRef));
+    const key = sessionKey(sessionRef);
+    store.sessionState.pinnedAtBySession.delete(key);
+    store.sessionState.pinnedSessionOrder = store.sessionState.pinnedSessionOrder.filter((entry) => entry !== key);
     await store.driver.archiveSession(sessionRef);
     return store.refreshState(selectionAfterArchiving(store.state, target));
   });

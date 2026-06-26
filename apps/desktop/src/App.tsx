@@ -2121,6 +2121,7 @@ export default function App() {
           selectedSession={selectedSession}
           visibleWorkspaces={visibleWorkspaces}
           threadGroups={threadGroups}
+          pinnedSessionOrder={snapshot.pinnedSessionOrder}
           linkedWorktreeByWorkspaceId={linkedWorktreeByWorkspaceId}
           wsMenu={wsMenu}
           api={api}

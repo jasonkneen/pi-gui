@@ -371,6 +371,20 @@ export class DesktopAppStore implements AppStoreInternals {
     return this.emit();
   }
 
+  async reorderPinnedSessions(order: readonly string[]): Promise<DesktopAppState> {
+    await this.initialize();
+    const pinnedSessionOrder = reconcilePinnedSessionOrder(this.sessionState.pinnedAtBySession, order);
+    this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
+    this.state = {
+      ...this.state,
+      pinnedSessionOrder,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
+  }
+
   async selectWorkspace(workspaceId: string): Promise<DesktopAppState> {
     return workspace.selectWorkspace(this, workspaceId);
   }
@@ -433,10 +447,20 @@ export class DesktopAppStore implements AppStoreInternals {
 
     if (nextPinnedAt) {
       this.sessionState.pinnedAtBySession.set(key, nextPinnedAt);
+      this.sessionState.pinnedSessionOrder = [
+        key,
+        ...this.sessionState.pinnedSessionOrder.filter((entry) => entry !== key),
+      ];
     } else {
       this.sessionState.pinnedAtBySession.delete(key);
+      this.sessionState.pinnedSessionOrder = this.sessionState.pinnedSessionOrder.filter((entry) => entry !== key);
     }
 
+    const pinnedSessionOrder = reconcilePinnedSessionOrder(
+      this.sessionState.pinnedAtBySession,
+      this.sessionState.pinnedSessionOrder,
+    );
+    this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
     this.state = {
       ...this.state,
       workspaces: this.state.workspaces.map((workspaceEntry) =>
@@ -455,6 +479,7 @@ export class DesktopAppStore implements AppStoreInternals {
           : workspaceEntry,
       ),
       pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+      pinnedSessionOrder,
       lastError: undefined,
       revision: this.state.revision + 1,
     };
@@ -910,6 +935,7 @@ export class DesktopAppStore implements AppStoreInternals {
         integratedTerminalShell: persisted.integratedTerminalShell ?? this.state.integratedTerminalShell,
         lastViewedAtBySession: persisted.lastViewedAtBySession ?? {},
         pinnedAtBySession: persisted.pinnedAtBySession ?? {},
+        pinnedSessionOrder: persisted.pinnedSessionOrder ?? [],
         workspaceOrder: persisted.workspaceOrder ?? [],
         sidebarCollapsed: persisted.sidebarCollapsed ?? this.state.sidebarCollapsed,
         enableTransparency: persisted.enableTransparency ?? this.state.enableTransparency,
@@ -928,6 +954,10 @@ export class DesktopAppStore implements AppStoreInternals {
           this.sessionState.pinnedAtBySession.set(key, pinnedAt);
         }
       }
+      this.sessionState.pinnedSessionOrder = reconcilePinnedSessionOrder(
+        this.sessionState.pinnedAtBySession,
+        persisted.pinnedSessionOrder ?? [],
+      ).slice();
       this.sessionState.composerDraftsBySession.clear();
       for (const [key, draft] of Object.entries(persisted.composerDraftsBySession ?? {})) {
         if (draft) {
@@ -1098,6 +1128,11 @@ export class DesktopAppStore implements AppStoreInternals {
           ? await this.loadScopedModelSettingsByWorkspace(workspaces, workspacesSnapshot.workspaces, globalModelSettings)
           : undefined;
       const runtimeByWorkspace = this.serializeEffectiveRuntimeState(workspaces, scopedModelSettingsByWorkspace);
+      const pinnedSessionOrder = reconcilePinnedSessionOrder(
+        this.sessionState.pinnedAtBySession,
+        this.sessionState.pinnedSessionOrder,
+      );
+      this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
 
       const activeView = options.activeView ?? this.state.activeView;
       const composerDraftSync = this.resolveComposerDraftSync(selectedWorkspaceId, selectedSessionId, options);
@@ -1115,6 +1150,7 @@ export class DesktopAppStore implements AppStoreInternals {
         orchestrationChildren: this.state.orchestrationChildren,
         lastViewedAtBySession: mapToRecord(this.sessionState.lastViewedAtBySession),
         pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+        pinnedSessionOrder,
         workspaceOrder: this.state.workspaceOrder,
         modelSettingsScopeMode: this.state.modelSettingsScopeMode,
         globalModelSettings,
@@ -2034,6 +2070,7 @@ export class DesktopAppStore implements AppStoreInternals {
       integratedTerminalShell: this.state.integratedTerminalShell || undefined,
       lastViewedAtBySession: mapToRecord(this.sessionState.lastViewedAtBySession),
       pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+      pinnedSessionOrder: this.sessionState.pinnedSessionOrder.length > 0 ? this.sessionState.pinnedSessionOrder : undefined,
       workspaceOrder: this.state.workspaceOrder.length > 0 ? this.state.workspaceOrder : undefined,
       modelSettingsScopeMode: this.state.modelSettingsScopeMode,
       appGlobalModelSettings: hasStoredModelSettings(this.state.globalModelSettings) ? this.state.globalModelSettings : undefined,
@@ -2691,6 +2728,23 @@ function mergeEnabledModelPatterns(
     merged.push(pattern);
   }
   return merged;
+}
+
+function reconcilePinnedSessionOrder(
+  pinnedAtBySession: ReadonlyMap<string, string>,
+  preferredOrder: readonly string[],
+): readonly string[] {
+  const pinnedKeys = new Set(pinnedAtBySession.keys());
+  const ordered = [...new Set(preferredOrder)].filter((key) => pinnedKeys.has(key));
+  const seen = new Set(ordered);
+  const missing = [...pinnedAtBySession.keys()]
+    .filter((key) => !seen.has(key))
+    .sort((left, right) => {
+      const leftPinnedAt = pinnedAtBySession.get(left) ?? "";
+      const rightPinnedAt = pinnedAtBySession.get(right) ?? "";
+      return rightPinnedAt.localeCompare(leftPinnedAt);
+    });
+  return [...ordered, ...missing];
 }
 
 function formatCapabilityLabel(capability: string): string {

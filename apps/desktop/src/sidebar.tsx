@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { forwardRef, useState, type CSSProperties } from "react";
 import {
   DndContext,
   DragOverlay,
@@ -18,7 +18,7 @@ import { ArchiveIcon, ChevronDownIcon, ExtensionIcon, FolderIcon, PinIcon, PlusI
 import type { PiDesktopApi } from "./ipc";
 import { formatRelativeTime } from "./string-utils";
 import type { WorkspaceMenuState } from "./hooks/use-workspace-menu";
-import { comparePinnedThreads, type ThreadGroup, type ThreadListEntry } from "./thread-groups";
+import { comparePinnedThreads, sessionThreadKey, type ThreadGroup, type ThreadListEntry } from "./thread-groups";
 import type { Dispatch, SetStateAction } from "react";
 import type { DesktopAppState } from "./desktop-state";
 
@@ -28,6 +28,7 @@ interface SidebarProps {
   readonly selectedSession: SessionRecord | undefined;
   readonly visibleWorkspaces: readonly WorkspaceRecord[];
   readonly threadGroups: readonly ThreadGroup[];
+  readonly pinnedSessionOrder: readonly string[];
   readonly linkedWorktreeByWorkspaceId: ReadonlyMap<string, WorktreeRecord>;
   readonly wsMenu: WorkspaceMenuState;
   readonly api: PiDesktopApi;
@@ -55,6 +56,7 @@ export function Sidebar(props: SidebarProps) {
     selectedSession,
     visibleWorkspaces,
     threadGroups,
+    pinnedSessionOrder,
     linkedWorktreeByWorkspaceId,
     wsMenu,
     api,
@@ -73,15 +75,38 @@ export function Sidebar(props: SidebarProps) {
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const pinnedSortableId = (thread: ThreadListEntry) => `pinned:${sessionThreadKey(thread)}`;
+  const pinnedSessionKeyFromSortableId = (id: string) => id.startsWith("pinned:") ? id.slice("pinned:".length) : id;
 
   // Collision detection based on workspace row headers only (~30px top of each group),
   // not the full group height including all sessions.
   const headerCollision: CollisionDetection = (args) => {
+    if (String(args.active.id).startsWith("pinned:")) {
+      const pointerY = args.pointerCoordinates?.y;
+      if (pointerY == null) return [];
+      let closest: { id: string; distance: number } | null = null;
+      for (const container of args.droppableContainers) {
+        if (!String(container.id).startsWith("pinned:")) {
+          continue;
+        }
+        const rect = container.rect.current;
+        if (!rect) continue;
+        const rowCenter = rect.top + rect.height / 2;
+        const distance = Math.abs(pointerY - rowCenter);
+        if (!closest || distance < closest.distance) {
+          closest = { id: String(container.id), distance };
+        }
+      }
+      return closest ? [{ id: closest.id, data: { droppableContainer: args.droppableContainers.find((c) => String(c.id) === closest!.id)! } }] : [];
+    }
     const pointerY = args.pointerCoordinates?.y;
     if (pointerY == null) return [];
 
     let closest: { id: string; distance: number } | null = null;
     for (const container of args.droppableContainers) {
+      if (String(container.id).startsWith("pinned:")) {
+        continue;
+      }
       const rect = container.rect.current;
       if (!rect) continue;
       const headerCenter = rect.top + 15; // center of the ~30px workspace row header
@@ -95,7 +120,10 @@ export function Sidebar(props: SidebarProps) {
 
   const rootGroups = threadGroups.filter((g) => g.rootWorkspace.kind === "primary");
   const orphanGroups = threadGroups.filter((g) => g.rootWorkspace.kind !== "primary");
-  const pinnedThreads = threadGroups.flatMap((group) => group.pinnedThreads).sort(comparePinnedThreads);
+  const pinnedThreads = threadGroups
+    .flatMap((group) => group.pinnedThreads)
+    .sort((left, right) => comparePinnedThreads(left, right, pinnedSessionOrder));
+  const pinnedSortableIds = pinnedThreads.map(pinnedSortableId);
   const rootGroupIds = rootGroups.map((g) => g.rootWorkspace.id);
   const canDrag = rootGroups.length > 1;
 
@@ -108,6 +136,17 @@ export function Sidebar(props: SidebarProps) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
+    if (String(active.id).startsWith("pinned:")) {
+      const oldIndex = pinnedSortableIds.indexOf(String(active.id));
+      const newIndex = pinnedSortableIds.indexOf(String(over.id));
+      if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+
+      const newOrder = arrayMove(pinnedSortableIds, oldIndex, newIndex).map(pinnedSessionKeyFromSortableId);
+      setSnapshot((prev) => prev ? { ...prev, pinnedSessionOrder: newOrder } : prev);
+      void api.reorderPinnedSessions(newOrder);
+      return;
+    }
+
     const oldIndex = rootGroupIds.indexOf(String(active.id));
     const newIndex = rootGroupIds.indexOf(String(over.id));
     if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
@@ -119,6 +158,9 @@ export function Sidebar(props: SidebarProps) {
   }
 
   const activeGroup = activeId ? rootGroups.find((g) => g.rootWorkspace.id === activeId) : undefined;
+  const activePinnedThread = activeId?.startsWith("pinned:")
+    ? pinnedThreads.find((thread) => pinnedSortableId(thread) === activeId)
+    : undefined;
 
   return (
     <aside className="sidebar">
@@ -206,6 +248,8 @@ export function Sidebar(props: SidebarProps) {
               {pinnedThreads.length > 0 ? (
                 <PinnedThreadsSection
                   pinnedThreads={pinnedThreads}
+                  sortableIds={pinnedSortableIds}
+                  sortableIdForThread={pinnedSortableId}
                   selectedWorkspace={selectedWorkspace}
                   selectedSession={selectedSession}
                   onArchiveSession={onArchiveSession}
@@ -249,7 +293,17 @@ export function Sidebar(props: SidebarProps) {
               ))}
             </div>
             <DragOverlay>
-              {activeGroup ? (
+              {activePinnedThread ? (
+                <ThreadSessionRow
+                  active={activePinnedThread.workspaceId === selectedWorkspace?.id && activePinnedThread.session.id === selectedSession?.id}
+                  thread={activePinnedThread}
+                  showContext
+                  overlay
+                  onAction={() => undefined}
+                  onSelect={() => undefined}
+                  onTogglePinned={() => undefined}
+                />
+              ) : activeGroup ? (
                 <div className="workspace-group workspace-group--overlay">
                   <WorkspaceGroupContent
                     group={activeGroup}
@@ -556,6 +610,8 @@ function WorkspaceGroupContent(
 
 function PinnedThreadsSection({
   pinnedThreads,
+  sortableIds,
+  sortableIdForThread,
   selectedWorkspace,
   selectedSession,
   onArchiveSession,
@@ -563,6 +619,8 @@ function PinnedThreadsSection({
   onSetSessionPinned,
 }: {
   readonly pinnedThreads: readonly ThreadListEntry[];
+  readonly sortableIds: readonly string[];
+  readonly sortableIdForThread: (thread: ThreadListEntry) => string;
   readonly selectedWorkspace: WorkspaceRecord | undefined;
   readonly selectedSession: SessionRecord | undefined;
   readonly onArchiveSession: (target: { workspaceId: string; sessionId: string }) => void;
@@ -575,37 +633,77 @@ function PinnedThreadsSection({
         <PinIcon filled />
         <span>Pinned</span>
       </div>
-      <div className="session-list session-list--pinned">
-        {pinnedThreads.map((thread) => {
-          const active = thread.workspaceId === selectedWorkspace?.id && thread.session.id === selectedSession?.id;
-          return (
-            <ThreadSessionRow
-              key={`${thread.workspaceId}:${thread.session.id}`}
-              active={active}
-              thread={thread}
-              showContext
-              onAction={() =>
-                onArchiveSession({
-                  workspaceId: thread.workspaceId,
-                  sessionId: thread.session.id,
-                })
-              }
-              onSelect={() => onSelectSession({ workspaceId: thread.workspaceId, sessionId: thread.session.id })}
-              onTogglePinned={() =>
-                onSetSessionPinned(
-                  { workspaceId: thread.workspaceId, sessionId: thread.session.id },
-                  !thread.session.pinnedAt,
-                )
-              }
-            />
-          );
-        })}
-      </div>
+      <SortableContext items={[...sortableIds]} strategy={verticalListSortingStrategy}>
+        <div className="session-list session-list--pinned">
+          {pinnedThreads.map((thread) => {
+            const active = thread.workspaceId === selectedWorkspace?.id && thread.session.id === selectedSession?.id;
+            return (
+              <SortablePinnedThreadRow
+                key={`${thread.workspaceId}:${thread.session.id}`}
+                id={sortableIdForThread(thread)}
+                active={active}
+                thread={thread}
+                onAction={() =>
+                  onArchiveSession({
+                    workspaceId: thread.workspaceId,
+                    sessionId: thread.session.id,
+                  })
+                }
+                onSelect={() => onSelectSession({ workspaceId: thread.workspaceId, sessionId: thread.session.id })}
+                onTogglePinned={() =>
+                  onSetSessionPinned(
+                    { workspaceId: thread.workspaceId, sessionId: thread.session.id },
+                    !thread.session.pinnedAt,
+                  )
+                }
+              />
+            );
+          })}
+        </div>
+      </SortableContext>
     </section>
   );
 }
 
 /* ── Thread session row ────────────────────────────────── */
+
+function SortablePinnedThreadRow({
+  id,
+  active,
+  thread,
+  onAction,
+  onSelect,
+  onTogglePinned,
+}: {
+  readonly id: string;
+  readonly active: boolean;
+  readonly thread: ThreadListEntry;
+  readonly onAction: () => void;
+  readonly onSelect: () => void;
+  readonly onTogglePinned: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : undefined,
+  };
+  return (
+    <ThreadSessionRow
+      ref={setNodeRef}
+      style={style}
+      active={active}
+      thread={thread}
+      showContext
+      dragging={isDragging}
+      dragAttributes={attributes}
+      dragListeners={listeners}
+      onAction={onAction}
+      onSelect={onSelect}
+      onTogglePinned={onTogglePinned}
+    />
+  );
+}
 
 function sessionIndicatorVariant(thread: ThreadListEntry): "running" | "unseen" | "none" {
   if (thread.session.status === "running") {
@@ -617,34 +715,61 @@ function sessionIndicatorVariant(thread: ThreadListEntry): "running" | "unseen" 
   return "none";
 }
 
-function ThreadSessionRow({
-  active,
-  archived = false,
-  showContext = false,
-  thread,
-  onAction,
-  onSelect,
-  onTogglePinned,
-}: {
+interface ThreadSessionRowProps {
   readonly active: boolean;
   readonly archived?: boolean;
   readonly showContext?: boolean;
+  readonly overlay?: boolean;
+  readonly dragging?: boolean;
+  readonly style?: CSSProperties;
+  readonly dragAttributes?: DraggableAttributes;
+  readonly dragListeners?: DraggableSyntheticListeners;
   readonly thread: ThreadListEntry;
   readonly onAction: () => void;
   readonly onSelect: () => void;
   readonly onTogglePinned: () => void;
-}) {
+}
+
+const ThreadSessionRow = forwardRef<HTMLDivElement, ThreadSessionRowProps>(function ThreadSessionRow({
+  active,
+  archived = false,
+  showContext = false,
+  overlay = false,
+  dragging = false,
+  style,
+  dragAttributes,
+  dragListeners,
+  thread,
+  onAction,
+  onSelect,
+  onTogglePinned,
+}, ref) {
   const indicatorVariant = sessionIndicatorVariant(thread);
   const pinned = Boolean(thread.session.pinnedAt);
   const actionContext = showContext ? ` in ${thread.contextLabel}` : "";
+  const classes = [
+    "session-row",
+    active ? "session-row--active" : "",
+    pinned ? "session-row--pinned" : "",
+    dragging ? "session-row--dragging" : "",
+    overlay ? "session-row--overlay" : "",
+  ].filter(Boolean).join(" ");
   return (
     <div
-      className={`session-row ${active ? "session-row--active" : ""} ${pinned ? "session-row--pinned" : ""}`}
+      ref={ref}
+      style={style}
+      className={classes}
       data-sidebar-indicator={indicatorVariant}
       data-session-pinned={pinned ? "true" : "false"}
       data-session-id={thread.session.id}
     >
-      <button className="session-row__select" onClick={onSelect} type="button">
+      <button
+        className="session-row__select"
+        onClick={onSelect}
+        type="button"
+        {...dragAttributes}
+        {...dragListeners}
+      >
         <span className="session-row__leading" aria-hidden="true">
           {indicatorVariant === "running" ? <span className="session-row__status session-row__status--running" /> : null}
           {indicatorVariant === "unseen" ? <span className="session-row__status session-row__status--unseen" /> : null}
@@ -686,4 +811,4 @@ function ThreadSessionRow({
       </span>
     </div>
   );
-}
+});

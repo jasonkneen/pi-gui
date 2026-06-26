@@ -40,6 +40,7 @@ export class SessionStateMap {
   readonly sessionConfigBySession = new Map<string, SessionConfig>();
   readonly lastViewedAtBySession = new Map<string, string>();
   readonly pinnedAtBySession = new Map<string, string>();
+  pinnedSessionOrder: string[] = [];
   readonly sessionErrorsBySession = new Map<string, string>();
   readonly sessionSubscriptions = new Map<string, () => void>();
   readonly activeAssistantMessageBySession = new Map<string, string>();
@@ -77,6 +78,11 @@ export class SessionStateMap {
         }
       }
     }
+    const nextPinnedOrder = this.pinnedSessionOrder.filter((key) => activeKeys.has(key));
+    if (nextPinnedOrder.length !== this.pinnedSessionOrder.length) {
+      this.pinnedSessionOrder = nextPinnedOrder;
+      changed = true;
+    }
     return changed;
   }
 
@@ -95,6 +101,7 @@ export class SessionStateMap {
     this.sessionConfigBySession.delete(key);
     this.lastViewedAtBySession.delete(key);
     this.pinnedAtBySession.delete(key);
+    this.pinnedSessionOrder = this.pinnedSessionOrder.filter((entry) => entry !== key);
     this.sessionErrorsBySession.delete(key);
     this.sessionCommandsBySession.delete(key);
     this.extensionUiBySession.delete(key);

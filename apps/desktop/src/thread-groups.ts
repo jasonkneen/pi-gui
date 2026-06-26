@@ -120,7 +120,23 @@ function partitionThreads(rootWorkspace: WorkspaceRecord, entries: readonly Thre
   };
 }
 
-export function comparePinnedThreads(left: ThreadListEntry, right: ThreadListEntry): number {
+export function sessionThreadKey(thread: ThreadListEntry): string {
+  return `${thread.workspaceId}:${thread.session.id}`;
+}
+
+export function comparePinnedThreads(
+  left: ThreadListEntry,
+  right: ThreadListEntry,
+  pinnedSessionOrder: readonly string[] = [],
+): number {
+  const order = new Map(pinnedSessionOrder.map((key, index) => [key, index] as const));
+  const leftIndex = order.get(sessionThreadKey(left));
+  const rightIndex = order.get(sessionThreadKey(right));
+  if (leftIndex !== undefined || rightIndex !== undefined) {
+    if (leftIndex === undefined) return 1;
+    if (rightIndex === undefined) return -1;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+  }
   const leftPinnedAt = left.session.pinnedAt ?? "";
   const rightPinnedAt = right.session.pinnedAt ?? "";
   if (leftPinnedAt !== rightPinnedAt) {

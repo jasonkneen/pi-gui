@@ -477,6 +477,25 @@
   overflow: visible;
 }
 
+.session-list--pinned .session-row {
+  cursor: grab;
+}
+
+.session-list--pinned .session-row:active {
+  cursor: grabbing;
+}
+
+.session-row--dragging {
+  box-shadow: 0 8px 20px rgba(20, 27, 45, 0.12);
+}
+
+.session-row--overlay {
+  min-width: 260px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 32px rgba(20, 27, 45, 0.16);
+}
+
 .session-row--active {
   background: var(--surface-overlay);
   border-color: var(--line);

@@ -1109,6 +1109,9 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.reorderWorkspaces, (event, order: readonly string[]) =>
     runWindowScopedForEvent(event, () => store.reorderWorkspaces(order)),
   );
+  ipcMain.handle(desktopIpc.reorderPinnedSessions, (event, order: readonly string[]) =>
+    runWindowScopedForEvent(event, () => store.reorderPinnedSessions(order)),
+  );
   ipcMain.handle(desktopIpc.openWorkspaceInFinder, async (_event, workspaceId: string) => {
     const workspacePath = store.getWorkspacePath(workspaceId);
     if (!workspacePath) {

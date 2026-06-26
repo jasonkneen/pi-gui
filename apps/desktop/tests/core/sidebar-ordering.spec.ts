@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { expect, test } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import {
   createNamedThread,
   getDesktopState,
@@ -141,3 +142,82 @@ test("pinned sidebar threads stay above history, persist across relaunch, and un
     await harness.close();
   }
 });
+
+test("pinned sidebar threads can be reordered and repinned threads return to the top", async () => {
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("pinned-drag-ordering-test");
+  let harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const workspace = await waitForWorkspaceByPath(window, workspacePath);
+
+    await createNamedThread(window, "Thread A", { workspaceName: basename(workspacePath) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await createNamedThread(window, "Thread B", { workspaceName: basename(workspacePath) });
+
+    await pinThread(window, "Thread A");
+    await pinThread(window, "Thread B");
+
+    const pinnedSection = window.getByRole("region", { name: "Pinned threads" });
+    await expect(pinnedSection.locator(".session-row__title")).toHaveText(["Thread B", "Thread A"]);
+
+    await dragPinnedThreadAfter(window, pinnedSection, "Thread B", "Thread A");
+    await expect(pinnedSection.locator(".session-row__title")).toHaveText(["Thread A", "Thread B"]);
+
+    await expect.poll(async () => {
+      const state = await getDesktopState(window);
+      const workspaceState = state.workspaces.find((entry) => entry.id === workspace.id);
+      const threadA = workspaceState?.sessions.find((session) => session.title === "Thread A");
+      const threadB = workspaceState?.sessions.find((session) => session.title === "Thread B");
+      return state.pinnedSessionOrder.join("\n") === `${workspace.id}:${threadA?.id}\n${workspace.id}:${threadB?.id}`;
+    }).toBe(true);
+
+    await harness.close();
+    harness = await launchDesktop(userDataDir, { testMode: "background" });
+
+    const reopenedWindow = await harness.firstWindow();
+    await waitForWorkspaceByPath(reopenedWindow, workspacePath);
+    const reopenedPinnedSection = reopenedWindow.getByRole("region", { name: "Pinned threads" });
+    await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread A", "Thread B"]);
+
+    await reopenedPinnedSection.getByRole("button", { name: /Unpin Thread A/ }).click();
+    await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread B"]);
+
+    const threadAHistoryRow = reopenedWindow.locator(".session-row", { hasText: "Thread A" });
+    await threadAHistoryRow.hover();
+    await reopenedWindow.getByRole("button", { name: /Pin Thread A/ }).click();
+    await expect(reopenedPinnedSection.locator(".session-row__title")).toHaveText(["Thread A", "Thread B"]);
+  } finally {
+    await harness.close();
+  }
+});
+
+async function pinThread(window: Page, title: string): Promise<void> {
+  const row = window.locator(".session-row", { hasText: title });
+  await row.hover();
+  await window.getByRole("button", { name: new RegExp(`Pin ${title}`) }).click();
+}
+
+async function dragPinnedThreadAfter(
+  window: Page,
+  pinnedSection: Locator,
+  sourceTitle: string,
+  targetTitle: string,
+): Promise<void> {
+  const sourceBox = await pinnedSection.locator(".session-row", { hasText: sourceTitle }).boundingBox();
+  const targetBox = await pinnedSection.locator(".session-row", { hasText: targetTitle }).boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+  if (!sourceBox || !targetBox) {
+    return;
+  }
+
+  await window.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await window.mouse.down();
+  await window.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 8 });
+  await window.mouse.up();
+}
