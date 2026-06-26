@@ -2359,6 +2359,7 @@ export default function App() {
         )}
         {sidePanelMode && selectedWorkspace && selectedSession ? (
           <DiffPanel
+            key={sidePanelMode}
             panelMode={sidePanelMode}
             workspaceId={selectedWorkspace.id}
             sessionId={selectedSession.id}

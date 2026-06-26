@@ -180,7 +180,7 @@ test("Files mode shows a file browser and reader instead of the changes reviewer
     await diffPanel.locator('.diff-panel__file[data-file-path="src/foo.ts"] .diff-panel__file-name').click();
     await expect(diffPanel.locator(".diff-inline")).toBeVisible();
 
-    await window.getByLabel("Toggle files").click();
+    await window.locator(".topbar__actions").getByLabel("Toggle files").click();
     await expect(diffPanel.locator(".diff-panel__title")).toHaveText("Files");
     await expect(diffPanel.getByTestId("diff-panel-counter")).toHaveCount(0);
     await expect(diffPanel.locator(".file-workbench__section--changes")).toHaveCount(0);
