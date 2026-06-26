@@ -86,7 +86,8 @@ export function Sidebar(props: SidebarProps) {
       if (pointerY == null) return [];
       let closest: { id: string; distance: number } | null = null;
       for (const container of args.droppableContainers) {
-        if (!String(container.id).startsWith("pinned:")) {
+        const containerId = String(container.id);
+        if (!containerId.startsWith("pinned:") || containerId === String(args.active.id)) {
           continue;
         }
         const rect = container.rect.current;
@@ -94,7 +95,7 @@ export function Sidebar(props: SidebarProps) {
         const rowCenter = rect.top + rect.height / 2;
         const distance = Math.abs(pointerY - rowCenter);
         if (!closest || distance < closest.distance) {
-          closest = { id: String(container.id), distance };
+          closest = { id: containerId, distance };
         }
       }
       return closest ? [{ id: closest.id, data: { droppableContainer: args.droppableContainers.find((c) => String(c.id) === closest!.id)! } }] : [];
