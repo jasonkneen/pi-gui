@@ -51,6 +51,17 @@ linux:
   target:
     - target: AppImage
 
+win:
+  executableName: pi-gui
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
 toolsets:
   appimage: "1.0.2"
 

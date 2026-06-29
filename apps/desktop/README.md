@@ -39,6 +39,20 @@ Package a Linux AppImage locally:
 pnpm --filter @pi-gui/desktop run package:linux
 ```
 
+Package Windows installers locally:
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win
+```
+
+Unpacked Windows build (faster iteration):
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win:dir
+```
+
+On Windows, `package:win*` routes through `scripts/package-windows.mjs`, which prefers the ASCII repo-local `tools/pnpm.cmd` shim and redirects `ELECTRON_BUILDER_CACHE` / `LOCALAPPDATA` into `.cache/` under the repo. This avoids electron-builder failures when `pnpm` lives under a non-ASCII `%USERPROFILE%` or when Developer Mode / elevation is unavailable for winCodeSign symlink extraction. Set `ELECTRON_MIRROR` if Electron downloads are flaky in your region.
+
 Live agent tests use your existing `pi` runtime and provider auth. If local `pi` runs do not work, the `live` lane will not be meaningful either.
 
 ## Test Lanes
@@ -97,6 +111,13 @@ Linux CI currently validates packaging via:
 ```bash
 pnpm --filter @pi-gui/desktop run package:linux
 pnpm --dir apps/desktop run verify:packaged-runtime-deps:linux
+```
+
+Windows release CI validates packaging via:
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win:dir
+pnpm --dir apps/desktop run verify:packaged-runtime-deps:windows
 ```
 
 ## Focus And Foreground Rules

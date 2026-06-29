@@ -15,6 +15,10 @@
     "bun:package:dir": "cd apps/desktop && bun run bun:package:dir",
     "bun:package:linux": "cd apps/desktop && bun run bun:package:linux",
     "bun:package:linux:dir": "cd apps/desktop && bun run bun:package:linux:dir",
+    "package:win": "pnpm --filter @pi-gui/desktop run package:win",
+    "package:win:dir": "pnpm --filter @pi-gui/desktop run package:win:dir",
+    "bun:package:win": "cd apps/desktop && bun run bun:package:win",
+    "bun:package:win:dir": "cd apps/desktop && bun run bun:package:win:dir",
     "lint": "pnpm -r --if-present lint",
     "bun:lint": "for dir in apps/* packages/*; do (cd \"$dir\" && (grep -q '\"bun:lint\":' package.json && bun run bun:lint || (grep -q '\"lint\":' package.json && bun run lint))); done",
     "test": "pnpm -r --if-present test",
@@ -28,6 +32,7 @@
   "devDependencies": {
     "@playwright/test": "^1.52.0",
     "@types/node": "^24.0.0",
+    "pnpm": "10.25.0",
     "typescript": "^5.9.3"
   },
   "workspaces": [

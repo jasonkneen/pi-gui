@@ -6,6 +6,7 @@ build/
 out/
 release/
 release-*/
+.cache/
 playwright-report/
 test-results/
 .claude/worktrees/
