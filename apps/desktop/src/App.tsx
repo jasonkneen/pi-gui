@@ -53,6 +53,7 @@ import {
 } from "./composer-attachments";
 
 type SidePanelMode = "changes" | "files";
+const TIMELINE_SCROLL_INTENT_WINDOW_MS = 750;
 
 interface TimelineOffBottomState {
   readonly scrollTop: number;
@@ -205,6 +206,7 @@ export default function App() {
   const offBottomRestoreGenerationRef = useRef(0);
   const restoredTimelineScrollSessionKeyRef = useRef("");
   const protectedTimelineScrollSessionKeysRef = useRef(new Set<string>());
+  const timelineScrollIntentUntilRef = useRef(0);
   const selectedSessionKeyRef = useRef("");
   const previousActiveViewRef = useRef<AppView | null>(null);
   const hydratedComposerSessionKeyRef = useRef("");
@@ -1130,6 +1132,7 @@ export default function App() {
     setShowJumpToLatest(false);
     lastTranscriptMarkerRef.current = "";
     pinnedToBottomRef.current = shouldRestorePinned;
+    timelineScrollIntentUntilRef.current = 0;
     previousTimelinePaneSizeRef.current = null;
     preserveBottomOnNextPaneResizeRef.current = false;
     restoredTimelineScrollSessionKeyRef.current = "";
@@ -1975,6 +1978,24 @@ export default function App() {
     }
 
     const pinned = isNearBottom(pane);
+    const hasRecentScrollIntent = window.performance.now() <= timelineScrollIntentUntilRef.current;
+    if (
+      !pinned &&
+      !hasRecentScrollIntent &&
+      (pinnedToBottomRef.current ||
+        preserveBottomOnNextPaneResizeRef.current ||
+        exactBottomRestoreSessionKeyRef.current === selectedSessionKey ||
+        deferredPinnedBottomAlignmentRef.current)
+    ) {
+      pinnedToBottomRef.current = true;
+      preserveBottomOnNextPaneResizeRef.current = true;
+      lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, true);
+      clearTimelineOffBottomState(selectedSessionKey);
+      setShowJumpToLatest(false);
+      requestPinnedBottomAlignment("auto", { preferExactRestore: true });
+      return;
+    }
+
     if (!pinned) {
       preserveBottomOnNextPaneResizeRef.current = false;
       resetExactBottomRestoreState();
@@ -1995,6 +2016,7 @@ export default function App() {
   };
 
   const handleTimelineScrollIntent = () => {
+    timelineScrollIntentUntilRef.current = window.performance.now() + TIMELINE_SCROLL_INTENT_WINDOW_MS;
     cancelPendingTimelineOffBottomRestore(selectedSessionKey);
   };
 
