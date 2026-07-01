@@ -623,8 +623,9 @@ test("keeps a reopened virtualized long transcript stable", async () => {
     ]);
     const streamedRow = window.locator(".timeline-item--assistant", { hasText: pinnedStream.fullText });
     await expect(streamedRow).toBeVisible();
-    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedRow);
-    await expectStableTimelineWindow(window, streamedRow, streamedBaseline);
+    const streamedCompletionRow = window.locator(".timeline-summary", { hasText: "Worked for" }).last();
+    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedCompletionRow);
+    await expectStableTimelineWindow(window, streamedCompletionRow, streamedBaseline);
   } finally {
     await harness.close();
   }
