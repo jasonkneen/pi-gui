@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   commitAllInGitRepo,
+  createSessionViaIpc,
   desktopShortcut,
   getDesktopState,
   getTimelineScrollMetrics,
