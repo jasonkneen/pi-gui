@@ -1,6 +1,7 @@
 import type { RuntimeSettingsSnapshot, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type { ModelSettingsScopeMode, NotificationPreferences, WorkspaceRecord } from "./desktop-state";
 import type {
+  CustomProviderConfig,
   DesktopComputerUsePrivacyPane,
   DesktopComputerUseStatus,
   DesktopNotificationPermissionStatus,
@@ -37,6 +38,8 @@ interface SettingsViewProps {
   readonly onLogoutProvider: (providerId: string) => void;
   readonly onSetProviderApiKey: (providerId: string, apiKey: string) => Promise<string | undefined>;
   readonly onRemoveProviderApiKey: (providerId: string) => Promise<string | undefined>;
+  readonly onSaveCustomProvider: (config: CustomProviderConfig) => Promise<string | undefined>;
+  readonly onDeleteCustomProvider: (providerId: string) => Promise<string | undefined>;
   readonly onSetNotificationPreferences: (preferences: Partial<NotificationPreferences>) => void;
   readonly onSetIntegratedTerminalShell: (shellPath: string) => void;
   readonly onRequestNotificationPermission: () => void;
@@ -70,6 +73,8 @@ export function SettingsView({
   onLogoutProvider,
   onSetProviderApiKey,
   onRemoveProviderApiKey,
+  onSaveCustomProvider,
+  onDeleteCustomProvider,
   onSetNotificationPreferences,
   onSetIntegratedTerminalShell,
   onRequestNotificationPermission,
@@ -139,6 +144,8 @@ export function SettingsView({
               onLogoutProvider={onLogoutProvider}
               onSetProviderApiKey={onSetProviderApiKey}
               onRemoveProviderApiKey={onRemoveProviderApiKey}
+              onSaveCustomProvider={onSaveCustomProvider}
+              onDeleteCustomProvider={onDeleteCustomProvider}
             />
           ) : null}
 

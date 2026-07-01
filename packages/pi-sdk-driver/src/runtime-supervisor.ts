@@ -29,6 +29,20 @@ import { createRuntimeDependencies } from "./runtime-deps.js";
 import { createSettingsManagerWithoutNpmPackages, isGlobalNpmLookupError } from "./npm-package-fallback.js";
 import { skillSlashCommand } from "./runtime-command-utils.js";
 import type { AuthStatus, AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import {
+  BUILT_IN_PROVIDER_IDS,
+  CustomProviderStore,
+  type CustomProviderEntry,
+  type CustomProviderInput,
+} from "./custom-provider-store.js";
+
+export {
+  BUILT_IN_PROVIDER_IDS,
+  CUSTOM_PROVIDER_ID_PATTERN,
+  isValidHttpBaseUrl,
+  OPENAI_COMPLETIONS_API,
+} from "./custom-provider-store.js";
+export type { CustomProviderEntry, CustomProviderInput, CustomProviderModelInput } from "./custom-provider-store.js";
 
 interface ModelSettingsSnapshot {
   readonly defaultProvider?: string;
@@ -60,6 +74,7 @@ export interface RuntimeSupervisorOptions {
   readonly modelRegistry?: ModelRegistry;
   readonly extensionFactories?: readonly ExtensionFactory[];
   readonly inlineExtensionMetadata?: readonly RuntimeInlineExtensionMetadata[];
+  readonly customProviderStore?: CustomProviderStore;
 }
 
 type ResourceScope = "user" | "project";
@@ -76,6 +91,7 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
   private readonly modelRegistry: ModelRegistry;
   private readonly extensionFactories: readonly ExtensionFactory[];
   private readonly inlineExtensionMetadata: readonly RuntimeInlineExtensionMetadata[];
+  private readonly customProviderStore: CustomProviderStore;
   private readonly contexts = new Map<string, RuntimeContext>();
 
   constructor(options: RuntimeSupervisorOptions = {}) {
@@ -85,6 +101,7 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
     this.modelRegistry = deps.modelRegistry;
     this.extensionFactories = options.extensionFactories ?? [];
     this.inlineExtensionMetadata = options.inlineExtensionMetadata ?? [];
+    this.customProviderStore = deps.customProviderStore;
   }
 
   async getRuntimeSnapshot(workspace: WorkspaceRef): Promise<RuntimeSnapshot> {
@@ -132,6 +149,33 @@ export class RuntimeSupervisor implements RuntimeResourceDriver {
     this.modelRegistry.refresh();
     await context.resourceLoader.reload();
     await this.autoEnableModelsForAuthenticatedProviders(context, [providerId]);
+    return this.buildSnapshot(context);
+  }
+
+  async listCustomProviders(): Promise<readonly CustomProviderEntry[]> {
+    return this.customProviderStore.list();
+  }
+
+  async setCustomProvider(workspace: WorkspaceRef, input: CustomProviderInput): Promise<RuntimeSnapshot> {
+    const oauthProviderIds = new Set(this.authStorage.getOAuthProviders().map((provider) => provider.id));
+    if (BUILT_IN_PROVIDER_IDS.has(input.providerId) || oauthProviderIds.has(input.providerId)) {
+      throw new Error(
+        `Provider ID "${input.providerId}" conflicts with a built-in provider. Pick a unique ID.`,
+      );
+    }
+    const context = await this.ensureContext(workspace);
+    await this.customProviderStore.set(input);
+    this.modelRegistry.refresh();
+    await context.resourceLoader.reload();
+    await this.autoEnableModelsForAuthenticatedProviders(context, [input.providerId]);
+    return this.buildSnapshot(context);
+  }
+
+  async deleteCustomProvider(workspace: WorkspaceRef, providerId: string): Promise<RuntimeSnapshot> {
+    const context = await this.ensureContext(workspace);
+    await this.customProviderStore.delete(providerId);
+    this.modelRegistry.refresh();
+    await context.resourceLoader.reload();
     return this.buildSnapshot(context);
   }
 

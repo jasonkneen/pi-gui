@@ -6,11 +6,13 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   shell,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
 } from "electron";
+import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, stat } from "node:fs/promises";
@@ -40,7 +42,13 @@ import { checkForUpdate, initUpdateChecker } from "./update-checker";
 import { ThemeManager } from "./theme-manager";
 import { TerminalService } from "./terminal-service";
 import type { AppView, DesktopAppState, ThemeMode } from "../src/desktop-state";
-import { desktopIpc, getDesktopCommandFromShortcut } from "../src/ipc";
+import {
+  desktopIpc,
+  getDesktopCommandFromShortcut,
+  type CustomProviderConfig,
+  type CustomProviderProbeInput,
+  type CustomProviderProbeResult,
+} from "../src/ipc";
 import { SUPPORTED_COMPOSER_IMAGE_TYPES } from "../src/composer-attachments";
 import type {
   ComposerAttachment,
@@ -1183,6 +1191,16 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.setEnableSkillCommands, (event, workspaceId: string, enabled: boolean) =>
     runWindowScopedForEvent(event, () => store.setEnableSkillCommands(workspaceId, enabled)),
   );
+  ipcMain.handle(desktopIpc.listCustomProviders, () => store.listCustomProviders());
+  ipcMain.handle(desktopIpc.setCustomProvider, (event, workspaceId: string, config: CustomProviderConfig) =>
+    runWindowScopedForEvent(event, () => store.setCustomProvider(workspaceId, config)),
+  );
+  ipcMain.handle(desktopIpc.deleteCustomProvider, (event, workspaceId: string, providerId: string) =>
+    runWindowScopedForEvent(event, () => store.deleteCustomProvider(workspaceId, providerId)),
+  );
+  ipcMain.handle(desktopIpc.probeCustomProviderModels, (_event, input: CustomProviderProbeInput) =>
+    probeCustomProviderModels(input),
+  );
   ipcMain.handle(desktopIpc.setScopedModelPatterns, (event, workspaceId: string, patterns: readonly string[]) =>
     runWindowScopedForEvent(event, () => store.setScopedModelPatterns(workspaceId, patterns)),
   );
@@ -1565,4 +1583,49 @@ async function promptForText(parentWindow: BrowserWindow | null | undefined, mes
     throw new Error("Login cancelled.");
   }
   return result.trim();
+}
+
+async function probeCustomProviderModels(input: CustomProviderProbeInput): Promise<CustomProviderProbeResult> {
+  const baseUrl = input.baseUrl?.trim();
+  if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
+    return { ok: false, error: "Base URL must start with http:// or https://" };
+  }
+  const target = `${baseUrl.replace(/\/+$/, "")}/models`;
+  const apiKey = input.apiKey?.trim();
+  try {
+    const response = await net.fetch(target, {
+      method: "GET",
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      return { ok: false, error: `${response.status} ${response.statusText} from ${target}` };
+    }
+    const payload = (await response.json()) as unknown;
+    const data = (payload as { data?: unknown }).data;
+    if (!Array.isArray(data)) {
+      return { ok: false, error: `Response from ${target} is missing a "data" array` };
+    }
+    const models = data
+      .map((entry) => {
+        if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+          return (entry as { id: string }).id;
+        }
+        return undefined;
+      })
+      .filter((id): id is string => Boolean(id && id.length > 0));
+    return { ok: true, models };
+  } catch (error) {
+    return { ok: false, error: describeProbeError(error, target) };
+  }
+}
+
+function describeProbeError(error: unknown, target: string): string {
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return `Timed out after 5s contacting ${target}`;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }
