@@ -691,7 +691,7 @@ export default function App() {
       }
       setDisableTimelineVirtualization(false);
     });
-  }, [isTranscriptLoading, scrollTimelineToBottom, selectedSessionKey, snapshot?.activeView]);
+  }, [isTranscriptLoading, requestPinnedBottomAlignment, selectedSessionKey, snapshot?.activeView]);
 
   const schedulePinnedBottomRealignment = useCallback((delayFrames = 0) => {
     const waitForFrames = (remainingFrames: number) => {
@@ -1145,6 +1145,7 @@ export default function App() {
         return;
       }
       if (protectedTimelineScrollSessionKeysRef.current.has(selectedSessionKey)) {
+        protectedTimelineScrollSessionKeysRef.current.delete(selectedSessionKey);
         return;
       }
       const pinned = isNearBottom(pane);
@@ -1348,6 +1349,7 @@ export default function App() {
         return;
       }
       if (protectedTimelineScrollSessionKeysRef.current.has(selectedSessionKey)) {
+        protectedTimelineScrollSessionKeysRef.current.delete(selectedSessionKey);
         return;
       }
       const pinned = isNearBottom(pane);
