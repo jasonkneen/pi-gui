@@ -415,7 +415,10 @@ export class SessionSupervisor {
         // assistant/user message so forking an earlier response does not keep a
         // later response from the same user turn.
         const nextMessageIndex = branch.findIndex(
-          (entry, index) => index > selectedIndex && entry.type === "message",
+          (entry, index) =>
+            index > selectedIndex &&
+            entry.type === "message" &&
+            (entry.message.role === "user" || entry.message.role === "assistant"),
         );
         targetLeafId = nextMessageIndex > selectedIndex
           ? branch[nextMessageIndex - 1]?.id ?? selectedEntry.id
