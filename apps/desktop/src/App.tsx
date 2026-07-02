@@ -2602,7 +2602,7 @@ export default function App() {
                   onJumpToLatest={jumpToLatest}
                   onContentHeightChange={handleTimelineContentHeightChange}
                   onViewFileInDiff={handleViewFileInDiff}
-                  onForkFromMessage={openForkModal}
+                  onForkFromMessage={selectedSession.status === "running" ? undefined : openForkModal}
                 />
               </div>
             </section>

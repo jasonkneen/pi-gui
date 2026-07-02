@@ -397,26 +397,12 @@ export class SessionSupervisor {
     return snapshot;
   }
 
-  async forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
-    const sourceRecord = await this.ensureRecord(sourceRef);
-    const sourceSession = this.requireSession(sourceRecord);
-    const sourceManager = sourceSession.sessionManager;
-    const sourceFile = sourceRecord.sessionFile ?? sourceManager.getSessionFile();
-    if (!sourceFile) {
-      throw new Error(`Session ${sessionKey(sourceRef)} cannot be forked because no session file is tracked.`);
-    }
+  async validateForkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<void> {
+    await this.resolveForkSource(sourceRef, options);
+  }
 
-    const branch = sourceManager.getBranch();
-    const selectedEntry = resolveForkSourceEntry(branch, sourceSession.messages ?? [], options);
-    if (!selectedEntry) {
-      const selector =
-        options.sourceMessageId !== undefined
-          ? `message ${options.sourceMessageId}`
-          : options.sourceMessageIndex !== undefined
-            ? `rendered message index ${options.sourceMessageIndex}`
-            : `user message index ${options.userMessageIndex}`;
-      throw new Error(`Cannot fork session ${sessionKey(sourceRef)}: no ${selector}.`);
-    }
+  async forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
+    const { sourceRecord, sourceFile, branch, selectedEntry } = await this.resolveForkSource(sourceRef, options);
 
     const position = options.position ?? "before";
     let targetLeafId: string | undefined;
@@ -524,6 +510,38 @@ export class SessionSupervisor {
       snapshot,
     });
     return selectedText === undefined ? { snapshot } : { snapshot, selectedText };
+  }
+
+  private async resolveForkSource(
+    sourceRef: SessionRef,
+    options: ForkSessionOptions,
+  ): Promise<{
+    readonly sourceRecord: ManagedSessionRecord;
+    readonly sourceFile: string;
+    readonly branch: readonly SessionBranchEntry[];
+    readonly selectedEntry: SessionMessageBranchEntry;
+  }> {
+    const sourceRecord = await this.ensureRecord(sourceRef);
+    const sourceSession = this.requireSession(sourceRecord);
+    const sourceManager = sourceSession.sessionManager;
+    const sourceFile = sourceRecord.sessionFile ?? sourceManager.getSessionFile();
+    if (!sourceFile) {
+      throw new Error(`Session ${sessionKey(sourceRef)} cannot be forked because no session file is tracked.`);
+    }
+
+    const branch = sourceManager.getBranch();
+    const selectedEntry = resolveForkSourceEntry(branch, sourceSession.messages ?? [], options);
+    if (!selectedEntry) {
+      const selector =
+        options.sourceMessageId !== undefined
+          ? `message ${options.sourceMessageId}`
+          : options.sourceMessageIndex !== undefined
+            ? `rendered message index ${options.sourceMessageIndex}`
+            : `user message index ${options.userMessageIndex}`;
+      throw new Error(`Cannot fork session ${sessionKey(sourceRef)}: no ${selector}.`);
+    }
+
+    return { sourceRecord, sourceFile, branch, selectedEntry };
   }
 
   async openSession(sessionRef: SessionRef): Promise<SessionSnapshot> {

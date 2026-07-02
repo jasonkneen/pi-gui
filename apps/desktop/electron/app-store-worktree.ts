@@ -171,6 +171,18 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
   }
 
   return store.withErrorHandling(async () => {
+    const sourceRef = { workspaceId: input.sourceWorkspaceId, sessionId: input.sourceSessionId };
+    const forkOptions = {
+      ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+      ...(input.sourceMessageIndex !== undefined ? { sourceMessageIndex: input.sourceMessageIndex } : {}),
+      ...(input.userMessageIndex !== undefined ? { userMessageIndex: input.userMessageIndex } : {}),
+      ...(input.position ? { position: input.position } : {}),
+    };
+    await store.driver.validateForkSession(sourceRef, {
+      targetWorkspace: sourceWorkspace,
+      ...forkOptions,
+    });
+
     let targetWorkspace = sourceWorkspace;
     if (input.environment === "worktree") {
       const rootWorkspace = store.workspaceRefFromState(input.rootWorkspaceId);
@@ -188,13 +200,9 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
       targetWorkspace = synced.workspace;
     }
 
-    const sourceRef = { workspaceId: input.sourceWorkspaceId, sessionId: input.sourceSessionId };
     const { snapshot: session, selectedText } = await store.driver.forkSession(sourceRef, {
       targetWorkspace,
-      ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
-      ...(input.sourceMessageIndex !== undefined ? { sourceMessageIndex: input.sourceMessageIndex } : {}),
-      ...(input.userMessageIndex !== undefined ? { userMessageIndex: input.userMessageIndex } : {}),
-      ...(input.position ? { position: input.position } : {}),
+      ...forkOptions,
     });
     store.updateSessionConfig(session.ref, session.config);
 

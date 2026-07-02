@@ -318,6 +318,7 @@ declare module "@pi-gui/session-driver" {
 
   export interface SessionDriver {
     createSession(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot>;
+    validateForkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<void>;
     forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult>;
     openSession(sessionRef: SessionRef): Promise<SessionSnapshot>;
     archiveSession(sessionRef: SessionRef): Promise<void>;
