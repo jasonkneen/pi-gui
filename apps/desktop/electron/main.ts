@@ -56,6 +56,7 @@ import type {
   ComposerImageAttachment,
   CreateSessionInput,
   CreateWorktreeInput,
+  ForkThreadInput,
   RemoveWorktreeInput,
   SendChildThreadFollowUpInput,
   SetChildSupervisionLoopInput,
@@ -1296,6 +1297,9 @@ app.whenReady().then(async () => {
   );
   ipcMain.handle(desktopIpc.startThread, (event, input: StartThreadInput) =>
     runWindowScopedForEvent(event, () => store.startThread(input)),
+  );
+  ipcMain.handle(desktopIpc.forkThread, (event, input: ForkThreadInput) =>
+    runWindowScopedForEvent(event, () => store.forkThread(input)),
   );
   ipcMain.handle(desktopIpc.sendChildThreadFollowUp, (event, input: SendChildThreadFollowUpInput) =>
     runWindowScopedForEvent(event, () => store.sendChildThreadFollowUp(input)),

@@ -8,6 +8,8 @@ import type {
 } from "@pi-gui/session-driver/types";
 import type {
   CreateSessionOptions,
+  ForkSessionOptions,
+  ForkSessionResult,
   HostUiResponse,
   SessionDriver,
   SessionEventListener,
@@ -52,6 +54,14 @@ export class PiSdkDriver implements SessionDriver {
 
   createSession(workspace: WorkspaceRef, options?: CreateSessionOptions): Promise<SessionSnapshot> {
     return this.supervisor.createSession(workspace, options);
+  }
+
+  validateForkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<void> {
+    return this.supervisor.validateForkSession(sourceRef, options);
+  }
+
+  forkSession(sourceRef: SessionRef, options: ForkSessionOptions): Promise<ForkSessionResult> {
+    return this.supervisor.forkSession(sourceRef, options);
   }
 
   openSession(sessionRef: SessionRef): Promise<SessionSnapshot> {

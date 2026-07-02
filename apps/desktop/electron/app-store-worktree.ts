@@ -4,7 +4,13 @@ import { homedir } from "node:os";
 import { sessionKey } from "@pi-gui/pi-sdk-driver";
 import type { WorktreeCatalogEntry } from "@pi-gui/catalogs";
 import type { WorkspaceRef } from "@pi-gui/session-driver";
-import type { CreateWorktreeInput, DesktopAppState, RemoveWorktreeInput, StartThreadInput } from "../src/desktop-state";
+import type {
+  CreateWorktreeInput,
+  DesktopAppState,
+  ForkThreadInput,
+  RemoveWorktreeInput,
+  StartThreadInput,
+} from "../src/desktop-state";
 import { sendMessageToSession } from "./app-store-composer";
 import type { CreateWorktreeOptions } from "./worktree-manager";
 import type { AppStoreInternals } from "./app-store-internals";
@@ -154,6 +160,71 @@ export async function startThread(store: AppStoreInternals, input: StartThreadIn
     }
 
     return state;
+  });
+}
+
+export async function forkThread(store: AppStoreInternals, input: ForkThreadInput): Promise<DesktopAppState> {
+  await store.initialize();
+  const sourceWorkspace = store.workspaceRefFromState(input.sourceWorkspaceId);
+  if (!sourceWorkspace) {
+    return store.withError(`Unknown workspace: ${input.sourceWorkspaceId}`);
+  }
+
+  return store.withErrorHandling(async () => {
+    const sourceRef = { workspaceId: input.sourceWorkspaceId, sessionId: input.sourceSessionId };
+    const forkOptions = {
+      ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+      ...(input.sourceMessageIndex !== undefined ? { sourceMessageIndex: input.sourceMessageIndex } : {}),
+      ...(input.userMessageIndex !== undefined ? { userMessageIndex: input.userMessageIndex } : {}),
+      ...(input.position ? { position: input.position } : {}),
+    };
+    await store.driver.validateForkSession(sourceRef, {
+      targetWorkspace: sourceWorkspace,
+      ...forkOptions,
+    });
+
+    let targetWorkspace = sourceWorkspace;
+    if (input.environment === "worktree") {
+      const rootWorkspace = store.workspaceRefFromState(input.rootWorkspaceId);
+      if (!rootWorkspace) {
+        return store.withError(`Unknown workspace: ${input.rootWorkspaceId}`);
+      }
+      const worktreeOptions = buildWorktreeOptions(
+        store,
+        rootWorkspace,
+        input.sourceWorkspaceId,
+        input.sourceSessionId,
+      );
+      const created = await store.worktreeManager.createWorktree(rootWorkspace, worktreeOptions);
+      const synced = await store.driver.syncWorkspace(created.path, created.displayName);
+      targetWorkspace = synced.workspace;
+    }
+
+    const { snapshot: session, selectedText } = await store.driver.forkSession(sourceRef, {
+      targetWorkspace,
+      ...forkOptions,
+    });
+    store.updateSessionConfig(session.ref, session.config);
+
+    // Set selection eagerly so subscription replay events read the new session ID.
+    store.state = {
+      ...store.state,
+      selectedWorkspaceId: session.ref.workspaceId,
+      selectedSessionId: session.ref.sessionId,
+    };
+
+    // Load the branched history transcript from the driver before publishing state.
+    await store.reloadTranscriptFromDriver(session.ref);
+
+    return store.refreshState({
+      selectedWorkspaceId: session.ref.workspaceId,
+      selectedSessionId: session.ref.sessionId,
+      composerDraft: selectedText ?? "",
+      composerDraftSyncSource: "selection",
+      clearLastError: true,
+      refreshWorktrees: input.environment === "worktree",
+      activeView: "threads",
+    });
   });
 }
 

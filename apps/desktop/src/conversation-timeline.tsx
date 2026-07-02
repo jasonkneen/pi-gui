@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState, type MutableRefObject, type RefCallback, type RefObject } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type RefCallback, type RefObject } from "react";
 import type { TranscriptMessage } from "./desktop-state";
 import { ThreadSearchBar } from "./thread-search";
 import { TimelineItem } from "./timeline-item";
@@ -32,6 +32,7 @@ interface ConversationTimelineProps {
   readonly onJumpToLatest: () => void;
   readonly onContentHeightChange: (state?: { readonly wasAtBottom: boolean }) => void;
   readonly onViewFileInDiff?: (path: string) => void;
+  readonly onForkFromMessage?: (messageIndex: number, preview?: string) => void;
 }
 
 export function ConversationTimeline({
@@ -48,7 +49,21 @@ export function ConversationTimeline({
   onJumpToLatest,
   onContentHeightChange,
   onViewFileInDiff,
+  onForkFromMessage,
 }: ConversationTimelineProps) {
+  const renderedMessageIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    let messageIndex = 0;
+    for (const item of transcript) {
+      if (item.kind !== "message") {
+        continue;
+      }
+      map.set(item.id, messageIndex);
+      messageIndex += 1;
+    }
+    return map;
+  }, [transcript]);
+
   // Giant prose blocks and attachment-heavy rows routinely blow past the estimator,
   // so keep those transcripts on the exact DOM path instead of restoring to a fake bottom.
   const hasUnreliableVirtualizedHeights = transcript.some(
@@ -188,6 +203,8 @@ export function ConversationTimeline({
           onHeightChange={updateMeasuredHeight}
           onToggleToolCall={toggleToolCall}
           onViewFileInDiff={onViewFileInDiff}
+          renderedMessageIndexById={renderedMessageIndexById}
+          onForkFromMessage={onForkFromMessage}
         />
       ) : (
         <div className="timeline" data-testid="transcript">
@@ -199,6 +216,8 @@ export function ConversationTimeline({
               expandedToolCallIds={expandedToolCallIds}
               onToggleToolCall={toggleToolCall}
               onViewFileInDiff={onViewFileInDiff}
+              sourceMessageIndex={renderedMessageIndexById.get(item.id)}
+              onForkFromMessage={onForkFromMessage}
             />
           ))}
         </div>
@@ -222,6 +241,8 @@ function VirtualizedTranscriptList({
   onHeightChange,
   onToggleToolCall,
   onViewFileInDiff,
+  renderedMessageIndexById,
+  onForkFromMessage,
 }: {
   readonly transcript: readonly TranscriptMessage[];
   readonly timelinePaneRef: MutableRefObject<HTMLDivElement | null>;
@@ -232,6 +253,8 @@ function VirtualizedTranscriptList({
   readonly onHeightChange: (id: string, height: number) => void;
   readonly onToggleToolCall: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
+  readonly renderedMessageIndexById: ReadonlyMap<string, number>;
+  readonly onForkFromMessage?: (messageIndex: number, preview?: string) => void;
 }) {
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
   const previousTotalHeightRef = useRef(0);
@@ -309,6 +332,8 @@ function VirtualizedTranscriptList({
             expandedToolCallIds={expandedToolCallIds}
             onToggleToolCall={onToggleToolCall}
             onViewFileInDiff={onViewFileInDiff}
+            sourceMessageIndex={renderedMessageIndexById.get(item.id)}
+            onForkFromMessage={onForkFromMessage}
           />
         );
       })}
@@ -324,6 +349,8 @@ function MeasuredTimelineItem({
   expandedToolCallIds,
   onToggleToolCall,
   onViewFileInDiff,
+  sourceMessageIndex,
+  onForkFromMessage,
 }: {
   readonly item: TranscriptMessage;
   readonly className?: string;
@@ -332,6 +359,8 @@ function MeasuredTimelineItem({
   readonly expandedToolCallIds: ReadonlySet<string>;
   readonly onToggleToolCall: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
+  readonly sourceMessageIndex?: number;
+  readonly onForkFromMessage?: (messageIndex: number, preview?: string) => void;
 }) {
   const rowRef = useRef<HTMLDivElement | null>(null);
 
@@ -367,6 +396,8 @@ function MeasuredTimelineItem({
         expandedToolCallIds={expandedToolCallIds}
         onToggleToolCall={onToggleToolCall}
         onViewFileInDiff={onViewFileInDiff}
+        sourceMessageIndex={sourceMessageIndex}
+        onForkFromMessage={onForkFromMessage}
       />
     </div>
   );

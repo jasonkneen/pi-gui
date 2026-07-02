@@ -348,6 +348,18 @@ export function WorktreeIcon() {
   );
 }
 
+export function ForkIcon() {
+  return (
+    <Icon>
+      <circle cx="6" cy="5" r="1.85" stroke="currentColor" strokeWidth="1.45" />
+      <circle cx="6" cy="15" r="1.85" stroke="currentColor" strokeWidth="1.45" />
+      <circle cx="14" cy="5" r="1.85" stroke="currentColor" strokeWidth="1.45" />
+      <path d="M6 6.85v6.3" stroke="currentColor" strokeLinecap="round" strokeWidth="1.45" />
+      <path d="M14 6.85v1.4c0 2.1-1.6 3.4-3.6 3.7L7.8 11.7" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.45" />
+    </Icon>
+  );
+}
+
 export function GripIcon() {
   return (
     <Icon>

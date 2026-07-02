@@ -241,6 +241,24 @@ export type StartThreadInput = {
   readonly thinkingLevel?: string;
 };
 
+export type ForkThreadPosition = "before" | "at" | "after";
+
+export type ForkThreadInput = {
+  readonly sourceWorkspaceId: string;
+  readonly sourceSessionId: string;
+  /** Root workspace used as the base when forking into a new worktree. */
+  readonly rootWorkspaceId: string;
+  /** "local" forks into the source workspace; "worktree" creates a new worktree. */
+  readonly environment: NewThreadEnvironment;
+  /** ID of the rendered transcript message selected as the fork point, when it maps to a session entry. */
+  readonly sourceMessageId?: string;
+  /** 0-based index of the rendered transcript message selected as the fork point. */
+  readonly sourceMessageIndex?: number;
+  /** 0-based rendered user-message index kept as a fallback for older callers. */
+  readonly userMessageIndex?: number;
+  readonly position?: ForkThreadPosition;
+};
+
 export interface RemoveWorktreeInput {
   readonly workspaceId: string;
   readonly worktreeId: string;

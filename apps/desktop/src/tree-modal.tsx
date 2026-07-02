@@ -5,6 +5,7 @@ import type {
   SessionTreeNodeSnapshot,
   SessionTreeSnapshot,
 } from "@pi-gui/session-driver/types";
+import { trapDialogFocus } from "./dialog-focus";
 import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 
 interface TreeModalProps {
@@ -766,34 +767,4 @@ function nodeSearchText(node: SessionTreeNodeSnapshot): string {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-}
-
-function trapDialogFocus(event: ReactKeyboardEvent<HTMLDivElement>, dialog: HTMLDivElement | null): void {
-  if (!dialog) {
-    return;
-  }
-
-  const focusable = [
-    ...dialog.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ),
-  ].filter((element) => !element.hasAttribute("disabled") && !element.getAttribute("aria-hidden"));
-
-  if (focusable.length === 0) {
-    event.preventDefault();
-    return;
-  }
-
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const active = document.activeElement;
-  if (event.shiftKey && active === first) {
-    event.preventDefault();
-    last?.focus();
-    return;
-  }
-  if (!event.shiftKey && active === last) {
-    event.preventDefault();
-    first?.focus();
-  }
 }
