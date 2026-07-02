@@ -250,8 +250,10 @@ export type ForkThreadInput = {
   readonly rootWorkspaceId: string;
   /** "local" forks into the source workspace; "worktree" creates a new worktree. */
   readonly environment: NewThreadEnvironment;
-  /** 0-based index of the user message to fork from (counted in the rendered transcript). */
-  readonly userMessageIndex: number;
+  /** ID of the rendered transcript message selected as the fork point. */
+  readonly sourceMessageId?: string;
+  /** 0-based rendered user-message index kept as a fallback for older callers. */
+  readonly userMessageIndex?: number;
   readonly position?: ForkThreadPosition;
 };
 

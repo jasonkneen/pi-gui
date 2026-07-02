@@ -1,4 +1,4 @@
-import { access, realpath } from "node:fs/promises";
+import { access, realpath, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   ModelRegistry,
@@ -406,33 +406,37 @@ export class SessionSupervisor {
       throw new Error(`Session ${sessionKey(sourceRef)} cannot be forked because no session file is tracked.`);
     }
 
-    // Resolve the nth user message in the source branch (root -> leaf order).
     const branch = sourceManager.getBranch();
-    const userEntries = branch.filter(
-      (entry): entry is Extract<typeof entry, { type: "message" }> =>
-        entry.type === "message" && entry.message.role === "user",
-    );
-    const selectedEntry = userEntries[options.userMessageIndex];
+    const selectedEntry = resolveForkSourceEntry(branch, sourceSession.messages ?? [], options);
     if (!selectedEntry) {
-      throw new Error(
-        `Cannot fork session ${sessionKey(sourceRef)}: no user message at index ${options.userMessageIndex}.`,
-      );
+      const selector =
+        options.sourceMessageId !== undefined
+          ? `message ${options.sourceMessageId}`
+          : `user message index ${options.userMessageIndex}`;
+      throw new Error(`Cannot fork session ${sessionKey(sourceRef)}: no ${selector}.`);
     }
 
     const position = options.position ?? "before";
     let targetLeafId: string | undefined;
     let selectedText: string | undefined;
     if (position === "after") {
-      // Codex-style fork: branch at the END of the selected user message's turn so the
-      // new thread contains the full history up to and including that turn's assistant
-      // response, with an empty composer. The turn ends just before the next user message
-      // (or at the branch leaf when this is the final turn).
-      const nextUserEntry = userEntries[options.userMessageIndex + 1];
-      if (nextUserEntry) {
-        const nextIndex = branch.findIndex((entry) => entry.id === nextUserEntry.id);
-        targetLeafId = nextIndex > 0 ? branch[nextIndex - 1]?.id : selectedEntry.id;
+      if (selectedEntry.message.role === "assistant") {
+        targetLeafId = selectedEntry.id;
       } else {
-        targetLeafId = branch[branch.length - 1]?.id ?? selectedEntry.id;
+        // Fallback index callers select a user turn. Keep the full turn by branching
+        // just before the next rendered user message, or at the leaf for the final turn.
+        const userEntries = branch.filter(
+          (entry): entry is SessionMessageBranchEntry =>
+            entry.type === "message" && entry.message.role === "user",
+        );
+        const selectedUserIndex = userEntries.findIndex((entry) => entry.id === selectedEntry.id);
+        const nextUserEntry = selectedUserIndex >= 0 ? userEntries[selectedUserIndex + 1] : undefined;
+        if (nextUserEntry) {
+          const nextIndex = branch.findIndex((entry) => entry.id === nextUserEntry.id);
+          targetLeafId = nextIndex > 0 ? branch[nextIndex - 1]?.id : selectedEntry.id;
+        } else {
+          targetLeafId = branch[branch.length - 1]?.id ?? selectedEntry.id;
+        }
       }
     } else if (position === "at") {
       targetLeafId = selectedEntry.id;
@@ -460,10 +464,18 @@ export class SessionSupervisor {
       branchedManager = SessionManager.open(forkedPath);
     } else {
       const forked = SessionManager.forkFrom(sourceFile, targetWorkspace.path);
-      const forkedPath = forked.createBranchedSession(targetLeafId);
-      if (!forkedPath) {
-        throw new Error(`Failed to create forked session from ${sessionKey(sourceRef)}.`);
+      const fullForkPath = forked.getSessionFile();
+      let forkedPath: string | undefined;
+      try {
+        forkedPath = forked.createBranchedSession(targetLeafId);
+        if (!forkedPath) {
+          throw new Error(`Failed to create forked session from ${sessionKey(sourceRef)}.`);
+        }
+      } catch (error) {
+        await removeIntermediateForkSession(fullForkPath, undefined);
+        throw error;
       }
+      await removeIntermediateForkSession(fullForkPath, forkedPath);
       branchedManager = SessionManager.open(forkedPath);
     }
 
@@ -1741,6 +1753,50 @@ function resolvedCatalogSessionTitle(existingTitle: string | undefined, infoTitl
 const DEFAULT_SESSION_THINKING_LEVEL = "medium";
 const THINKING_LEVEL_ORDER = ["off", "low", "medium", "high", "xhigh"] as const;
 type SessionTreeNodeRecord = ReturnType<SessionManager["getTree"]>[number];
+type SessionBranchEntry = ReturnType<SessionManager["getBranch"]>[number];
+type SessionMessageBranchEntry = Extract<SessionBranchEntry, { type: "message" }>;
+
+function resolveForkSourceEntry(
+  branch: readonly SessionBranchEntry[],
+  renderedMessages: readonly unknown[],
+  options: ForkSessionOptions,
+): SessionMessageBranchEntry | undefined {
+  const messageEntries = branch.filter(
+    (entry): entry is SessionMessageBranchEntry => entry.type === "message",
+  );
+
+  if (options.sourceMessageId) {
+    return messageEntries.find((entry) => entry.id === options.sourceMessageId);
+  }
+
+  if (options.userMessageIndex === undefined) {
+    return undefined;
+  }
+
+  const renderedUserMessageId = transcriptFromMessages(renderedMessages)
+    .filter((item) => item.kind === "message" && item.role === "user")
+    .at(options.userMessageIndex)?.id;
+  if (!renderedUserMessageId) {
+    return undefined;
+  }
+  return messageEntries.find((entry) => entry.id === renderedUserMessageId);
+}
+
+async function removeIntermediateForkSession(
+  sessionFile: string | undefined,
+  keepSessionFile: string | undefined,
+): Promise<void> {
+  if (!sessionFile || (keepSessionFile && resolve(sessionFile) === resolve(keepSessionFile))) {
+    return;
+  }
+  try {
+    await unlink(sessionFile);
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+  }
+}
 
 function clampThinkingLevel(level: string, availableLevels: readonly string[]): string {
   const available = new Set(availableLevels);

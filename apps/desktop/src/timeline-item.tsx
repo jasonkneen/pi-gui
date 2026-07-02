@@ -10,22 +10,19 @@ export function TimelineItem({
   expandedToolCallIds,
   onToggleToolCall,
   onViewFileInDiff,
-  forkTurnIndex,
   onForkFromMessage,
 }: {
   readonly item: TranscriptMessage;
   readonly expandedToolCallIds?: ReadonlySet<string>;
   readonly onToggleToolCall?: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
-  readonly forkTurnIndex?: number;
-  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+  readonly onForkFromMessage?: (messageId: string, preview?: string) => void;
 }) {
   switch (item.kind) {
     case "message":
       return (
         <TimelineMessage
           item={item}
-          forkTurnIndex={forkTurnIndex}
           onForkFromMessage={onForkFromMessage}
         />
       );
@@ -49,12 +46,10 @@ export function TimelineItem({
 
 function TimelineMessage({
   item,
-  forkTurnIndex,
   onForkFromMessage,
 }: {
   readonly item: SessionTranscriptMessage;
-  readonly forkTurnIndex?: number;
-  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+  readonly onForkFromMessage?: (messageId: string, preview?: string) => void;
 }) {
   if (item.role === "user") {
     return (
@@ -102,7 +97,7 @@ function TimelineMessage({
     );
   }
 
-  const canFork = onForkFromMessage != null && forkTurnIndex != null;
+  const canFork = onForkFromMessage != null;
   return (
     <article className="timeline-item timeline-item--assistant">
       <MessageMarkdown text={item.text} />
@@ -114,7 +109,7 @@ function TimelineMessage({
             title="Fork conversation from this point"
             aria-label="Fork conversation from this point"
             data-testid="fork-from-message"
-            onClick={() => onForkFromMessage(forkTurnIndex, item.text)}
+            onClick={() => onForkFromMessage(item.id, item.text)}
           >
             <ForkIcon />
             <span className="timeline-item__action-label">Fork</span>

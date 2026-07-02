@@ -191,7 +191,8 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
     const sourceRef = { workspaceId: input.sourceWorkspaceId, sessionId: input.sourceSessionId };
     const { snapshot: session, selectedText } = await store.driver.forkSession(sourceRef, {
       targetWorkspace,
-      userMessageIndex: input.userMessageIndex,
+      ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+      ...(input.userMessageIndex !== undefined ? { userMessageIndex: input.userMessageIndex } : {}),
       ...(input.position ? { position: input.position } : {}),
     });
     store.updateSessionConfig(session.ref, session.config);

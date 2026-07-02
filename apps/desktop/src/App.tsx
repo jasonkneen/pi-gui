@@ -200,13 +200,13 @@ export default function App() {
   const [forkModalState, setForkModalState] = useState<{
     readonly open: boolean;
     readonly submitting: boolean;
-    readonly userMessageIndex: number;
+    readonly sourceMessageId: string;
     readonly messagePreview?: string;
     readonly error?: string;
   }>({
     open: false,
     submitting: false,
-    userMessageIndex: 0,
+    sourceMessageId: "",
   });
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const newThreadComposerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -877,13 +877,13 @@ export default function App() {
         : {
             open: false,
             submitting: false,
-            userMessageIndex: 0,
+            sourceMessageId: "",
           },
     );
   }, []);
 
   const openForkModal = useCallback(
-    (turnIndex: number, preview?: string) => {
+    (sourceMessageId: string, preview?: string) => {
       if (!api || !selectedWorkspace || !selectedSession) {
         return;
       }
@@ -891,7 +891,7 @@ export default function App() {
       setForkModalState({
         open: true,
         submitting: false,
-        userMessageIndex: turnIndex,
+        sourceMessageId,
         messagePreview: trimmed ? trimmed.slice(0, 280) : undefined,
       });
     },
@@ -911,7 +911,7 @@ export default function App() {
         sourceSessionId: selectedSession.id,
         rootWorkspaceId,
         environment,
-        userMessageIndex: forkModalState.userMessageIndex,
+        sourceMessageId: forkModalState.sourceMessageId,
         position: "after",
       };
       setForkModalState((current) => ({ ...current, submitting: true, error: undefined }));
@@ -922,7 +922,7 @@ export default function App() {
           setForkModalState({
             open: false,
             submitting: false,
-            userMessageIndex: 0,
+            sourceMessageId: "",
           });
           focusComposer();
         })
@@ -934,7 +934,7 @@ export default function App() {
           }));
         });
     },
-    [api, forkModalState.userMessageIndex, selectedSession, selectedWorkspace, snapshot],
+    [api, forkModalState.sourceMessageId, selectedSession, selectedWorkspace, snapshot],
   );
 
   const slashMenu = useSlashMenu({

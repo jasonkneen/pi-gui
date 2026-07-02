@@ -126,8 +126,10 @@ export type ForkPosition = "before" | "at" | "after";
 export interface ForkSessionOptions {
   /** Target workspace for the forked session (the source workspace, or a new worktree). */
   readonly targetWorkspace: WorkspaceRef;
-  /** 0-based index of the user message to fork from, counted within the source branch. */
-  readonly userMessageIndex: number;
+  /** ID of the rendered source message selected as the fork point. */
+  readonly sourceMessageId?: string;
+  /** 0-based rendered user-message index kept as a fallback for older callers. */
+  readonly userMessageIndex?: number;
   /**
    * "before" (default) forks before the selected user message so it can be edited and
    * re-sent; "at" keeps the selected user message in the forked history.

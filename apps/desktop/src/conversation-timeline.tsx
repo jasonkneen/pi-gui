@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type RefCallback, type RefObject } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type MutableRefObject, type RefCallback, type RefObject } from "react";
 import type { TranscriptMessage } from "./desktop-state";
 import { ThreadSearchBar } from "./thread-search";
 import { TimelineItem } from "./timeline-item";
@@ -32,7 +32,7 @@ interface ConversationTimelineProps {
   readonly onJumpToLatest: () => void;
   readonly onContentHeightChange: (state?: { readonly wasAtBottom: boolean }) => void;
   readonly onViewFileInDiff?: (path: string) => void;
-  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+  readonly onForkFromMessage?: (messageId: string, preview?: string) => void;
 }
 
 export function ConversationTimeline({
@@ -51,25 +51,6 @@ export function ConversationTimeline({
   onViewFileInDiff,
   onForkFromMessage,
 }: ConversationTimelineProps) {
-  // Map each assistant message id to the 0-based turn index it belongs to (the ordinal
-  // of the user message that started the turn). The fork affordance lives on assistant
-  // messages (codex-style); forking branches the conversation after that turn so the new
-  // thread keeps the full history up to and including the assistant response.
-  const forkTurnIndexByAssistantId = useMemo(() => {
-    const map = new Map<string, number>();
-    let turnIndex = -1;
-    for (const item of transcript) {
-      if (item.kind !== "message") {
-        continue;
-      }
-      if (item.role === "user") {
-        turnIndex += 1;
-      } else if (item.role === "assistant" && turnIndex >= 0) {
-        map.set(item.id, turnIndex);
-      }
-    }
-    return map;
-  }, [transcript]);
   // Giant prose blocks and attachment-heavy rows routinely blow past the estimator,
   // so keep those transcripts on the exact DOM path instead of restoring to a fake bottom.
   const hasUnreliableVirtualizedHeights = transcript.some(
@@ -209,7 +190,6 @@ export function ConversationTimeline({
           onHeightChange={updateMeasuredHeight}
           onToggleToolCall={toggleToolCall}
           onViewFileInDiff={onViewFileInDiff}
-          forkTurnIndexByAssistantId={forkTurnIndexByAssistantId}
           onForkFromMessage={onForkFromMessage}
         />
       ) : (
@@ -222,7 +202,6 @@ export function ConversationTimeline({
               expandedToolCallIds={expandedToolCallIds}
               onToggleToolCall={toggleToolCall}
               onViewFileInDiff={onViewFileInDiff}
-              forkTurnIndex={forkTurnIndexByAssistantId.get(item.id)}
               onForkFromMessage={onForkFromMessage}
             />
           ))}
@@ -247,7 +226,6 @@ function VirtualizedTranscriptList({
   onHeightChange,
   onToggleToolCall,
   onViewFileInDiff,
-  forkTurnIndexByAssistantId,
   onForkFromMessage,
 }: {
   readonly transcript: readonly TranscriptMessage[];
@@ -259,8 +237,7 @@ function VirtualizedTranscriptList({
   readonly onHeightChange: (id: string, height: number) => void;
   readonly onToggleToolCall: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
-  readonly forkTurnIndexByAssistantId: ReadonlyMap<string, number>;
-  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+  readonly onForkFromMessage?: (messageId: string, preview?: string) => void;
 }) {
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
   const previousTotalHeightRef = useRef(0);
@@ -338,7 +315,6 @@ function VirtualizedTranscriptList({
             expandedToolCallIds={expandedToolCallIds}
             onToggleToolCall={onToggleToolCall}
             onViewFileInDiff={onViewFileInDiff}
-            forkTurnIndex={forkTurnIndexByAssistantId.get(item.id)}
             onForkFromMessage={onForkFromMessage}
           />
         );
@@ -355,7 +331,6 @@ function MeasuredTimelineItem({
   expandedToolCallIds,
   onToggleToolCall,
   onViewFileInDiff,
-  forkTurnIndex,
   onForkFromMessage,
 }: {
   readonly item: TranscriptMessage;
@@ -365,8 +340,7 @@ function MeasuredTimelineItem({
   readonly expandedToolCallIds: ReadonlySet<string>;
   readonly onToggleToolCall: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
-  readonly forkTurnIndex?: number;
-  readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
+  readonly onForkFromMessage?: (messageId: string, preview?: string) => void;
 }) {
   const rowRef = useRef<HTMLDivElement | null>(null);
 
@@ -402,7 +376,6 @@ function MeasuredTimelineItem({
         expandedToolCallIds={expandedToolCallIds}
         onToggleToolCall={onToggleToolCall}
         onViewFileInDiff={onViewFileInDiff}
-        forkTurnIndex={forkTurnIndex}
         onForkFromMessage={onForkFromMessage}
       />
     </div>
