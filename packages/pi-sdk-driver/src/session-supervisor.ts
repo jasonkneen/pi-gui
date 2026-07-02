@@ -408,23 +408,19 @@ export class SessionSupervisor {
     let targetLeafId: string | undefined;
     let selectedText: string | undefined;
     if (position === "after") {
-      if (selectedEntry.message.role === "assistant") {
-        targetLeafId = selectedEntry.id;
+      // Codex-style fork: branch at the END of the selected turn. Assistant
+      // messages can be followed by tool-result entries that are part of the
+      // same visible response, so keep entries until just before the next user
+      // message rather than stopping at the assistant entry itself.
+      const selectedIndex = branch.findIndex((entry) => entry.id === selectedEntry.id);
+      const nextUserIndex = branch.findIndex(
+        (entry, index) =>
+          index > selectedIndex && entry.type === "message" && entry.message.role === "user",
+      );
+      if (nextUserIndex > selectedIndex) {
+        targetLeafId = branch[nextUserIndex - 1]?.id ?? selectedEntry.id;
       } else {
-        // Fallback index callers select a user turn. Keep the full turn by branching
-        // just before the next rendered user message, or at the leaf for the final turn.
-        const userEntries = branch.filter(
-          (entry): entry is SessionMessageBranchEntry =>
-            entry.type === "message" && entry.message.role === "user",
-        );
-        const selectedUserIndex = userEntries.findIndex((entry) => entry.id === selectedEntry.id);
-        const nextUserEntry = selectedUserIndex >= 0 ? userEntries[selectedUserIndex + 1] : undefined;
-        if (nextUserEntry) {
-          const nextIndex = branch.findIndex((entry) => entry.id === nextUserEntry.id);
-          targetLeafId = nextIndex > 0 ? branch[nextIndex - 1]?.id : selectedEntry.id;
-        } else {
-          targetLeafId = branch[branch.length - 1]?.id ?? selectedEntry.id;
-        }
+        targetLeafId = branch[branch.length - 1]?.id ?? selectedEntry.id;
       }
     } else if (position === "at") {
       targetLeafId = selectedEntry.id;
