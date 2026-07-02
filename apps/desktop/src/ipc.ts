@@ -15,6 +15,8 @@ import type {
   ModelSettingsScopeMode,
   NotificationPreferences,
   RemoveWorktreeInput,
+  SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   SelectedTranscriptRecord,
   StartThreadInput,
   WorkspaceSessionTarget,
@@ -26,6 +28,57 @@ export type DesktopNotificationPermissionStatus =
   | "default"
   | "unsupported"
   | "unknown";
+
+export type DesktopComputerUseStatusValue = "granted" | "denied" | "unknown";
+export type DesktopComputerUseDesktopState = "locked" | "unlocked" | "unknown";
+export type DesktopComputerUseCursorState = "enabled" | "disabled" | "unknown";
+export type DesktopComputerUseCursorActivity = "active" | "inactive" | "unknown";
+export type DesktopComputerUseLockedState = "enabled" | "not_enabled" | "unknown";
+export type DesktopComputerUseLockedInstallerState =
+  | "installed"
+  | "not-installed"
+  | "not-configured"
+  | "partial"
+  | "unknown";
+export type DesktopComputerUsePrivacyPane = "accessibility" | "screen-recording";
+
+export interface DesktopComputerUseStatus {
+  readonly helperAvailable: boolean;
+  readonly helperPath?: string;
+  readonly desktop: DesktopComputerUseDesktopState;
+  readonly frontmostApp?: string;
+  readonly cursor: DesktopComputerUseCursorState;
+  readonly cursorActive?: DesktopComputerUseCursorActivity;
+  readonly cursorDurationMs?: number;
+  readonly cursorGlideMs?: number;
+  readonly accessibility: DesktopComputerUseStatusValue;
+  readonly screenRecording: DesktopComputerUseStatusValue;
+  readonly lockedUse: DesktopComputerUseLockedState;
+  readonly lockedUseInstaller?: DesktopComputerUseLockedInstallerState;
+  readonly lockedUseInstallerPath?: string;
+  readonly message?: string;
+}
+
+export interface CustomProviderModelConfig {
+  readonly id: string;
+  readonly contextWindow?: number;
+}
+
+export interface CustomProviderConfig {
+  readonly providerId: string;
+  readonly baseUrl: string;
+  readonly apiKey?: string;
+  readonly models: readonly CustomProviderModelConfig[];
+}
+
+export interface CustomProviderProbeInput {
+  readonly baseUrl: string;
+  readonly apiKey?: string;
+}
+
+export type CustomProviderProbeResult =
+  | { readonly ok: true; readonly models: readonly string[] }
+  | { readonly ok: false; readonly error: string };
 
 export const desktopIpc = {
   stateRequest: "pi-gui:state-request",
@@ -41,6 +94,7 @@ export const desktopIpc = {
   renameWorkspace: "pi-gui:rename-workspace",
   removeWorkspace: "pi-gui:remove-workspace",
   reorderWorkspaces: "pi-gui:reorder-workspaces",
+  reorderPinnedSessions: "pi-gui:reorder-pinned-sessions",
   openWorkspaceInFinder: "pi-gui:open-workspace-in-finder",
   createWorktree: "pi-gui:create-worktree",
   removeWorktree: "pi-gui:remove-worktree",
@@ -50,9 +104,12 @@ export const desktopIpc = {
   selectSession: "pi-gui:select-session",
   archiveSession: "pi-gui:archive-session",
   unarchiveSession: "pi-gui:unarchive-session",
+  setSessionPinned: "pi-gui:set-session-pinned",
   createSession: "pi-gui:create-session",
   startThread: "pi-gui:start-thread",
   forkThread: "pi-gui:fork-thread",
+  sendChildThreadFollowUp: "pi-gui:send-child-thread-follow-up",
+  setChildSupervisionLoop: "pi-gui:set-child-supervision-loop",
   cancelCurrentRun: "pi-gui:cancel-current-run",
   setActiveView: "pi-gui:set-active-view",
   setSidebarCollapsed: "pi-gui:set-sidebar-collapsed",
@@ -65,6 +122,10 @@ export const desktopIpc = {
   loginProvider: "pi-gui:login-provider",
   logoutProvider: "pi-gui:logout-provider",
   setProviderApiKey: "pi-gui:set-provider-api-key",
+  listCustomProviders: "pi-gui:list-custom-providers",
+  setCustomProvider: "pi-gui:set-custom-provider",
+  deleteCustomProvider: "pi-gui:delete-custom-provider",
+  probeCustomProviderModels: "pi-gui:probe-custom-provider-models",
   setEnableSkillCommands: "pi-gui:set-enable-skill-commands",
   setScopedModelPatterns: "pi-gui:set-scoped-model-patterns",
   setSkillEnabled: "pi-gui:set-skill-enabled",
@@ -88,6 +149,9 @@ export const desktopIpc = {
   getNotificationPermissionStatus: "pi-gui:get-notification-permission-status",
   requestNotificationPermission: "pi-gui:request-notification-permission",
   openSystemNotificationSettings: "pi-gui:open-system-notification-settings",
+  getComputerUseStatus: "pi-gui:get-computer-use-status",
+  setLockedComputerUseEnabled: "pi-gui:set-locked-computer-use-enabled",
+  openComputerUsePrivacySettings: "pi-gui:open-computer-use-privacy-settings",
   notificationPermissionStatusChanged: "pi-gui:notification-permission-status-changed",
   pickComposerAttachments: "pi-gui:pick-composer-attachments",
   readClipboardImage: "pi-gui:read-clipboard-image",
@@ -103,6 +167,7 @@ export const desktopIpc = {
   navigateSessionTree: "pi-gui:navigate-session-tree",
   toggleWindowMaximize: "pi-gui:toggle-window-maximize",
   listWorkspaceFiles: "pi-gui:list-workspace-files",
+  readWorkspaceFile: "pi-gui:read-workspace-file",
   getChangedFiles: "pi-gui:get-changed-files",
   getFileDiff: "pi-gui:get-file-diff",
   stageFile: "pi-gui:stage-file",
@@ -128,6 +193,20 @@ export function getDesktopShortcutLabel(platform: NodeJS.Platform, key: string):
 export type PiDesktopStateListener = (state: DesktopAppState) => void;
 export type PiDesktopSelectedTranscriptListener = (payload: SelectedTranscriptRecord | null) => void;
 export type PiDesktopCommand = (typeof desktopCommands)[keyof typeof desktopCommands];
+
+export interface ChangedFileEntry {
+  readonly path: string;
+  readonly status: "added" | "modified" | "deleted" | "untracked";
+  readonly staged: boolean;
+}
+
+export interface WorkspaceFilePreview {
+  readonly path: string;
+  readonly content: string;
+  readonly truncated: boolean;
+  readonly binary: boolean;
+  readonly sizeBytes: number;
+}
 
 export interface TerminalSize {
   readonly cols: number;
@@ -227,6 +306,7 @@ export interface PiDesktopApi {
   renameWorkspace(workspaceId: string, displayName: string): Promise<DesktopAppState>;
   removeWorkspace(workspaceId: string): Promise<DesktopAppState>;
   reorderWorkspaces(workspaceOrder: readonly string[]): Promise<DesktopAppState>;
+  reorderPinnedSessions(pinnedSessionOrder: readonly string[]): Promise<DesktopAppState>;
   openWorkspaceInFinder(workspaceId: string): Promise<void>;
   createWorktree(input: CreateWorktreeInput): Promise<DesktopAppState>;
   removeWorktree(input: RemoveWorktreeInput): Promise<DesktopAppState>;
@@ -236,9 +316,12 @@ export interface PiDesktopApi {
   selectSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   archiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   unarchiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
+  setSessionPinned(target: WorkspaceSessionTarget, pinned: boolean): Promise<DesktopAppState>;
   createSession(input: CreateSessionInput): Promise<DesktopAppState>;
   startThread(input: StartThreadInput): Promise<DesktopAppState>;
   forkThread(input: ForkThreadInput): Promise<DesktopAppState>;
+  sendChildThreadFollowUp(input: SendChildThreadFollowUpInput): Promise<DesktopAppState>;
+  setChildSupervisionLoop(input: SetChildSupervisionLoopInput): Promise<DesktopAppState>;
   cancelCurrentRun(): Promise<DesktopAppState>;
   setActiveView(view: AppView): Promise<DesktopAppState>;
   setSidebarCollapsed(collapsed: boolean): Promise<DesktopAppState>;
@@ -263,6 +346,10 @@ export interface PiDesktopApi {
   loginProvider(workspaceId: string, providerId: string): Promise<DesktopAppState>;
   logoutProvider(workspaceId: string, providerId: string): Promise<DesktopAppState>;
   setProviderApiKey(workspaceId: string, providerId: string, apiKey: string): Promise<DesktopAppState>;
+  listCustomProviders(): Promise<readonly CustomProviderConfig[]>;
+  setCustomProvider(workspaceId: string, config: CustomProviderConfig): Promise<DesktopAppState>;
+  deleteCustomProvider(workspaceId: string, providerId: string): Promise<DesktopAppState>;
+  probeCustomProviderModels(input: CustomProviderProbeInput): Promise<CustomProviderProbeResult>;
   setEnableSkillCommands(workspaceId: string, enabled: boolean): Promise<DesktopAppState>;
   setScopedModelPatterns(workspaceId: string, patterns: readonly string[]): Promise<DesktopAppState>;
   setSkillEnabled(workspaceId: string, filePath: string, enabled: boolean): Promise<DesktopAppState>;
@@ -305,6 +392,9 @@ export interface PiDesktopApi {
   getNotificationPermissionStatus(): Promise<DesktopNotificationPermissionStatus>;
   requestNotificationPermission(): Promise<DesktopNotificationPermissionStatus>;
   openSystemNotificationSettings(): Promise<void>;
+  getComputerUseStatus(): Promise<DesktopComputerUseStatus>;
+  setLockedComputerUseEnabled(enabled: boolean): Promise<DesktopComputerUseStatus>;
+  openComputerUsePrivacySettings(pane: DesktopComputerUsePrivacyPane): Promise<void>;
   onNotificationPermissionStatusChanged(
     callback: (status: DesktopNotificationPermissionStatus) => void,
   ): () => void;
@@ -324,8 +414,9 @@ export interface PiDesktopApi {
     targetId: string,
     options?: NavigateSessionTreeOptions,
   ): Promise<{ readonly state: DesktopAppState; readonly result: NavigateSessionTreeResult }>;
-  listWorkspaceFiles(workspaceId: string): Promise<string[]>;
-  getChangedFiles(workspaceId: string): Promise<{ path: string; status: "added" | "modified" | "deleted" | "untracked"; staged: boolean }[]>;
+  listWorkspaceFiles(workspaceId: string, options?: { readonly force?: boolean }): Promise<string[]>;
+  readWorkspaceFile(workspaceId: string, filePath: string): Promise<WorkspaceFilePreview>;
+  getChangedFiles(workspaceId: string): Promise<ChangedFileEntry[]>;
   getFileDiff(workspaceId: string, filePath: string): Promise<string>;
   stageFile(workspaceId: string, filePath: string): Promise<void>;
   toggleWindowMaximize(): Promise<void>;

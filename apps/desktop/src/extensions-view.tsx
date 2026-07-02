@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { RuntimeExtensionRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type { ExtensionCommandCompatibilityRecord, WorkspaceRecord } from "./desktop-state";
+import { extensionScopeLabel, extensionSourceSummary } from "./extension-display";
 import { RefreshIcon } from "./icons";
 
 interface ExtensionsViewProps {
@@ -9,6 +10,7 @@ interface ExtensionsViewProps {
   readonly commandCompatibility?: readonly ExtensionCommandCompatibilityRecord[];
   readonly onRefresh: () => void;
   readonly onOpenExtensionFolder: (filePath: string) => void;
+  readonly onOpenComputerUseSettings: () => void;
   readonly onToggleExtension: (filePath: string, enabled: boolean) => void;
 }
 
@@ -18,6 +20,7 @@ export function ExtensionsView({
   commandCompatibility = [],
   onRefresh,
   onOpenExtensionFolder,
+  onOpenComputerUseSettings,
   onToggleExtension,
 }: ExtensionsViewProps) {
   const [query, setQuery] = useState("");
@@ -34,7 +37,8 @@ export function ExtensionsView({
         extension.displayName,
         extension.path,
         extension.sourceInfo.source,
-        extension.sourceInfo.scope,
+        extensionScopeLabel(extension),
+        extensionSourceSummary(extension),
         extension.sourceInfo.origin,
         ...extension.commands,
         ...extension.tools,
@@ -46,6 +50,8 @@ export function ExtensionsView({
   }, [extensions, query]);
   const selectedExtension =
     filteredExtensions.find((extension) => extension.path === selectedExtensionPath) ?? filteredExtensions[0];
+  const selectedExtensionCanBeManaged = selectedExtension ? isManageableExtension(selectedExtension) : false;
+  const selectedExtensionIsComputerUse = selectedExtension ? isComputerUseExtension(selectedExtension) : false;
   const selectedCompatibilityRecords = useMemo(
     () =>
       selectedExtension
@@ -120,7 +126,7 @@ export function ExtensionsView({
                     </span>
                   </span>
                   <span className="skill-card__description">
-                    {extension.sourceInfo.scope} · {extension.sourceInfo.origin}
+                    {extensionSourceSummary(extension)}
                   </span>
                   <span className="skill-card__meta">
                     <span>{extension.sourceInfo.source}</span>
@@ -146,25 +152,34 @@ export function ExtensionsView({
                   </span>
                 </div>
                 <div className="skill-detail__meta-list">
-                  <DetailItem label="Scope" value={selectedExtension.sourceInfo.scope} />
+                  <DetailItem label="Scope" value={extensionScopeLabel(selectedExtension)} />
                   <DetailItem label="Origin" value={selectedExtension.sourceInfo.origin} />
                   <DetailItem label="Path" value={selectedExtension.path} mono />
                   {selectedExtension.sourceInfo.baseDir ? (
                     <DetailItem label="Base dir" value={selectedExtension.sourceInfo.baseDir} mono />
                   ) : null}
                 </div>
-                <div className="skill-detail__actions">
-                  <button className="button button--secondary" type="button" onClick={() => onOpenExtensionFolder(selectedExtension.path)}>
-                    Open folder
-                  </button>
-                  <button
-                    className="button button--secondary"
-                    type="button"
-                    onClick={() => onToggleExtension(selectedExtension.path, !selectedExtension.enabled)}
-                  >
-                    {selectedExtension.enabled ? "Disable" : "Enable"}
-                  </button>
-                </div>
+                {selectedExtensionCanBeManaged ? (
+                  <div className="skill-detail__actions">
+                    <button className="button button--secondary" type="button" onClick={() => onOpenExtensionFolder(selectedExtension.path)}>
+                      Open folder
+                    </button>
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      onClick={() => onToggleExtension(selectedExtension.path, !selectedExtension.enabled)}
+                    >
+                      {selectedExtension.enabled ? "Disable" : "Enable"}
+                    </button>
+                  </div>
+                ) : null}
+                {selectedExtensionIsComputerUse ? (
+                  <div className="skill-detail__actions">
+                    <button className="button button--secondary" type="button" onClick={onOpenComputerUseSettings}>
+                      Open Computer Use settings
+                    </button>
+                  </div>
+                ) : null}
 
                 <ExtensionContributionSection title="Commands" items={selectedExtension.commands} emptyLabel="No commands contributed." />
                 <ExtensionCompatibilitySection
@@ -183,6 +198,18 @@ export function ExtensionsView({
         </div>
       </div>
     </section>
+  );
+}
+
+function isManageableExtension(extension: RuntimeExtensionRecord): boolean {
+  return extension.sourceInfo.scope === "project" || extension.sourceInfo.scope === "user";
+}
+
+function isComputerUseExtension(extension: RuntimeExtensionRecord): boolean {
+  return (
+    extension.displayName === "Computer Use" &&
+    extension.sourceInfo.source === "builtin" &&
+    extension.sourceInfo.origin === "top-level"
   );
 }
 

@@ -26,6 +26,7 @@ export function buildWorkspaceRecords(
   runningSinceBySession: Map<string, string>,
   sessionConfigBySession: Map<string, SessionConfig>,
   lastViewedAtBySession: Map<string, string>,
+  pinnedAtBySession: Map<string, string>,
 ): WorkspaceRecord[] {
   const workspaceRoots = resolveWorkspaceRoots(workspaces, worktrees);
 
@@ -53,6 +54,7 @@ export function buildWorkspaceRecords(
             runningSinceBySession,
             sessionConfigBySession,
             lastViewedAtBySession,
+            pinnedAtBySession,
           ),
         ),
     };
@@ -204,15 +206,18 @@ function buildSessionRecord(
   runningSinceBySession: Map<string, string>,
   sessionConfigBySession: Map<string, SessionConfig>,
   lastViewedAtBySession: Map<string, string>,
+  pinnedAtBySession: Map<string, string>,
 ): SessionRecord {
   const key = sessionKey(session.sessionRef);
   const transcript = transcriptCache.get(key) ?? [];
   const preview = previewFromTranscript(transcript) ?? session.previewSnippet ?? session.title;
   const lastViewedAt = lastViewedAtBySession.get(key);
+  const pinnedAt = pinnedAtBySession.get(key);
   return {
     id: session.sessionRef.sessionId,
     title: session.title,
     updatedAt: session.updatedAt,
+    pinnedAt,
     lastViewedAt,
     archivedAt: session.archivedAt,
     preview,

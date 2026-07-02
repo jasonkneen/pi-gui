@@ -67,6 +67,7 @@ try {
   execFileSync(pnpmBinary, ["exec", "asar", "extract", asarPath, extractedDir], {
     cwd: desktopDir,
     stdio: "pipe",
+    shell: process.platform === "win32",
   });
 
   verifyRequiredPackages(extractedDir);
@@ -74,7 +75,20 @@ try {
   await verifyPackagedRuntimeImports(extractedDir);
   await verifyNativeNodePty(asarPath);
 } finally {
-  rmSync(extractedDir, { recursive: true, force: true });
+  try {
+    rmSync(extractedDir, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 5 : 0,
+      retryDelay: process.platform === "win32" ? 200 : 0,
+    });
+  } catch (error) {
+    if (process.platform === "win32") {
+      console.warn(`Warning: could not remove temp dir ${extractedDir}: ${error.message}`);
+    } else {
+      throw error;
+    }
+  }
 }
 
 console.log(`Verified packaged runtime dependencies in ${asarPath}`);
@@ -96,6 +110,20 @@ function resolveAsarPath(desktopDir, packagePlatform) {
     }
 
     return path.join(releaseDir, "linux-unpacked", "resources", "app.asar");
+  }
+
+  if (packagePlatform === "win32") {
+    const releaseDir = path.join(desktopDir, "release");
+    const unpackedAsarPath = readdirSync(releaseDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^win(?:-[\w]+)?-unpacked$/.test(entry.name))
+      .map((entry) => path.join(releaseDir, entry.name, "resources", "app.asar"))
+      .find((candidatePath) => existsSync(candidatePath));
+
+    if (unpackedAsarPath) {
+      return unpackedAsarPath;
+    }
+
+    return path.join(releaseDir, "win-unpacked", "resources", "app.asar");
   }
 
   throw new Error(`Unsupported packaged runtime dependency target: ${packagePlatform}`);

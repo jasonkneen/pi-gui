@@ -7,6 +7,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type CreateAgentSessionOptions,
+  type ExtensionFactory,
   type ExtensionCommandContextActions,
   type ExtensionUIDialogOptions,
   type ExtensionUIContext,
@@ -41,7 +42,7 @@ import type {
   WorkspaceRef,
 } from "@pi-gui/session-driver";
 import type { RuntimeCommandRecord } from "@pi-gui/session-driver/runtime-types";
-import { JsonCatalogStore, type SessionFileCatalogStorage } from "./json-catalog-store.js";
+import { isMissingFileError, JsonCatalogStore, type SessionFileCatalogStorage } from "./json-catalog-store.js";
 import {
   applyHostUiRequestToExtensionUiState,
   createEmptyExtensionUiState,
@@ -71,13 +72,17 @@ import {
   truncate,
   workspaceToRef,
 } from "./session-supervisor-utils.js";
-import type { SessionTranscriptMessage } from "./transcript.js";
-import { createAgentSessionRuntimeWithNpmFallback } from "./npm-package-fallback.js";
+import type { SessionTranscriptItem } from "./transcript.js";
+import {
+  createAgentSessionRuntimeWithNpmFallback,
+  type PiCreateAgentSessionOptions,
+} from "./npm-package-fallback.js";
 
 export interface PiSdkDriverOptions {
   readonly catalogFilePath?: string;
   readonly createAgentSessionRuntimeImpl?: (options?: CreateAgentSessionOptions) => Promise<AgentSessionRuntime>;
   readonly modelRegistry?: ModelRegistry;
+  readonly extensionFactories?: readonly ExtensionFactory[];
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
     options: import("./thread-title-generator.js").GenerateThreadTitleOptions,
@@ -155,7 +160,15 @@ export class SessionSupervisor {
       ? new JsonCatalogStore({ catalogFilePath: options.catalogFilePath })
       : new JsonCatalogStore();
     this.createAgentSessionRuntimeImpl =
-      options.createAgentSessionRuntimeImpl ?? ((createOptions) => createAgentSessionRuntimeWithNpmFallback(createOptions));
+      options.createAgentSessionRuntimeImpl ??
+      ((createOptions) =>
+        createAgentSessionRuntimeWithNpmFallback({
+          ...createOptions,
+          resourceLoaderOptions: {
+            ...(createOptions as PiCreateAgentSessionOptions | undefined)?.resourceLoaderOptions,
+            ...(options.extensionFactories ? { extensionFactories: [...options.extensionFactories] } : {}),
+          },
+        }));
     this.modelRegistry = options.modelRegistry;
   }
 
@@ -191,19 +204,35 @@ export class SessionSupervisor {
       await Promise.all(
         existingSessions.map(async (session) => {
           const key = sessionKey(session.sessionRef);
-          if (discoveredKeys.has(key) || !session.sessionFilePath) {
+          if (discoveredKeys.has(key)) {
+            return undefined;
+          }
+
+          const sessionFilePath = session.sessionFilePath ?? (await this.catalogs.getSessionFile(session.sessionRef));
+          if (!sessionFilePath) {
             return undefined;
           }
 
           try {
-            await access(session.sessionFilePath);
-            return session;
-          } catch {
-            return undefined;
+            await access(sessionFilePath);
+          } catch (error) {
+            // Only a confirmed missing file may drop a session. Transient
+            // failures (unmounted volume, permissions) must not delete state.
+            if (isMissingFileError(error)) {
+              return undefined;
+            }
           }
+
+          const record = this.records.get(key);
+          const runtimeSnapshot = record && record.session && !record.closed ? buildSnapshot(record) : undefined;
+          return {
+            ...session,
+            sessionFilePath,
+            status: runtimeSnapshot?.status ?? ("idle" as const),
+          };
         }),
       )
-    ).filter((session): session is (typeof existingSessions)[number] => Boolean(session));
+    ).filter((session): session is NonNullable<typeof session> => Boolean(session));
     const preservedKeys = new Set(preservedEntries.map((entry) => sessionKey(entry.sessionRef)));
     const mergedEntries = [...nextEntries, ...preservedEntries];
     const nextSessionFiles = Object.fromEntries([
@@ -272,9 +301,40 @@ export class SessionSupervisor {
     }
   }
 
-  async getTranscript(sessionRef: SessionRef): Promise<SessionTranscriptMessage[]> {
-    const record = await this.ensureRecord(sessionRef);
-    return transcriptFromMessages(record.session?.messages ?? [], record.updatedAt);
+  async getTranscript(sessionRef: SessionRef): Promise<SessionTranscriptItem[]> {
+    const record = this.records.get(sessionKey(sessionRef));
+    if (record && record.session && !record.closed) {
+      return transcriptFromMessages(record.session.messages ?? [], record.updatedAt);
+    }
+    return this.readTranscriptFromDisk(sessionRef);
+  }
+
+  /**
+   * Build a transcript straight from the session's JSONL file without binding
+   * an agent runtime. Pi's file is the source of truth for closed sessions, so
+   * this can never serve a stale view.
+   */
+  private async readTranscriptFromDisk(sessionRef: SessionRef): Promise<SessionTranscriptItem[]> {
+    const sessionEntry = await this.catalogs.sessions.getSession(sessionRef);
+    const sessionFile =
+      sessionEntry?.sessionFilePath ??
+      (await this.catalogs.getSessionFile(sessionRef)) ??
+      (await this.findSessionFileOnDisk(sessionRef));
+    if (!sessionFile) {
+      throw new Error(`Session ${sessionKey(sessionRef)} has no tracked session file.`);
+    }
+
+    const sessionManager = SessionManager.open(sessionFile);
+    return transcriptFromMessages(sessionManager.buildSessionContext().messages, sessionEntry?.updatedAt);
+  }
+
+  private async findSessionFileOnDisk(sessionRef: SessionRef): Promise<string | undefined> {
+    const workspace = await this.catalogs.workspaces.getWorkspace(sessionRef.workspaceId);
+    if (!workspace) {
+      return undefined;
+    }
+    const infos = await SessionManager.list(workspace.path);
+    return infos.find((info) => info.id === sessionRef.sessionId)?.path;
   }
 
   async getSessionCommands(sessionRef: SessionRef): Promise<readonly RuntimeCommandRecord[]> {

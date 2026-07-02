@@ -26,10 +26,11 @@ interface ConversationTimelineProps {
   readonly disableVirtualization?: boolean;
   readonly onDisableVirtualizationReady?: () => void;
   readonly onTimelineScroll: () => void;
+  readonly onTimelineScrollIntent?: () => void;
   readonly threadSearch: ThreadSearchModel;
   readonly showJumpToLatest: boolean;
   readonly onJumpToLatest: () => void;
-  readonly onContentHeightChange: () => void;
+  readonly onContentHeightChange: (state?: { readonly wasAtBottom: boolean }) => void;
   readonly onViewFileInDiff?: (path: string) => void;
   readonly onForkFromMessage?: (turnIndex: number, preview?: string) => void;
 }
@@ -42,6 +43,7 @@ export function ConversationTimeline({
   disableVirtualization = false,
   onDisableVirtualizationReady,
   onTimelineScroll,
+  onTimelineScrollIntent,
   threadSearch,
   showJumpToLatest,
   onJumpToLatest,
@@ -156,12 +158,25 @@ export function ConversationTimeline({
     timelinePaneElementRef?.(node);
   }, [timelinePaneElementRef, timelinePaneRef]);
 
+  useLayoutEffect(() => {
+    const pane = timelinePaneRef.current;
+    if (!pane) {
+      return undefined;
+    }
+
+    pane.addEventListener("scroll", onTimelineScroll, { passive: true });
+    return () => {
+      pane.removeEventListener("scroll", onTimelineScroll);
+    };
+  }, [onTimelineScroll, timelinePaneRef]);
+
   return (
     <div
       className="timeline-pane timeline-pane--thread"
       data-testid="timeline-pane"
       ref={assignTimelinePaneRef}
-      onScroll={onTimelineScroll}
+      onPointerDown={onTimelineScrollIntent}
+      onWheel={onTimelineScrollIntent}
     >
       {threadSearch.isOpen ? (
         <ThreadSearchBar
@@ -237,7 +252,7 @@ function VirtualizedTranscriptList({
 }: {
   readonly transcript: readonly TranscriptMessage[];
   readonly timelinePaneRef: MutableRefObject<HTMLDivElement | null>;
-  readonly onContentHeightChange: () => void;
+  readonly onContentHeightChange: (state?: { readonly wasAtBottom: boolean }) => void;
   readonly measuredHeightsRef: MutableRefObject<Map<string, number>>;
   readonly measurementVersion: number;
   readonly expandedToolCallIds: ReadonlySet<string>;
@@ -292,11 +307,16 @@ function VirtualizedTranscriptList({
   }
 
   useLayoutEffect(() => {
-    if (previousTotalHeightRef.current === totalHeight) {
+    const previousTotalHeight = previousTotalHeightRef.current;
+    if (previousTotalHeight === totalHeight) {
       return;
     }
     previousTotalHeightRef.current = totalHeight;
-    onContentHeightChange();
+    const pane = timelinePaneRef.current;
+    const wasAtBottom = previousTotalHeight > 0 && pane
+      ? previousTotalHeight - pane.scrollTop - pane.clientHeight < 32
+      : false;
+    onContentHeightChange({ wasAtBottom });
   }, [onContentHeightChange, totalHeight]);
 
   const startOffset = Math.max(0, viewport.scrollTop - OVERSCAN_PX);

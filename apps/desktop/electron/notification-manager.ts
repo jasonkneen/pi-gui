@@ -23,6 +23,7 @@ export class NotificationManager {
     private readonly store: DesktopAppStore,
     private readonly getWindow: () => BrowserWindow | null,
     private readonly notificationPermissionService: NotificationPermissionService,
+    private readonly selectSessionInWindow?: (sessionRef: SessionRef) => Promise<void>,
   ) {}
 
   start(): () => void {
@@ -276,7 +277,11 @@ export class NotificationManager {
   }
 
   private async openSession(sessionRef: SessionRef): Promise<void> {
-    await this.store.selectSession(sessionRef);
+    if (this.selectSessionInWindow) {
+      await this.selectSessionInWindow(sessionRef);
+    } else {
+      await this.store.selectSession(sessionRef);
+    }
     const window = this.getWindow();
     if (!window || window.isDestroyed()) {
       return;

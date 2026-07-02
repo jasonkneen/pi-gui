@@ -50,12 +50,34 @@ export interface DesktopHarness {
   close(): Promise<void>;
 }
 
+interface ComputerUseLockedUseSelfTestResult {
+  readonly helperPath: string;
+  readonly desktopPath: string;
+  readonly authorizationSocket: string;
+  readonly authorizationProbe: {
+    readonly ok: boolean;
+    readonly details?: Readonly<Record<string, string>>;
+    readonly error?: string;
+  };
+  readonly begin: {
+    readonly ok: boolean;
+    readonly details?: Readonly<Record<string, string>>;
+    readonly error?: string;
+  };
+  readonly end: {
+    readonly ok: boolean;
+    readonly details?: Readonly<Record<string, string>>;
+    readonly error?: string;
+  };
+}
+
 export interface LaunchDesktopOptions {
   readonly initialWorkspaces?: readonly string[];
   readonly notificationLogPath?: string;
   readonly testMode?: DesktopTestMode;
   readonly agentDir?: string;
   readonly realAuthSourceDir?: string;
+  readonly enabledModels?: readonly string[];
   readonly scrubProviderEnv?: boolean;
   readonly envOverrides?: Readonly<Record<string, string | undefined>>;
   readonly inheritParentEnv?: boolean;
@@ -73,6 +95,48 @@ export interface RealAuthConfig {
   readonly enabled: boolean;
   readonly sourceDir?: string;
   readonly skipReason?: string;
+}
+
+export const preferredRealAuthComputerUseModelPatterns = [
+  "openai-codex/gpt-5.4",
+  "openai-codex/gpt-5.2",
+  "openai-codex/gpt-5.1",
+  "openai/gpt-5",
+  "anthropic/claude-sonnet-4-5",
+] as const;
+
+export async function getAvailableRealAuthModelPatterns(
+  sourceDir: string,
+  preferredPatterns: readonly string[] = preferredRealAuthComputerUseModelPatterns,
+): Promise<readonly string[]> {
+  const { AuthStorage, ModelRegistry } = (await import("@earendil-works/pi-coding-agent")) as {
+    AuthStorage: {
+      create(authPath: string): unknown;
+    };
+    ModelRegistry: {
+      create(
+        authStorage: unknown,
+        modelsPath: string,
+      ): {
+        getAvailable(): Promise<Array<{ provider: string; id: string }>>;
+      };
+    };
+  };
+
+  return withProviderEnvScrubbed(async () => {
+    const authStorage = AuthStorage.create(join(sourceDir, "auth.json"));
+    const modelRegistry = ModelRegistry.create(authStorage, join(sourceDir, "models.json"));
+    const availablePatterns = (await modelRegistry.getAvailable()).map((model) => `${model.provider}/${model.id}`);
+    const preferredPattern = preferredPatterns.find((pattern) => availablePatterns.includes(pattern));
+    const selectedPattern = preferredPattern ?? availablePatterns[0];
+    if (!selectedPattern) {
+      throw new Error(
+        `Real-auth source dir has no available models under installed-app env: ${sourceDir}. ` +
+          `Use a pi agent auth dir with a provider that exposes at least one available model.`,
+      );
+    }
+    return [selectedPattern];
+  });
 }
 
 export function getRealAuthConfig(): RealAuthConfig {
@@ -190,20 +254,35 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
     electronApp,
     firstWindow: () => getWindow(),
     focusWindow: async () => {
-      await electronApp.evaluate(({ BrowserWindow }) => {
+      await electronApp.evaluate(({ BrowserWindow, app }) => {
         const window = BrowserWindow.getAllWindows()[0];
         window?.restore();
         window?.show();
+        app.focus({ steal: true });
         window?.focus();
       });
-      await (await getWindow()).bringToFront();
+      if (process.platform === "darwin") {
+        await focusElectronAppProcess(electronApp);
+      }
+      await electronApp.evaluate(({ BrowserWindow, app }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        app.focus({ steal: true });
+        window?.focus();
+      });
+      const appPage = await getWindow();
+      await appPage.bringToFront();
       await expect
         .poll(
-          () =>
-            electronApp.evaluate(({ BrowserWindow }) => {
+          async () => {
+            const nativeFocused = await electronApp.evaluate(({ BrowserWindow }) => {
               const window = BrowserWindow.getAllWindows()[0];
               return window?.isFocused() ?? false;
-            }),
+            });
+            if (nativeFocused) {
+              return true;
+            }
+            return appPage.evaluate(() => document.hasFocus());
+          },
           { timeout: 5_000 },
         )
         .toBe(true);
@@ -212,6 +291,26 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
       await electronApp.close();
     },
   };
+}
+
+async function focusElectronAppProcess(electronApp: ElectronApplication): Promise<void> {
+  const pid = await electronApp.evaluate(() => process.pid);
+  try {
+    await execFileAsync(
+      "osascript",
+      [
+        "-e",
+        `tell application "System Events"
+          set targetProcess to first application process whose unix id is ${pid}
+          set frontmost of targetProcess to true
+          return name of targetProcess
+        end tell`,
+      ],
+      { timeout: 5_000 },
+    );
+  } catch {
+    // Fall back to Electron/Playwright focus APIs when System Events access is unavailable.
+  }
 }
 
 function buildDesktopLaunchEnv(
@@ -230,6 +329,11 @@ function buildDesktopLaunchEnv(
     PI_APP_OPEN_DEVTOOLS: "0",
     ...(options.envOverrides ?? {}),
   };
+  for (const [key, value] of Object.entries(options.envOverrides ?? {})) {
+    if (value === undefined) {
+      delete env[key];
+    }
+  }
 
   if (options.scrubProviderEnv || options.realAuthSourceDir) {
     for (const key of PROVIDER_ENV_VARS) {
@@ -248,6 +352,25 @@ function resolvePackagedReleaseDir(rawPath: string | undefined): string | undefi
   return resolve(desktopDir, trimmed);
 }
 
+async function withProviderEnvScrubbed<T>(fn: () => Promise<T>): Promise<T> {
+  const previousValues = new Map<string, string | undefined>();
+  for (const key of PROVIDER_ENV_VARS) {
+    previousValues.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previousValues) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 async function prepareAgentDir(
   userDataDir: string,
   options: LaunchDesktopOptions,
@@ -263,10 +386,11 @@ async function prepareAgentDir(
   const agentDir = join(userDataDir, "agent");
   if (options.realAuthSourceDir) {
     await seedAgentDirFromRealAuth(agentDir, options.realAuthSourceDir);
+    await writeAgentEnabledModels(agentDir, options.enabledModels);
     return agentDir;
   }
 
-  await seedAgentDir(agentDir);
+  await seedAgentDir(agentDir, { enabledModels: options.enabledModels });
   return agentDir;
 }
 
@@ -306,6 +430,58 @@ async function copyAgentFile(
 
     throw error;
   }
+}
+
+async function writeAgentEnabledModels(agentDir: string, enabledModels: readonly string[] | undefined): Promise<void> {
+  if (!enabledModels) {
+    return;
+  }
+
+  const settingsPath = join(agentDir, "settings.json");
+  const existingSettings = await readJsonObject(settingsPath);
+  const firstModel = enabledModels[0];
+  const defaultSelection = firstModel ? splitModelPattern(firstModel) : undefined;
+  await writeFile(
+    settingsPath,
+    `${JSON.stringify(
+      {
+        ...existingSettings,
+        ...(defaultSelection
+          ? {
+              defaultProvider: defaultSelection.provider,
+              defaultModel: defaultSelection.modelId,
+            }
+          : {}),
+        enabledModels: [...enabledModels],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+async function readJsonObject(filePath: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await readFile(filePath, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return {};
+    }
+    throw error;
+  }
+}
+
+function splitModelPattern(pattern: string): { provider: string; modelId: string } | undefined {
+  const separatorIndex = pattern.indexOf("/");
+  if (separatorIndex <= 0 || separatorIndex >= pattern.length - 1) {
+    return undefined;
+  }
+  return {
+    provider: pattern.slice(0, separatorIndex),
+    modelId: pattern.slice(separatorIndex + 1),
+  };
 }
 
 export async function resolvePackagedAppBundle(releaseDir = packagedReleaseDir): Promise<string> {
@@ -470,9 +646,7 @@ export async function seedBranchedTreeSessionFixture(
   readonly sessionId: string;
   readonly title: "Tree fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
@@ -534,6 +708,51 @@ export async function seedBranchedTreeSessionFixture(
   });
 }
 
+export async function seedExternalLinkSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "External link fixture session";
+}> {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendSessionInfo(name: string): string;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+
+    sessionManager.appendMessage({
+      role: "user",
+      content: "Show me the related issue.",
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendMessage({
+      role: "assistant",
+      content:
+        "Track this in [GitHub issue](https://github.com/minghinmatthewlam/pi-gui/issues/20). Ignore [email fallback](mailto:test@example.com).",
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendSessionInfo("External link fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "External link fixture session",
+    };
+  });
+}
+
 export async function seedToolResultTreeSessionFixture(
   agentDir: string,
   workspacePath: string,
@@ -541,9 +760,7 @@ export async function seedToolResultTreeSessionFixture(
   readonly sessionId: string;
   readonly title: "Tree tool fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: Record<string, unknown>): string;
@@ -651,9 +868,7 @@ export async function seedForkSessionFixture(
   readonly sessionId: string;
   readonly title: "Fork fixture session";
 }> {
-  const { SessionManager } = (await import(
-    "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  )) as {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
         appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
@@ -1065,14 +1280,32 @@ export async function jumpTimelineToBottom(window: Page): Promise<void> {
 }
 
 export async function scrollTimelineAwayFromBottom(window: Page, pixels = 160): Promise<void> {
-  await window.evaluate((distance) => {
-    const pane = document.querySelector<HTMLDivElement>("[data-testid='timeline-pane']");
-    if (!pane) {
-      throw new Error("Timeline pane was unavailable");
-    }
-    pane.scrollTop = Math.max(0, pane.scrollHeight - pane.clientHeight - distance);
-    pane.dispatchEvent(new Event("scroll", { bubbles: true }));
-  }, pixels);
+  const minimumRemainingFromBottom = Math.min(500, Math.max(1, pixels * 0.5));
+  await expect
+    .poll(async () =>
+      window.evaluate(async ({ distance, minimumRemaining }) => {
+        const pane = document.querySelector<HTMLDivElement>("[data-testid='timeline-pane']");
+        if (!pane) {
+          throw new Error("Timeline pane was unavailable");
+        }
+
+        const maxScrollTop = pane.scrollHeight - pane.clientHeight;
+        if (maxScrollTop <= minimumRemaining) {
+          return maxScrollTop;
+        }
+
+        pane.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -distance }));
+        pane.scrollTop = Math.max(0, maxScrollTop - distance);
+        pane.dispatchEvent(new Event("scroll", { bubbles: true }));
+        await new Promise<void>((resolve) => {
+          window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(resolve);
+          });
+        });
+        return pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+      }, { distance: pixels, minimumRemaining: minimumRemainingFromBottom }),
+    )
+    .toBeGreaterThan(minimumRemainingFromBottom);
 }
 
 export async function emitTestSessionEvent(
@@ -1088,6 +1321,23 @@ export async function emitTestSessionEvent(
     }
     await hooks.emitSessionEvent(payload);
   }, event);
+}
+
+export async function runComputerUseLockedUseSelfTest(
+  harness: DesktopHarness,
+): Promise<ComputerUseLockedUseSelfTestResult> {
+  await harness.firstWindow();
+  return harness.electronApp.evaluate(async () => {
+    const hooks = (globalThis as {
+      __PI_APP_TEST_HOOKS?: {
+        runComputerUseLockedUseSelfTest?: () => Promise<ComputerUseLockedUseSelfTestResult>;
+      };
+    }).__PI_APP_TEST_HOOKS;
+    if (!hooks?.runComputerUseLockedUseSelfTest) {
+      throw new Error("Computer Use locked-use self-test hook is unavailable");
+    }
+    return hooks.runComputerUseLockedUseSelfTest();
+  });
 }
 
 export async function setDeferredThreadTitleMode(harness: DesktopHarness): Promise<void> {

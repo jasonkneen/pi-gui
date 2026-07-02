@@ -38,14 +38,16 @@ export interface AppStoreInternals {
   /* ── Shared helpers (called by extracted method groups) ── */
   initialize(): Promise<void>;
   refreshState(options?: RefreshStateOptions): Promise<DesktopAppState>;
+  allocateComposerDraftSyncNonce(baseNonce?: number): number;
   emit(): DesktopAppState;
   withError(error: unknown): Promise<DesktopAppState>;
+  withSessionError(sessionRef: SessionRef, error: unknown): Promise<DesktopAppState>;
   withErrorHandling(fn: () => Promise<DesktopAppState>): Promise<DesktopAppState>;
   selectSessionFast(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   workspaceRefFromState(workspaceId: string): WorkspaceRef | undefined;
   selectedSessionRef(): SessionRef | undefined;
   getExtensionFilePath(workspaceId: string, filePath: string): string | undefined;
-  sessionFromState(sessionRef: SessionRef): { archivedAt?: string; updatedAt: string; title: string; status: string } | undefined;
+  sessionFromState(sessionRef: SessionRef): { archivedAt?: string; updatedAt: string; title: string; status: string; preview?: string } | undefined;
   ensureSessionReady(sessionRef: SessionRef): Promise<SessionSnapshot | undefined>;
   ensureSessionSubscription(sessionRef: SessionRef): Promise<void>;
   ensureSessionSubscribed(sessionRef: SessionRef): Promise<void>;
@@ -60,7 +62,6 @@ export interface AppStoreInternals {
   cancelPendingDialogsForSession(sessionRef: SessionRef): Promise<void>;
   persistUiState(): Promise<void>;
   persistComposerAttachments(key: string, attachments: readonly ComposerAttachment[]): Promise<void>;
-  persistTranscriptCacheForSession(sessionRef: SessionRef): void;
   schedulePersistUiState(): void;
   updateSessionConfig(sessionRef: SessionRef, config: SessionConfig | undefined): void;
   setPendingAutoTitle(sessionRef: SessionRef, pending: PendingAutoTitle): void;
@@ -89,4 +90,7 @@ export interface RefreshStateOptions {
   readonly activeView?: AppView;
   readonly markSelectedSessionViewed?: boolean;
   readonly hydrateSelectedSession?: boolean;
+  readonly emitState?: boolean;
+  readonly persistState?: boolean;
+  readonly publishSelectedTranscript?: boolean;
 }

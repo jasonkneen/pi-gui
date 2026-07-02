@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
@@ -11,43 +10,11 @@ import {
   persistedSessionDataPaths,
   selectSession,
 } from "../helpers/electron-app";
+import { appendMessagesToSessionFile, sessionFilePathFromCatalog } from "../helpers/session-file";
 
 type PersistedUiState = {
   lastViewedAtBySession?: Record<string, string>;
 };
-
-type PersistedTranscript = {
-  version?: number;
-  transcript?: unknown;
-} | unknown[];
-
-type PersistedTranscriptItem = {
-  kind: string;
-  id: string;
-  createdAt: string;
-  label?: string;
-  presentation?: string;
-};
-
-function readTranscriptItems(parsed: PersistedTranscript): PersistedTranscriptItem[] {
-  if (Array.isArray(parsed)) {
-    return parsed as PersistedTranscriptItem[];
-  }
-  return Array.isArray(parsed.transcript) ? (parsed.transcript as PersistedTranscriptItem[]) : [];
-}
-
-function writeTranscriptPayload(
-  parsed: PersistedTranscript,
-  items: readonly PersistedTranscriptItem[],
-): PersistedTranscript {
-  if (Array.isArray(parsed)) {
-    return [...items];
-  }
-  return {
-    version: parsed.version ?? 1,
-    transcript: items,
-  };
-}
 
 test("selecting an unread thread persists read state through the latest known activity", async () => {
   test.setTimeout(90_000);
@@ -74,46 +41,31 @@ test("selecting an unread thread persists read state through the latest known ac
   }
 
   expect(sessionRef).toBeDefined();
-  const { rawSessionKey, transcriptPath } = persistedSessionDataPaths(userDataDir, sessionRef!);
+  const { rawSessionKey } = persistedSessionDataPaths(userDataDir, sessionRef!);
   const uiStatePath = join(userDataDir, "ui-state.json");
-  const [uiStateRaw, transcriptRaw] = await Promise.all([
-    readFile(uiStatePath, "utf8"),
-    readFile(transcriptPath, "utf8").catch(() => JSON.stringify({ version: 1, transcript: [] })),
-  ]);
-  const uiState = JSON.parse(uiStateRaw) as PersistedUiState;
-  const parsedTranscript = JSON.parse(transcriptRaw) as PersistedTranscript;
-  const transcriptItems = readTranscriptItems(parsedTranscript);
-  const latestCreatedAt = new Date(Date.now() + 5 * 60 * 1_000).toISOString();
-  transcriptItems.push({
-    kind: "summary",
-    id: randomUUID(),
-    createdAt: latestCreatedAt,
-    label: "Trailing persisted activity",
-    presentation: "inline",
-  });
+  const uiState = JSON.parse(await readFile(uiStatePath, "utf8")) as PersistedUiState;
 
-  await Promise.all([
-    writeFile(
-      transcriptPath,
-      `${JSON.stringify(writeTranscriptPayload(parsedTranscript, transcriptItems), null, 2)}\n`,
-      "utf8",
-    ),
-    writeFile(
-      uiStatePath,
-      `${JSON.stringify(
-        {
-          ...uiState,
-          lastViewedAtBySession: {
-            ...(uiState.lastViewedAtBySession ?? {}),
-            [rawSessionKey]: new Date(Date.parse(latestCreatedAt) - 1_000).toISOString(),
-          },
-        },
-        null,
-        2,
-      )}\n`,
-      "utf8",
-    ),
+  // Append a future-dated message to pi's session file: activity the user has
+  // not seen yet, newer than the persisted lastViewedAt watermark.
+  const latestCreatedAtMs = Date.now() + 5 * 60 * 1_000;
+  await appendMessagesToSessionFile(await sessionFilePathFromCatalog(userDataDir, sessionRef!), [
+    { role: "assistant", text: "Trailing persisted activity", timestampMs: latestCreatedAtMs },
   ]);
+  await writeFile(
+    uiStatePath,
+    `${JSON.stringify(
+      {
+        ...uiState,
+        lastViewedAtBySession: {
+          ...(uiState.lastViewedAtBySession ?? {}),
+          [rawSessionKey]: new Date(latestCreatedAtMs - 1_000).toISOString(),
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 
   const secondRun = await launchDesktop(userDataDir, { testMode: "background" });
   try {

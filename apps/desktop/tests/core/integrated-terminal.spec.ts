@@ -20,6 +20,12 @@ test("opens a workspace terminal with persistent output, tabs, and takeover cont
   const harness = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath],
     testMode: "background",
+    envOverrides: {
+      PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN: "terminal-test-token-000000000000000000000",
+      PI_GUI_COMPUTER_USE_DESKTOP_PID: "424242",
+      PI_GUI_COMPUTER_USE_DESKTOP_PATH: "/Applications/pi-gui.app/Contents/MacOS/pi-gui",
+      PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET: "/tmp/pi-gui-terminal-test.sock",
+    },
   });
 
   try {
@@ -42,6 +48,13 @@ test("opens a workspace terminal with persistent output, tabs, and takeover cont
     await window.keyboard.press("Enter");
     await expect(terminal.locator(".xterm-rows")).toContainText("PI_TERMINAL_OK", { timeout: 15_000 });
     await expect(terminal.locator(".xterm-rows")).toContainText(basename(workspacePath), { timeout: 15_000 });
+    await window.keyboard.type(
+      "printf 'PI_COMPUTER_USE_ENV:%s:%s:%s:%s\\n' \"${PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN:-missing}\" \"${PI_GUI_COMPUTER_USE_DESKTOP_PID:-missing}\" \"${PI_GUI_COMPUTER_USE_DESKTOP_PATH:-missing}\" \"${PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET:-missing}\"",
+    );
+    await window.keyboard.press("Enter");
+    await expect(terminal.locator(".xterm-rows")).toContainText("PI_COMPUTER_USE_ENV:missing:missing:missing:missing", {
+      timeout: 15_000,
+    });
 
     await window.keyboard.press(desktopShortcut("J"));
     await expect(terminal).toHaveCount(0);

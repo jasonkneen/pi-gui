@@ -39,6 +39,20 @@ Package a Linux AppImage locally:
 pnpm --filter @pi-gui/desktop run package:linux
 ```
 
+Package Windows installers locally:
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win
+```
+
+Unpacked Windows build (faster iteration):
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win:dir
+```
+
+On Windows, `package:win*` routes through `scripts/package-windows.mjs`, which prefers the ASCII repo-local `tools/pnpm.cmd` shim and redirects `ELECTRON_BUILDER_CACHE` / `LOCALAPPDATA` into `.cache/` under the repo. This avoids electron-builder failures when `pnpm` lives under a non-ASCII `%USERPROFILE%` or when Developer Mode / elevation is unavailable for winCodeSign symlink extraction. Set `ELECTRON_MIRROR` if Electron downloads are flaky in your region.
+
 Live agent tests use your existing `pi` runtime and provider auth. If local `pi` runs do not work, the `live` lane will not be meaningful either.
 
 ## Test Lanes
@@ -73,6 +87,8 @@ Use the smallest lane that matches the changed surface.
   ```bash
   pnpm --filter @pi-gui/desktop run test:prod:real-auth-contract
   pnpm --filter @pi-gui/desktop run test:prod:packaged-smoke
+  pnpm --filter @pi-gui/desktop run test:prod:packaged-computer-use-parity
+  pnpm --filter @pi-gui/desktop run test:prod:packaged-computer-use-background
   pnpm --filter @pi-gui/desktop run test:prod:applications-relaunch
   pnpm --filter @pi-gui/desktop run test:prod:release-zip-smoke
   pnpm --filter @pi-gui/desktop run test:prod:open-folder-real
@@ -95,6 +111,13 @@ Linux CI currently validates packaging via:
 ```bash
 pnpm --filter @pi-gui/desktop run package:linux
 pnpm --dir apps/desktop run verify:packaged-runtime-deps:linux
+```
+
+Windows release CI validates packaging via:
+
+```bash
+pnpm --filter @pi-gui/desktop run package:win:dir
+pnpm --dir apps/desktop run verify:packaged-runtime-deps:windows
 ```
 
 ## Focus And Foreground Rules
@@ -167,6 +190,16 @@ That spec launches the app in development mode, edits isolated probe modules for
 - `pasteTinyPngViaClipboard()` uses Electron clipboard plus `webContents.paste()` and is appropriate for foreground/native coverage.
 - `tests/production/real-auth-contract.spec.ts` proves the default non-real-auth path still seeds a temporary fake-auth agent dir and keeps real-auth coverage opt-in.
 - `tests/production/packaged-smoke.spec.ts` proves the packaged `.app` bundle launches and can start a thread through the real UI.
+- `test:prod:packaged-computer-use-parity` builds once, verifies Computer Use failure shaping and timeline failure UI, packages the `.app` once, verifies the bundled Computer Use helper, extension, locked-use self-test, top-level @ extension surface, and packaged locked-readiness status, and then runs the real background Calculator/TextEdit cursor and focus probe with target-focus guarding while tolerating unrelated user focus changes. If the desktop is locked, it still runs the package-level checks and then stops before the background probe with `COMPUTER_USE_PARITY_GATE_BLOCKED`. Use this as the main Computer Use parity gate before claiming Codex-level behavior.
+- `test:prod:packaged-computer-use` packages the `.app` and verifies the bundled Computer Use helper, extension, locked-use self-test, and top-level @ extension surface.
+- `test:prod:packaged-computer-use-background` packages the `.app` and runs the real Computer Use helper against background Calculator and TextEdit flows without taking focus when macOS permissions allow it.
+- `test:prod:installed-computer-use-parity` builds current local artifacts, verifies `/Applications/pi-gui.app` carries the freshly built `out/**` payload, runtime workspace dependency payloads, and native Computer Use helper app payload, verifies Computer Use failure shaping and timeline UI, checks installed extension surfacing, helper background-safety capabilities, and locked-readiness status, then runs the installed background Calculator/TextEdit helper probe in preserve-frontmost mode when the desktop is unlocked. Preserve-frontmost mode skips the intentionally hazardous coordinate/physical fallback rejection probes so a stale helper cannot send fallback input into the user's active app, keeps helper-initiated physical mouse warps forbidden, and tolerates unrelated user pointer/focus changes while the active-user proof is running. If the desktop is locked it prints `COMPUTER_USE_INSTALLED_PARITY_GATE_SKIPPED installed-background-probe desktop=locked`; the gate later reruns the probe if the desktop becomes unlocked, or blocks with `COMPUTER_USE_INSTALLED_PARITY_GATE_BLOCKED` instead of passing by skipped live coverage. Full completion still requires locked-use active-turn wiring, explicit lock-screen E2E confirmation, and real-auth live composer coverage.
+- `test:prod:installed-computer-use-background` runs the same preserve-frontmost background Calculator/TextEdit helper probe against `/Applications/pi-gui.app`; use it after installing a new build to catch stale installed helpers before live UI testing without forcing Finder to the front. The default non-preserve background probe keeps the runtime coordinate/physical fallback rejection coverage on a controlled Finder baseline.
+- `test:prod:installed-computer-use-extension-surface` launches `/Applications/pi-gui.app` with isolated user data and verifies the installed app surfaces Computer Use as a top-level built-in extension in both Extensions and `@` mention flows, then clicks the Settings locked-use action through a non-mutating test hook to prove the installed UI would run the correct installer action.
+- `test:prod:installed-computer-use-locked-use-self-test` launches `/Applications/pi-gui.app` in test mode and verifies the installed helper can complete the trusted-desktop locked-use active-turn protocol through the installed desktop process.
+- `test:prod:installed-computer-use-live` launches `/Applications/pi-gui.app` with isolated test user data and real auth, sends a Computer Use prompt through the real composer, and fails if Calculator becomes frontmost, tool rows error, the run terminates generically, or the model uses `type_text` instead of Calculator clicks. It requires `PI_APP_REAL_AUTH=1` and `PI_APP_REAL_AUTH_SOURCE_DIR=/absolute/path/to/agent`, and the normal installed app should be idle/closed so Electron's single-instance lock does not route into a real user session.
+- `test:prod:installed-computer-use-locked-readiness` verifies `/Applications/pi-gui.app` is signed correctly and that Locked Computer Use is actually installed/enabled before claiming real locked-screen E2E coverage. Use the `:status` variant while diagnosing a locked or not-yet-enabled machine; it reports the same state without failing.
+- `test:prod:packaged-computer-use-locked-readiness:status` verifies the current packaged `.app` has the signed helper, authorization plug-in, installer, helper protocol, and status wiring without mutating macOS login authorization state.
 - `tests/production/applications-relaunch.spec.ts` proves an installed copy under `/Applications` launches and relaunches with persisted state.
 - `tests/production/release-zip-smoke.spec.ts` proves the packaged release ZIP can be extracted to a temp download-style path and launched through the real UI before publish.
 - `tests/production/open-folder-real.spec.ts` proves the real macOS open panel can add a workspace through the empty-state button.

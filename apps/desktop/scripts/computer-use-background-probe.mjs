@@ -1,0 +1,874 @@
+import { spawn, execFile } from "node:child_process";
+import { access, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const desktopDir = path.resolve(scriptDir, "..");
+const helperExecutableName = "pi-gui-computer-use-helper";
+const helperAppName = "pi-gui Computer Use.app";
+const lockedUseInstallerExecutableName = "pi-gui-computer-use-locked-use-installer";
+const lockedUseInstallerPathEnv = "PI_GUI_COMPUTER_USE_LOCKED_USE_INSTALLER_PATH";
+const allowPhysicalInputEnv = "PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT";
+const defaultHelperAppExecutablePath = path.join(
+  desktopDir,
+  "build",
+  "native",
+  helperAppName,
+  "Contents",
+  "MacOS",
+  helperExecutableName,
+);
+const defaultHelperPath = path.join(desktopDir, "build", "native", "pi-gui-computer-use-helper");
+const defaultLockedUseInstallerPath = path.join(desktopDir, "build", "native", lockedUseInstallerExecutableName);
+const defaultHelperAppLockedUseInstallerPath = path.join(
+  desktopDir,
+  "build",
+  "native",
+  helperAppName,
+  "Contents",
+  "SharedSupport",
+  lockedUseInstallerExecutableName,
+);
+const installedHelperAppExecutablePath = path.join(
+  "/Applications",
+  "pi-gui.app",
+  "Contents",
+  "SharedSupport",
+  helperAppName,
+  "Contents",
+  "MacOS",
+  helperExecutableName,
+);
+const installedHelperPath = "/Applications/pi-gui.app/Contents/MacOS/pi-gui-computer-use-helper";
+const installedLockedUseInstallerPath = path.join(
+  "/Applications",
+  "pi-gui.app",
+  "Contents",
+  "SharedSupport",
+  helperAppName,
+  "Contents",
+  "SharedSupport",
+  lockedUseInstallerExecutableName,
+);
+const scriptArgs = process.argv.slice(2);
+const knownFlags = new Set(["--capabilities-only", "--packaged", "--installed", "--preserve-frontmost"]);
+const capabilitiesOnly = scriptArgs.includes("--capabilities-only");
+const preserveFrontmost = scriptArgs.includes("--preserve-frontmost");
+const unknownFlags = scriptArgs.filter((arg) => arg.startsWith("--") && !knownFlags.has(arg));
+const helperPathArg =
+  scriptArgs.find((arg) => arg === "--packaged" || arg === "--installed") ??
+  scriptArgs.find((arg) => !arg.startsWith("--"));
+const lockedUseAuthorizationProtocolVersion = "pi-gui-computer-use-active-turn-v1";
+const helperPath =
+  helperPathArg === "--packaged"
+    ? await firstExistingPath(packagedHelperCandidates())
+    : helperPathArg === "--installed"
+      ? await firstExistingPath([installedHelperAppExecutablePath, installedHelperPath])
+    : helperPathArg ??
+      (await firstExistingPath([
+        defaultHelperAppExecutablePath,
+        defaultHelperPath,
+        installedHelperAppExecutablePath,
+        installedHelperPath,
+      ]));
+const lockedUseInstallerPath =
+  process.env[lockedUseInstallerPathEnv]?.trim() || (await firstExistingPath(lockedUseInstallerCandidates()));
+const configuredHelperTimeoutMs = Number.parseInt(process.env.PI_GUI_COMPUTER_USE_PROBE_TIMEOUT_MS ?? "", 10);
+const helperTimeoutMs =
+  Number.isFinite(configuredHelperTimeoutMs) && configuredHelperTimeoutMs > 0 ? configuredHelperTimeoutMs : 15_000;
+const strictFocusGuard = process.env.PI_GUI_COMPUTER_USE_STRICT_FOCUS_GUARD === "1";
+const allowUserFocusChanges = process.env.PI_GUI_COMPUTER_USE_ALLOW_USER_FOCUS_CHANGES === "1";
+const allowUserPointerChanges = process.env.PI_GUI_COMPUTER_USE_ALLOW_USER_POINTER_CHANGES === "1";
+const allowTextEditTakeover = process.env.PI_GUI_COMPUTER_USE_ALLOW_TEXTEDIT_TAKEOVER === "1";
+const physicalMouseTolerance = 0.5;
+const cursorPositionPath = path.join(tmpdir(), "pi-gui-computer-use-agent-cursor-position");
+const cursorPidPath = path.join(tmpdir(), "pi-gui-computer-use-agent-cursor.pid");
+const persistentCursorOptions = Object.freeze({
+  showCursor: true,
+  cursorDurationMs: helperTimeoutMs + 5_000,
+  cursorGlideMs: 300,
+});
+
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}
+
+async function main() {
+  assertKnownFlags();
+  await access(helperPath);
+  await assertHelperSupportsActiveTurnProtocol();
+  await assertHelperSupportsBackgroundSafetyGuards();
+  if (capabilitiesOnly) {
+    console.log(
+      `COMPUTER_USE_BACKGROUND_CAPABILITIES_OK helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
+    );
+    return;
+  }
+  await removeCursorArtifacts();
+  await assertUnlockedDesktop();
+  if (preserveFrontmost && (await frontmostApp()) === "Calculator") {
+    throw new Error(
+      "Preserve-frontmost Computer Use background probe cannot run while Calculator is frontmost. Put another app in front before rerunning it.",
+    );
+  }
+  await execFileAsync("osascript", ["-e", 'if application "Calculator" is running then tell application "Calculator" to quit']);
+  await sleep(500);
+  const frontmostBefore = await prepareFocusForAction("Calculator", "launch Calculator in background");
+
+  await execFileAsync("open", ["-g", "-a", "Calculator"]);
+  await waitForApp("Calculator");
+  await assertTargetDidNotBecomeFrontmost("launch Calculator in background", frontmostBefore, "Calculator");
+
+  const initialCalculatorState = await runWithFocusGuard({ command: "get_app_state", app: "Calculator" }, "get_app_state");
+  await runUnsafeFallbackProbesUnlessPreservingFrontmost(initialCalculatorState);
+  await runElementClickProbe(initialCalculatorState);
+
+  for (const key of ["kp_clear", "kp_clear", "7", "plus", "8", "kp_equal"]) {
+    await runWithFocusGuard({ command: "press_key", app: "Calculator", key }, `press_key ${key}`);
+  }
+
+  const finalState = await runWithFocusGuard({ command: "get_app_state", app: "Calculator" }, "final get_app_state");
+  const finalText = finalState.content?.filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n") ?? "";
+  if (!calculatorDisplays(finalText, "15")) {
+    throw new Error("Calculator did not expose result 15 after 7 + 8.");
+  }
+
+  await runTextEditTypingProbe();
+
+  console.log(
+    `COMPUTER_USE_BACKGROUND_E2E_OK target=Calculator,TextEdit focus_mode=${preserveFrontmost ? "preserve_frontmost" : "finder_baseline"} frontmost_start=${frontmostBefore} result=15 textedit="Alpha Beta" physical_mouse=guarded fallback_probes=${preserveFrontmost ? "skipped_preserve_frontmost" : "runtime_checked"} stale_cursor_pid=guarded helper=${helperPath} locked_use_installer=${lockedUseInstallerPath}`,
+  );
+}
+
+function assertKnownFlags() {
+  if (unknownFlags.length > 0) {
+    throw new Error(`Unknown Computer Use background probe flag: ${unknownFlags.join(", ")}`);
+  }
+}
+
+async function assertHelperSupportsActiveTurnProtocol() {
+  let stdout = "";
+  try {
+    const result = await execFileAsync(helperPath, ["--lock-screen-authorization-protocol-version"], { timeout: 2_000 });
+    stdout = result.stdout.trim();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; it does not support active-turn locked-use authorization. Reinstall the latest pi-gui.app before running this probe. ${detail}`,
+    );
+  }
+
+  if (stdout !== lockedUseAuthorizationProtocolVersion) {
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; expected ${lockedUseAuthorizationProtocolVersion}, got ${stdout || "<empty>"}. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+}
+
+async function assertHelperSupportsBackgroundSafetyGuards() {
+  const helperSource = await readFile(helperPath, "latin1");
+  if (!helperSource.includes("PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP")) {
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; it does not support the physical mouse guard. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+  if (
+    !helperSource.includes("PI_GUI_COMPUTER_USE_ALLOW_PHYSICAL_INPUT") ||
+    !helperSource.includes("would require foreground physical input")
+  ) {
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; it does not support foreground physical-input rejection. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+  if (
+    !helperSource.includes("PI_GUI_COMPUTER_USE_SHOW_CURSOR") ||
+    !helperSource.includes("PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS") ||
+    !helperSource.includes("PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS") ||
+    !helperSource.includes("--cursor-overlay-daemon")
+  ) {
+    throw new Error(
+      `Computer Use helper is stale or incompatible at ${helperPath}; it does not support the persistent smooth agent cursor overlay. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+}
+
+async function assertUnlockedDesktop() {
+  const status = await runHelper({ command: "status" });
+  if (status.details?.screenLocked === "true") {
+    const statusText = stateText(status) || "Computer Use status unavailable.";
+    throw new Error(
+      `Computer Use background probe cannot run while the desktop is locked.\n${statusText}\nUnlock the desktop before rerunning this background probe. Locked Computer Use uses a separate active-turn authorization path.`,
+    );
+  }
+
+  try {
+    await runHelper({ command: "get_app_state", app: "Finder" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Computer Use is unavailable while the Mac is locked")) {
+      throw new Error(message);
+    }
+  }
+}
+
+async function firstExistingPath(paths) {
+  for (const candidate of paths) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return paths[0];
+}
+
+function packagedHelperCandidates() {
+  return ["mac-arm64", "mac", "mac-universal"].flatMap((outputDir) => {
+    const appBundle = path.join(desktopDir, "release", outputDir, "pi-gui.app");
+    return [
+      path.join(appBundle, "Contents", "SharedSupport", helperAppName, "Contents", "MacOS", helperExecutableName),
+      path.join(appBundle, "Contents", "MacOS", helperExecutableName),
+    ];
+  });
+}
+
+function lockedUseInstallerCandidates() {
+  if (helperPathArg === "--packaged") {
+    return packagedLockedUseInstallerCandidates();
+  }
+  if (helperPathArg === "--installed") {
+    return [installedLockedUseInstallerPath];
+  }
+  if (helperPathArg) {
+    return lockedUseInstallerCandidatesForHelper(helperPath);
+  }
+  return [
+    defaultHelperAppLockedUseInstallerPath,
+    defaultLockedUseInstallerPath,
+    installedLockedUseInstallerPath,
+  ];
+}
+
+function packagedLockedUseInstallerCandidates() {
+  return ["mac-arm64", "mac", "mac-universal"].flatMap((outputDir) => {
+    const appBundle = path.join(desktopDir, "release", outputDir, "pi-gui.app");
+    return [
+      path.join(
+        appBundle,
+        "Contents",
+        "SharedSupport",
+        helperAppName,
+        "Contents",
+        "SharedSupport",
+        lockedUseInstallerExecutableName,
+      ),
+      path.join(appBundle, "Contents", "MacOS", lockedUseInstallerExecutableName),
+    ];
+  });
+}
+
+function lockedUseInstallerCandidatesForHelper(resolvedHelperPath) {
+  const helperDir = path.dirname(resolvedHelperPath);
+  return [
+    path.join(helperDir, "..", "SharedSupport", lockedUseInstallerExecutableName),
+    path.join(helperDir, lockedUseInstallerExecutableName),
+  ];
+}
+
+async function activateFinder() {
+  await execFileAsync("osascript", ["-e", 'tell application "Finder" to activate']);
+  await sleep(300);
+}
+
+async function runWithFocusGuard(request, action, options = {}) {
+  const before = await prepareFocusForAction(request.app, action);
+  const mouseBefore = await physicalMouseLocation(`${action} before`);
+  const response = await runHelper(request, options);
+  await assertPhysicalMouseDidNotMove(action, mouseBefore);
+  await assertTargetDidNotBecomeFrontmost(action, before, request.app);
+  return response;
+}
+
+async function prepareFocusForAction(targetApp, action) {
+  if (!preserveFrontmost) {
+    await activateFinder();
+  }
+  const before = await frontmostApp();
+  if (before === targetApp) {
+    throw new Error(
+      preserveFrontmost
+        ? `${action} cannot prove background behavior because ${targetApp} is already frontmost. Put another app in front before running the preserve-frontmost probe.`
+        : `Could not put a non-target app in front before ${action}.`,
+    );
+  }
+  return before;
+}
+
+async function runElementClickProbe(initialState) {
+  const sevenButtonIndex = findButtonElementIndex(stateText(initialState), "7");
+  const eightButtonIndex = findButtonElementIndex(stateText(initialState), "8");
+  await seedStaleCursorDaemonPid();
+  const beforeCursor = await readCursorRequest();
+  await runWithFocusGuard(
+    {
+      command: "click",
+      app: "Calculator",
+      element_index: sevenButtonIndex,
+    },
+    "Calculator element click",
+    persistentCursorOptions,
+  );
+  const afterCursor = await readCursorRequest();
+  assertCursorAdvanced(beforeCursor, afterCursor, "Calculator element click");
+  assertCursorReleased(afterCursor, "Calculator element click");
+  const cursorDaemonPid = await assertCursorOverlayDaemonRunning("Calculator element click");
+  await runWithFocusGuard(
+    {
+      command: "click",
+      app: "Calculator",
+      element_index: eightButtonIndex,
+    },
+    "Calculator second element click",
+    persistentCursorOptions,
+  );
+  const secondCursor = await readCursorRequest();
+  assertCursorAdvanced(afterCursor, secondCursor, "Calculator second element click");
+  assertCursorReleased(secondCursor, "Calculator second element click");
+  if (secondCursor.x === afterCursor.x && secondCursor.y === afterCursor.y) {
+    throw new Error("Repeated Calculator element clicks did not move the agent cursor between button centers.");
+  }
+  const secondCursorDaemonPid = await assertCursorOverlayDaemonRunning("Calculator second element click");
+  if (secondCursorDaemonPid !== cursorDaemonPid) {
+    throw new Error(
+      `Calculator element clicks did not reuse the persistent agent cursor overlay daemon: ${cursorDaemonPid} -> ${secondCursorDaemonPid}.`,
+    );
+  }
+}
+
+async function runUnsafeFallbackProbesUnlessPreservingFrontmost(initialState) {
+  if (preserveFrontmost) {
+    console.log("COMPUTER_USE_BACKGROUND_PROBE_SKIPPED fallback-probes focus_mode=preserve_frontmost");
+    return;
+  }
+
+  await runOutOfBoundsCoordinateProbe(initialState);
+  await runPhysicalPointerFallbackProbe(initialState);
+  await runForegroundPhysicalFallbackProbes(initialState);
+}
+
+async function seedStaleCursorDaemonPid() {
+  await writeFile(cursorPidPath, `${process.pid}\n`, "utf8");
+}
+
+async function runOutOfBoundsCoordinateProbe(initialState) {
+  const dimensions = screenshotDimensions(initialState, "out-of-bounds coordinate coverage");
+  const before = await prepareFocusForAction("Calculator", "out-of-bounds coordinate probe");
+  const beforeCursor = await readCursorRequest();
+  const mouseBefore = await physicalMouseLocation("out-of-bounds coordinate probe before");
+  let errorMessage = "";
+  try {
+    await runHelper(
+      {
+        command: "click",
+        app: "Calculator",
+        x: dimensions.width + 20,
+        y: Math.round(dimensions.height / 2),
+      },
+      { showCursor: true },
+    );
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  if (!errorMessage.includes("outside the target window screenshot bounds")) {
+    throw new Error(`Out-of-bounds coordinate click was not rejected clearly: ${errorMessage || "<no error>"}`);
+  }
+  await assertPhysicalMouseDidNotMove("rejected out-of-bounds coordinate click", mouseBefore);
+  await assertTargetDidNotBecomeFrontmost("rejected out-of-bounds coordinate click", before, "Calculator");
+  const afterCursor = await readCursorRequest();
+  if (afterCursor?.timestamp !== beforeCursor?.timestamp) {
+    throw new Error("Rejected out-of-bounds coordinate click moved the agent cursor.");
+  }
+}
+
+async function runPhysicalPointerFallbackProbe(initialState) {
+  const dimensions = screenshotDimensions(initialState, "physical pointer fallback coverage");
+  const before = await prepareFocusForAction("Calculator", "physical pointer fallback probe");
+  const beforeCursor = await readCursorRequest();
+  const mouseBefore = await physicalMouseLocation("physical pointer fallback probe before");
+  let errorMessage = "";
+  try {
+    await runHelper(
+      {
+        command: "click",
+        app: "Calculator",
+        x: Math.round(dimensions.width * 0.25),
+        y: Math.round(dimensions.height * 0.16),
+      },
+      { showCursor: true },
+    );
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  if (!errorMessage.includes("would require foreground physical input")) {
+    throw new Error(`Physical pointer fallback was not rejected clearly: ${errorMessage || "<no error>"}`);
+  }
+  await assertPhysicalMouseDidNotMove("rejected physical pointer fallback click", mouseBefore);
+  await assertTargetDidNotBecomeFrontmost("rejected physical pointer fallback click", before, "Calculator");
+  const afterCursor = await readCursorRequest();
+  if (afterCursor?.timestamp !== beforeCursor?.timestamp) {
+    throw new Error("Rejected physical pointer fallback click moved the agent cursor.");
+  }
+}
+
+async function runForegroundPhysicalFallbackProbes(initialState) {
+  const dimensions = screenshotDimensions(initialState, "foreground physical fallback coverage");
+  const fallbackCases = [
+    {
+      action: "Calculator foreground scroll fallback",
+      request: { command: "scroll", app: "Calculator", direction: "down", pages: 0.5 },
+    },
+    {
+      action: "Calculator foreground drag fallback",
+      request: {
+        command: "drag",
+        app: "Calculator",
+        from_x: Math.round(dimensions.width * 0.25),
+        from_y: Math.round(dimensions.height * 0.25),
+        to_x: Math.round(dimensions.width * 0.5),
+        to_y: Math.round(dimensions.height * 0.5),
+      },
+    },
+    {
+      action: "Calculator foreground key fallback",
+      request: { command: "press_key", app: "Calculator", key: "escape" },
+    },
+    {
+      action: "Calculator foreground text fallback",
+      request: { command: "type_text", app: "Calculator", text: "abc" },
+    },
+  ];
+
+  for (const fallbackCase of fallbackCases) {
+    await expectForegroundPhysicalFallbackRejected(fallbackCase.request, fallbackCase.action);
+  }
+}
+
+async function expectForegroundPhysicalFallbackRejected(request, action) {
+  const before = await prepareFocusForAction(request.app, action);
+  const beforeCursor = await readCursorRequest();
+  const mouseBefore = await physicalMouseLocation(`${action} before`);
+  let errorMessage = "";
+  try {
+    await runHelper(request, { showCursor: true });
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  if (!errorMessage.includes("would require foreground physical input")) {
+    throw new Error(`${action} was not rejected clearly: ${errorMessage || "<no error>"}`);
+  }
+  await assertPhysicalMouseDidNotMove(`rejected ${action}`, mouseBefore);
+  await assertTargetDidNotBecomeFrontmost(`rejected ${action}`, before, request.app);
+  const afterCursor = await readCursorRequest();
+  if (afterCursor?.timestamp !== beforeCursor?.timestamp) {
+    throw new Error(`Rejected ${action} moved the agent cursor.`);
+  }
+}
+
+async function waitForApp(appName) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const apps = await listApps();
+    if (apps.some((line) => line.startsWith(`${appName} — `) && line.includes("running]"))) {
+      return;
+    }
+    await sleep(150);
+  }
+  await throwIfLocked(appName);
+  throw new Error(`${appName} did not appear as running in Computer Use list_apps output.`);
+}
+
+async function runTextEditTypingProbe() {
+  const textEditWasRunning = await isTextEditRunning();
+  if (textEditWasRunning && !allowTextEditTakeover) {
+    throw new Error(
+      "TextEdit is already running; close it before this probe, or set PI_GUI_COMPUTER_USE_ALLOW_TEXTEDIT_TAKEOVER=1 to allow the probe to quit it without saving.",
+    );
+  }
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), "pi-gui-computer-use-textedit-"));
+  const documentPath = path.join(tempDir, "background-typing.txt");
+  await writeFile(documentPath, "Alpha", "utf8");
+
+  try {
+    if (textEditWasRunning) {
+      await quitTextEditWithoutSaving();
+      await sleep(500);
+    }
+    const before = await prepareFocusForAction("TextEdit", "launch TextEdit in background");
+
+    await execFileAsync("open", ["-g", "-a", "TextEdit", documentPath]);
+    await waitForApp("TextEdit");
+    await assertTargetDidNotBecomeFrontmost("launch TextEdit in background", before, "TextEdit");
+
+    const initialState = await runWithFocusGuard({ command: "get_app_state", app: "TextEdit" }, "TextEdit get_app_state");
+    const initialText = stateText(initialState);
+    const textElementIndex = findEditableTextElementIndex(initialText, "Alpha");
+    const beforeSelectCursor = await readCursorRequest();
+    await runWithFocusGuard(
+      {
+        command: "select_text",
+        app: "TextEdit",
+        element_index: textElementIndex,
+        text: "Alpha",
+        selection: "cursor_after",
+      },
+      "TextEdit select_text",
+      persistentCursorOptions,
+    );
+    const afterSelectCursor = await readCursorRequest();
+    assertCursorAdvanced(beforeSelectCursor, afterSelectCursor, "TextEdit select_text");
+    const textEditCursorDaemonPid = await assertCursorOverlayDaemonRunning("TextEdit select_text");
+    const beforeTypeCursor = await readCursorRequest();
+    const finalState = await runWithFocusGuard(
+      { command: "type_text", app: "TextEdit", element_index: textElementIndex, text: " Beta" },
+      "TextEdit type_text",
+      persistentCursorOptions,
+    );
+    const afterTypeCursor = await readCursorRequest();
+    assertCursorAdvanced(beforeTypeCursor, afterTypeCursor, "TextEdit type_text");
+    const textEditTypeCursorDaemonPid = await assertCursorOverlayDaemonRunning("TextEdit type_text");
+    if (textEditTypeCursorDaemonPid !== textEditCursorDaemonPid) {
+      throw new Error(
+        `TextEdit actions did not reuse the persistent agent cursor overlay daemon: ${textEditCursorDaemonPid} -> ${textEditTypeCursorDaemonPid}.`,
+      );
+    }
+    if (!stateText(finalState).includes("Alpha Beta")) {
+      throw new Error("TextEdit did not expose typed background text Alpha Beta.");
+    }
+  } finally {
+    await quitTextEditWithoutSaving();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function isTextEditRunning() {
+  const { stdout } = await execFileAsync("osascript", ["-e", 'application "TextEdit" is running']);
+  return stdout.trim() === "true";
+}
+
+async function quitTextEditWithoutSaving() {
+  await execFileAsync("osascript", [
+    "-e",
+    'if application "TextEdit" is running then tell application "TextEdit" to quit saving no',
+  ]);
+}
+
+async function throwIfLocked(appName) {
+  try {
+    await runHelper({ command: "get_app_state", app: appName });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Computer Use is unavailable while the Mac is locked")) {
+      throw new Error(message);
+    }
+  }
+}
+
+async function frontmostApp() {
+  const { stdout } = await execFileAsync("osascript", [
+    "-e",
+    'tell application "System Events" to name of first application process whose frontmost is true',
+  ]);
+  const appName = stdout.trim();
+  if (!appName) {
+    throw new Error("Could not determine the frontmost app from System Events.");
+  }
+  return appName;
+}
+
+async function assertTargetDidNotBecomeFrontmost(action, expected, targetApp) {
+  const actual = await frontmostApp();
+  if (actual === targetApp) {
+    throw new Error(`${action} moved target app ${targetApp} to the front.`);
+  }
+  if (strictFocusGuard && actual !== expected) {
+    if (allowUserFocusChanges) {
+      console.warn(
+        `${action} observed frontmost app change from ${expected} to ${actual}; target app ${targetApp} stayed in the background.`,
+      );
+      return;
+    }
+    throw new Error(`${action} changed frontmost app from ${expected} to ${actual}.`);
+  }
+}
+
+async function physicalMouseLocation(action) {
+  const status = await runHelper({ command: "status" });
+  const x = Number.parseFloat(status.details?.physicalMouseX ?? "");
+  const y = Number.parseFloat(status.details?.physicalMouseY ?? "");
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error(
+      `${action} could not read physical mouse location from helper status. Reinstall the latest pi-gui.app before running this probe.`,
+    );
+  }
+  return { x, y };
+}
+
+async function assertPhysicalMouseDidNotMove(action, before) {
+  const after = await physicalMouseLocation(`${action} after`);
+  const deltaX = after.x - before.x;
+  const deltaY = after.y - before.y;
+  if (Math.abs(deltaX) <= physicalMouseTolerance && Math.abs(deltaY) <= physicalMouseTolerance) {
+    return;
+  }
+  const message = `${action} observed physical mouse movement from ${formatPoint(before)} to ${formatPoint(after)}.`;
+  if (allowUserPointerChanges) {
+    console.warn(`${message} Continuing because PI_GUI_COMPUTER_USE_ALLOW_USER_POINTER_CHANGES=1.`);
+    return;
+  }
+  throw new Error(message);
+}
+
+function formatPoint(point) {
+  return `${point.x.toFixed(1)},${point.y.toFixed(1)}`;
+}
+
+async function listApps() {
+  const response = await runHelper({ command: "list_apps" });
+  const text = response.content?.find((item) => item.type === "text")?.text;
+  if (!text) {
+    throw new Error("list_apps returned no text content.");
+  }
+  return text.split("\n").filter(Boolean);
+}
+
+function stateText(response) {
+  return response.content?.filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n") ?? "";
+}
+
+function screenshotDimensions(state, coverageName) {
+  const image = state.content?.find((item) => item.type === "image");
+  if (!image?.data) {
+    throw new Error(`Calculator get_app_state did not return a screenshot for ${coverageName}.`);
+  }
+  return pngDimensions(Buffer.from(image.data, "base64"));
+}
+
+function findEditableTextElementIndex(text, expectedValue) {
+  for (const line of text.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(text field|text area|combo box)\b.*Value:\s*(.*)$/i);
+    if (match && match[3].includes(expectedValue)) {
+      return match[1];
+    }
+  }
+  throw new Error(`Could not find editable text element containing ${expectedValue}.`);
+}
+
+function findButtonElementIndex(text, expectedDescription) {
+  for (const line of text.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+button\b.*Description:\s*([^,\n]*)/i);
+    if (match && match[2].trim() === expectedDescription) {
+      return match[1];
+    }
+  }
+  throw new Error(`Could not find button element with description ${expectedDescription}.`);
+}
+
+function runHelper(request, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(helperPath, [], {
+      env: helperEnv(options),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (error, response) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new Error(`Computer Use helper timed out after ${helperTimeoutMs}ms for ${request.command}.`));
+    }, helperTimeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      try {
+        const response = JSON.parse(stdout);
+        if (!response.ok) {
+          finish(new Error(response.error ?? "Computer Use helper failed."));
+          return;
+        }
+        finish(null, response);
+      } catch (error) {
+        if (code !== 0) {
+          finish(new Error(stderr.trim() || `Computer Use helper exited with code ${code}.`));
+          return;
+        }
+        finish(error);
+      }
+    });
+    child.stdin.end(`${JSON.stringify(request)}\n`);
+  });
+}
+
+function helperEnv(options) {
+  const env = {
+    ...process.env,
+    [lockedUseInstallerPathEnv]: lockedUseInstallerPath,
+    [allowPhysicalInputEnv]: "0",
+    PI_GUI_COMPUTER_USE_TEST_INCLUDE_PHYSICAL_MOUSE_STATUS: "1",
+    PI_GUI_COMPUTER_USE_TEST_FORBID_MOUSE_WARP: "1",
+  };
+  if (options.showCursor) {
+    return {
+      ...env,
+      PI_GUI_COMPUTER_USE_SHOW_CURSOR: "1",
+      PI_GUI_COMPUTER_USE_CURSOR_DURATION_MS: `${options.cursorDurationMs ?? 250}`,
+      PI_GUI_COMPUTER_USE_CURSOR_GLIDE_MS: `${options.cursorGlideMs ?? 80}`,
+    };
+  }
+  return { ...env, PI_GUI_COMPUTER_USE_SHOW_CURSOR: "0" };
+}
+
+async function removeCursorArtifacts() {
+  await removePath(cursorPositionPath);
+  await removePath(cursorPidPath);
+}
+
+async function removePath(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function assertCursorOverlayDaemonRunning(action) {
+  const deadline = Date.now() + 1_000;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    const pid = await readCursorDaemonPid();
+    if (pid) {
+      try {
+        const { stdout } = await execFileAsync("ps", ["-p", `${pid}`, "-o", "command="], { timeout: 1_000 });
+        const command = stdout.trim();
+        if (command.includes(helperExecutableName) && command.includes("--cursor-overlay-daemon")) {
+          return pid;
+        }
+        lastError = `pid ${pid} command was ${command || "<empty>"}`;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      lastError = "cursor daemon pid file was not written";
+    }
+    await sleep(50);
+  }
+  throw new Error(`${action} did not start the persistent agent cursor overlay daemon: ${lastError}`);
+}
+
+async function readCursorDaemonPid() {
+  try {
+    const rawValue = await readFile(cursorPidPath, "utf8");
+    const pid = Number.parseInt(rawValue.trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function readCursorRequest() {
+  try {
+    const rawValue = await readFile(cursorPositionPath, "utf8");
+    const [x, y, timestamp, pressed] = rawValue.trim().split(",");
+    return {
+      x: Number.parseFloat(x),
+      y: Number.parseFloat(y),
+      timestamp: Number.parseFloat(timestamp),
+      pressed: pressed === "1",
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function assertCursorAdvanced(before, after, action) {
+  if (!after || !Number.isFinite(after.timestamp)) {
+    throw new Error(`${action} did not write an agent cursor request.`);
+  }
+  if (before && after.timestamp <= before.timestamp) {
+    throw new Error(`${action} did not advance the agent cursor request timestamp.`);
+  }
+  if (!Number.isFinite(after.x) || !Number.isFinite(after.y)) {
+    throw new Error(`${action} wrote an invalid agent cursor position.`);
+  }
+}
+
+function assertCursorReleased(cursor, action) {
+  if (cursor?.pressed) {
+    throw new Error(`${action} left the persistent agent cursor in the pressed state after the action completed.`);
+  }
+}
+
+function pngDimensions(buffer) {
+  const signature = "89504e470d0a1a0a";
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString("hex") !== signature) {
+    throw new Error("Computer Use screenshot is not a PNG.");
+  }
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  };
+}
+
+function calculatorDisplays(stateText, expected) {
+  const valuePattern = new RegExp(`(^|[^0-9])${expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\.0)?([^0-9]|$)`);
+  return stateText
+    .split("\n")
+    .map((line) => line.replace(/^\s*\d+\s+/, ""))
+    .some((line) => {
+      const lower = line.toLowerCase();
+      return (
+        !lower.includes("button") &&
+        /value|description|display|result|text/.test(lower) &&
+        valuePattern.test(line)
+      );
+    });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -5,16 +5,8 @@ const REMARK_PLUGINS = [remarkGfm];
 
 const MARKDOWN_COMPONENTS = {
   code: ({ className, children }: { className?: string; children?: React.ReactNode }) => {
-    const language = className?.replace(/^language-/, "");
     const code = String(children).replace(/\n$/, "");
-    if (!className) {
-      return <code>{code}</code>;
-    }
-    return (
-      <pre data-language={language}>
-        <code className={className}>{code}</code>
-      </pre>
-    );
+    return <code className={className}>{code}</code>;
   },
   a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
     <a href={href} rel="noreferrer" target="_blank">

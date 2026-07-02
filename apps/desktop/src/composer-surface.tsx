@@ -1,5 +1,6 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { ComposerAttachment } from "./desktop-state";
+import type { MentionOption } from "./hooks/use-mention-menu";
 import type {
   ComposerSlashCommand,
   ComposerSlashCommandSection,
@@ -8,8 +9,11 @@ import type {
 } from "./composer-commands";
 import { hasFilesInDataTransfer } from "./composer-attachments";
 import { ExtensionDock, type ExtensionDockModel } from "./extension-session-ui";
-import { FileIcon, ModelIcon, ReasoningIcon, SettingsIcon, SkillIcon, SparkIcon, StatusIcon } from "./icons";
+import { ExtensionIcon, FileIcon, ModelIcon, ReasoningIcon, SettingsIcon, SkillIcon, SparkIcon, StatusIcon } from "./icons";
 import { QueuedComposerMessages } from "./queued-composer-messages";
+
+type ExtensionMentionOption = Extract<MentionOption, { kind: "extension" }>;
+type FileMentionOption = Extract<MentionOption, { kind: "file" }>;
 
 interface ComposerSurfaceProps {
   readonly lastError?: string;
@@ -41,9 +45,10 @@ interface ComposerSurfaceProps {
   readonly onSelectSlashCommand: (command: ComposerSlashCommand) => void;
   readonly onSelectSlashOption: (option: ComposerSlashOption) => void;
   readonly showMentionMenu: boolean;
-  readonly mentionOptions: readonly string[];
+  readonly mentionOptions: readonly MentionOption[];
   readonly selectedMentionIndex: number;
-  readonly onSelectMention: (filePath: string) => void;
+  readonly onSelectMention: (option: MentionOption) => void;
+  readonly onEnableMentionExtension: (option: ExtensionMentionOption) => void;
   readonly textareaLabel: string;
   readonly textareaTestId: string;
   readonly textareaPlaceholder: string;
@@ -87,6 +92,7 @@ export function ComposerSurface({
   mentionOptions,
   selectedMentionIndex,
   onSelectMention,
+  onEnableMentionExtension,
   textareaLabel,
   textareaTestId,
   textareaPlaceholder,
@@ -224,22 +230,12 @@ export function ComposerSurface({
         {showMentionMenu ? (
           <div className="composer__menus">
             <div className="mention-menu" data-testid="mention-menu" onWheel={(event) => event.stopPropagation()}>
-              {mentionOptions.map((filePath, index) => {
-                const lastSlash = filePath.lastIndexOf("/");
-                const dirPart = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "";
-                const namePart = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
-                return (
-                  <button
-                    className={`mention-menu__item ${index === selectedMentionIndex ? "mention-menu__item--active" : ""}`}
-                    key={filePath}
-                    type="button"
-                    onClick={() => onSelectMention(filePath)}
-                  >
-                    {dirPart ? <span className="mention-menu__dirname">{dirPart}</span> : null}
-                    <span className="mention-menu__filename">{namePart}</span>
-                  </button>
-                );
-              })}
+              <MentionMenuSections
+                options={mentionOptions}
+                selectedIndex={selectedMentionIndex}
+                onSelect={onSelectMention}
+                onEnableExtension={onEnableMentionExtension}
+              />
             </div>
           </div>
         ) : null}
@@ -336,6 +332,153 @@ export function ComposerSurface({
         <div className="composer__bar">{footer}</div>
       </div>
     </div>
+  );
+}
+
+function MentionMenuSections({
+  options,
+  selectedIndex,
+  onSelect,
+  onEnableExtension,
+}: {
+  readonly options: readonly MentionOption[];
+  readonly selectedIndex: number;
+  readonly onSelect: (option: MentionOption) => void;
+  readonly onEnableExtension: (option: ExtensionMentionOption) => void;
+}) {
+  const extensionOptions = options.filter((option): option is ExtensionMentionOption => option.kind === "extension");
+  const fileOptions = options.filter((option): option is FileMentionOption => option.kind === "file");
+
+  return (
+    <>
+      {extensionOptions.length > 0 ? (
+        <MentionMenuSection
+          title="Extensions"
+          options={extensionOptions}
+          selectedIndex={selectedIndex}
+          allOptions={options}
+          onSelect={onSelect}
+          onEnableExtension={onEnableExtension}
+        />
+      ) : null}
+      {fileOptions.length > 0 ? (
+        <MentionMenuSection
+          title="Files"
+          options={fileOptions}
+          selectedIndex={selectedIndex}
+          allOptions={options}
+          onSelect={onSelect}
+          onEnableExtension={onEnableExtension}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function MentionMenuSection({
+  title,
+  options,
+  selectedIndex,
+  allOptions,
+  onSelect,
+  onEnableExtension,
+}: {
+  readonly title: string;
+  readonly options: readonly MentionOption[];
+  readonly selectedIndex: number;
+  readonly allOptions: readonly MentionOption[];
+  readonly onSelect: (option: MentionOption) => void;
+  readonly onEnableExtension: (option: ExtensionMentionOption) => void;
+}) {
+  return (
+    <div className="mention-menu__section">
+      <div className="mention-menu__section-title">{title}</div>
+      {options.map((option) => (
+        <MentionMenuItem
+          key={option.id}
+          option={option}
+          active={allOptions[selectedIndex]?.id === option.id}
+          onSelect={onSelect}
+          onEnableExtension={onEnableExtension}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MentionMenuItem({
+  option,
+  active,
+  onSelect,
+  onEnableExtension,
+}: {
+  readonly option: MentionOption;
+  readonly active: boolean;
+  readonly onSelect: (option: MentionOption) => void;
+  readonly onEnableExtension: (option: ExtensionMentionOption) => void;
+}) {
+  if (option.kind === "extension") {
+    return (
+      <div
+        className={`mention-menu__item mention-menu__item--extension ${active ? "mention-menu__item--active" : ""} ${option.enabled ? "" : "mention-menu__item--disabled"}`}
+      >
+        <button
+          className="mention-menu__item-main"
+          disabled={option.enabling}
+          type="button"
+          onClick={() => {
+            if (option.enabled) {
+              onSelect(option);
+              return;
+            }
+            onEnableExtension(option);
+          }}
+        >
+          <span className="mention-menu__icon" aria-hidden="true">
+            <ExtensionIcon />
+          </span>
+          <span className="mention-menu__content">
+            <span className="mention-menu__line">
+              <span className="mention-menu__filename">{option.displayName}</span>
+              {option.enabled ? null : (
+                <span className="mention-menu__badge">{option.enabling ? "Enabling" : "Disabled"}</span>
+              )}
+            </span>
+            <span className="mention-menu__description">{option.description}</span>
+          </span>
+        </button>
+        {option.enabled ? null : (
+          <button
+            aria-label={`Enable ${option.displayName}`}
+            className="mention-menu__enable"
+            disabled={option.enabling}
+            type="button"
+            onClick={() => onEnableExtension(option)}
+          >
+            {option.enabling ? "Enabling" : "Enable"}
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const lastSlash = option.filePath.lastIndexOf("/");
+  const dirPart = lastSlash >= 0 ? option.filePath.slice(0, lastSlash + 1) : "";
+  const namePart = lastSlash >= 0 ? option.filePath.slice(lastSlash + 1) : option.filePath;
+  return (
+    <button
+      className={`mention-menu__item ${active ? "mention-menu__item--active" : ""}`}
+      type="button"
+      onClick={() => onSelect(option)}
+    >
+      <span className="mention-menu__icon" aria-hidden="true">
+        <FileIcon />
+      </span>
+      <span className="mention-menu__file">
+        {dirPart ? <span className="mention-menu__dirname">{dirPart}</span> : null}
+        <span className="mention-menu__filename">{namePart}</span>
+      </span>
+    </button>
   );
 }
 

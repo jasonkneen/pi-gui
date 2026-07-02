@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   commitAllInGitRepo,
+  createSessionViaIpc,
   desktopShortcut,
   getDesktopState,
   getTimelineScrollMetrics,
@@ -16,6 +17,7 @@ import {
   seedTranscriptMessages,
   streamAssistantDeltas,
 } from "../helpers/electron-app";
+import { appendMessagesToSessionFile, sessionFilePathFromCatalog } from "../helpers/session-file";
 
 const multilineDraft = [
   "line 1",
@@ -25,6 +27,8 @@ const multilineDraft = [
   "line 5",
   "line 6",
 ].join("\n");
+
+const TIMELINE_NEAR_BOTTOM_PX = 32;
 
 async function expectRowVisibleAboveComposer(window: Page, row: Locator, composerShell: Locator): Promise<void> {
   await expect.poll(async () => {
@@ -138,10 +142,12 @@ async function waitForStableVirtualizedBottom(
 ): Promise<Pick<TimelineStabilitySample, "visibleItemCount" | "renderedTextLength">> {
   let consecutiveStableSamples = 0;
   let baselineSample: TimelineStabilitySample | null = null;
+  let lastSample: TimelineStabilitySample | null = null;
 
   for (let index = 0; index < 150; index += 1) {
     const sample = await sampleTimelineStability(window, sentinelRow);
-    if (sample.virtualized && sample.remainingFromBottom <= 16 && sample.sentinelVisible) {
+    lastSample = sample;
+    if (sample.virtualized && sample.remainingFromBottom < TIMELINE_NEAR_BOTTOM_PX && sample.sentinelVisible) {
       consecutiveStableSamples += 1;
       baselineSample = sample;
       if (consecutiveStableSamples >= 5 && baselineSample) {
@@ -157,7 +163,9 @@ async function waitForStableVirtualizedBottom(
     await window.waitForTimeout(100);
   }
 
-  throw new Error("Timeline never reached a stable virtualized bottom state.");
+  throw new Error(
+    `Timeline never reached a stable virtualized bottom state. Last sample: ${JSON.stringify(lastSample)}`,
+  );
 }
 
 async function expectStableTimelineWindow(
@@ -172,7 +180,7 @@ async function expectStableTimelineWindow(
     const sample = await sampleTimelineStability(window, sentinelRow);
     expect(sample.virtualized).toBe(true);
     expect(sample.sentinelVisible).toBe(true);
-    expect(sample.remainingFromBottom).toBeLessThanOrEqual(16);
+    expect(sample.remainingFromBottom).toBeLessThan(TIMELINE_NEAR_BOTTOM_PX);
     expect(sample.visibleItemCount).toBeGreaterThanOrEqual(minimumVisibleItems);
     expect(sample.renderedTextLength).toBeGreaterThanOrEqual(minimumRenderedTextLength);
     await window.waitForTimeout(100);
@@ -376,7 +384,7 @@ test("restores the true bottom when reopening a virtualized thread with oversize
 
     const finalMarker = "VIRTUALIZED_RESTORE_FINAL_ROW";
     const oversizedLateRow = `VIRTUALIZED_RESTORE_OVERSIZED ${"wrapped restore content ".repeat(420)}`;
-    await seedTranscriptMessages(harness, window, {
+    const seeded = await seedTranscriptMessages(harness, window, {
       count: 110,
       textFactory: (index) => {
         if (index === 94 || index === 103) {
@@ -388,6 +396,12 @@ test("restores the true bottom when reopening a virtualized thread with oversize
         return `Virtualized restore row ${index} `.repeat(8);
       },
     });
+    // Transcripts are restored from pi's session file, so the seeded rows must
+    // exist there for them to survive the relaunch.
+    await appendMessagesToSessionFile(
+      await sessionFilePathFromCatalog(userDataDir, seeded.sessionRef),
+      seeded.messages.map((text) => ({ role: "assistant" as const, text })),
+    );
 
     await harness.close();
 
@@ -449,6 +463,130 @@ test("keeps a virtualized thread off-bottom after switching sessions", async () 
   }
 });
 
+test("restores a thread's saved off-bottom scroll position after switching sessions", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("timeline-pinning-session-switch-scroll");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const targetTitle = "Saved scroll restore target";
+    const neighborTitle = "Saved scroll neighbor";
+    await createTimelineSession(window, targetTitle);
+    await createTimelineSession(window, neighborTitle);
+    await expect(window.locator(".topbar__session")).toHaveText(neighborTitle);
+    await selectSession(window, targetTitle);
+    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
+
+    const finalMarker = "SESSION_SWITCH_SCROLL_FINAL_ROW";
+    await seedTranscriptMessages(harness, window, {
+      count: 78,
+      textFactory: (index) => {
+        if (index === 77) {
+          return `${finalMarker} ${"should stay below the restored viewport ".repeat(20)}`;
+        }
+        return `Saved scroll restore row ${index} `.repeat(20);
+      },
+    });
+
+    await jumpTimelineToBottom(window);
+    await expect.poll(async () => {
+      const metrics = await getTimelineScrollMetrics(window);
+      return metrics.scrollHeight - metrics.clientHeight;
+    }).toBeGreaterThan(700);
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await window.waitForTimeout(800);
+
+    await window.getByTestId("timeline-pane").hover();
+    await expect.poll(async () => {
+      await window.mouse.wheel(0, -520);
+      return (await getTimelineScrollMetrics(window)).remainingFromBottom;
+    }).toBeGreaterThan(700);
+    const savedMetrics = await getTimelineScrollMetrics(window);
+    expect(savedMetrics.remainingFromBottom).toBeGreaterThan(700);
+    await window.waitForTimeout(250);
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(700);
+
+    await selectSession(window, neighborTitle);
+    await expect(window.locator(".topbar__session")).toHaveText(neighborTitle);
+
+    await selectSession(window, targetTitle);
+    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(300);
+    await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
+
+    const restoredRemaining = (await getTimelineScrollMetrics(window)).remainingFromBottom;
+    await window.getByTestId("timeline-pane").hover();
+    await expect.poll(async () => {
+      await window.mouse.wheel(0, 520);
+      return restoredRemaining - (await getTimelineScrollMetrics(window)).remainingFromBottom;
+    }).toBeGreaterThan(120);
+    const userAdjustedRemaining = (await getTimelineScrollMetrics(window)).remainingFromBottom;
+    await window.waitForTimeout(2_300);
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(userAdjustedRemaining + 80);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("lands a reopened bottom-pinned thread without a smooth scroll from the top", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("timeline-pinning-open-no-smooth-scroll");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const targetTitle = "Open no smooth scroll target";
+    await createTimelineSession(window, targetTitle);
+
+    const finalMarker = "OPEN_NO_SMOOTH_FINAL_ROW";
+    await seedTranscriptMessages(harness, window, {
+      count: 24,
+      textFactory: (index) =>
+        index === 23
+          ? `${finalMarker} ${"should be at the bottom immediately ".repeat(6)}`
+          : `Open no smooth row ${index} `.repeat(8),
+    });
+
+    await jumpTimelineToBottom(window);
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+
+    await createTimelineSession(window, "Open no smooth neighbor");
+    await expect(window.locator(".topbar__session")).toHaveText("Open no smooth neighbor");
+    await selectSession(window, targetTitle);
+    await expect(window.getByTestId("transcript")).toContainText(finalMarker);
+    await expect.poll(async () => {
+      const metrics = await getTimelineScrollMetrics(window);
+      return metrics.scrollHeight > metrics.clientHeight + 32;
+    }).toBe(true);
+
+    const samples: number[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      samples.push((await getTimelineScrollMetrics(window)).remainingFromBottom);
+      await window.waitForTimeout(16);
+    }
+    const maxSample = Math.max(...samples);
+    expect(
+      maxSample,
+      `remaining-from-bottom samples after reopen: ${samples.join(", ")}`,
+    ).toBeLessThan(60);
+
+    await expect(window.locator(".timeline-item--assistant", { hasText: finalMarker })).toBeVisible();
+    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("keeps a reopened virtualized long transcript stable", async () => {
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
@@ -464,13 +602,19 @@ test("keeps a reopened virtualized long transcript stable", async () => {
     await createTimelineSession(window, targetTitle);
 
     const finalMarker = "VIRTUALIZED_STABLE_FINAL_ROW";
-    await seedTranscriptMessages(harness, window, {
+    const seeded = await seedTranscriptMessages(harness, window, {
       count: 110,
       textFactory: (index) =>
         index === 109
           ? `${finalMarker} ${"should remain visible after reopen ".repeat(6)}`
           : `Virtualized stable row ${index} `.repeat(8),
     });
+    // Transcripts are restored from pi's session file, so the seeded rows must
+    // exist there for them to survive the relaunch.
+    await appendMessagesToSessionFile(
+      await sessionFilePathFromCatalog(userDataDir, seeded.sessionRef),
+      seeded.messages.map((text) => ({ role: "assistant" as const, text })),
+    );
     const finalRow = window.locator(".timeline-item--assistant", { hasText: finalMarker });
     const preReopenBaseline = await waitForStableVirtualizedBottom(window, finalRow);
 
@@ -499,8 +643,9 @@ test("keeps a reopened virtualized long transcript stable", async () => {
     ]);
     const streamedRow = window.locator(".timeline-item--assistant", { hasText: pinnedStream.fullText });
     await expect(streamedRow).toBeVisible();
-    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedRow);
-    await expectStableTimelineWindow(window, streamedRow, streamedBaseline);
+    const streamedCompletionRow = window.locator(".timeline-summary", { hasText: "Worked for" }).last();
+    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedCompletionRow);
+    await expectStableTimelineWindow(window, streamedCompletionRow, streamedBaseline);
   } finally {
     await harness.close();
   }
@@ -645,6 +790,61 @@ test("keeps transcript pinning semantics while assistant deltas stream into the 
       return Math.abs(metrics.scrollTop - beforeScrollTop);
     }).toBeLessThanOrEqual(12);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(1);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("lands an opened thread at the bottom without a smooth scroll from the top", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("timeline-pinning-short-open-no-smooth-scroll");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const targetTitle = "Short open no smooth scroll";
+    const initialState = await getDesktopState(window);
+    const workspaceId = initialState.selectedWorkspaceId ?? initialState.workspaces[0]?.id ?? "";
+    if (!workspaceId) {
+      throw new Error("No workspace available");
+    }
+    await createSessionViaIpc(window, workspaceId, targetTitle);
+
+    const finalMarker = "SHORT_OPEN_NO_SMOOTH_FINAL_ROW";
+    await seedTranscriptMessages(harness, window, {
+      count: 20,
+      textFactory: (index) => (index === 19 ? finalMarker : `Short open row ${index} `.repeat(6)),
+    });
+
+    await jumpTimelineToBottom(window);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
+
+    await createSessionViaIpc(window, workspaceId, "Short open neighbor");
+    await selectSession(window, "Short open neighbor");
+    await selectSession(window, targetTitle);
+
+    // Sample the scroll position over ~12 frames after the open.
+    const samples: number[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      samples.push((await getTimelineScrollMetrics(window)).remainingFromBottom);
+      await window.waitForTimeout(16);
+    }
+    const maxSample = Math.max(...samples);
+    expect(
+      maxSample,
+      `scroll samples after open: ${samples.join(", ")} (max ${maxSample})`,
+    ).toBeLessThan(60);
+
+    await expect(window.locator(".timeline-item--assistant", { hasText: finalMarker })).toBeVisible();
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom, { timeout: 5_000 })
+      .toBeLessThanOrEqual(16);
   } finally {
     await harness.close();
   }

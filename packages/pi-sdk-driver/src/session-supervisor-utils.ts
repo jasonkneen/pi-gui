@@ -10,7 +10,7 @@ import type {
   WorkspaceRef,
 } from "@pi-gui/session-driver";
 import type { SessionQueuedMessage } from "@pi-gui/session-driver/types";
-import type { SessionTranscriptAttachment, SessionTranscriptMessage } from "./transcript.js";
+import type { SessionTranscriptAttachment, SessionTranscriptItem } from "./transcript.js";
 
 const FILE_ATTACHMENT_BLOCK_START = "<pi-gui-file-attachments>";
 const FILE_ATTACHMENT_BLOCK_END = "</pi-gui-file-attachments>";
@@ -219,8 +219,9 @@ export function injectFileAttachmentPreamble(
   return text ? `${block}\n${text}` : block;
 }
 
-export function transcriptFromMessages(messages: readonly unknown[], fallbackTimestamp = nowIso()): SessionTranscriptMessage[] {
-  const transcript: SessionTranscriptMessage[] = [];
+export function transcriptFromMessages(messages: readonly unknown[], fallbackTimestamp = nowIso()): SessionTranscriptItem[] {
+  const transcript: SessionTranscriptItem[] = [];
+  const toolIndexByCallId = new Map<string, number>();
 
   for (const [index, message] of messages.entries()) {
     if (!isRecord(message)) {
@@ -228,29 +229,108 @@ export function transcriptFromMessages(messages: readonly unknown[], fallbackTim
     }
 
     const role = message.role;
+    const createdAt = messageCreatedAt(message, fallbackTimestamp);
+
+    if (role === "toolResult") {
+      applyToolResult(transcript, toolIndexByCallId, message, createdAt);
+      continue;
+    }
+
     if (role !== "user" && role !== "assistant" && role !== "branchSummary" && role !== "compactionSummary") {
       continue;
     }
 
     const text = messageText(message);
     const attachments = messageAttachments(message);
-    if (!text) {
-      if (attachments.length === 0) {
-        continue;
-      }
+    if (text || attachments.length > 0) {
+      transcript.push({
+        kind: "message",
+        id: typeof message.id === "string" ? message.id : `${role}-${index}`,
+        role,
+        text,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        createdAt,
+      });
     }
 
-    transcript.push({
-      kind: "message",
-      id: typeof message.id === "string" ? message.id : `${role}-${index}`,
-      role,
-      text,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      createdAt: typeof message.createdAt === "string" ? message.createdAt : fallbackTimestamp,
-    });
+    if (role === "assistant") {
+      appendToolCalls(transcript, toolIndexByCallId, message, createdAt);
+    }
   }
 
   return transcript;
+}
+
+function messageCreatedAt(message: Record<string, unknown>, fallback: string): string {
+  if (typeof message.createdAt === "string") {
+    return message.createdAt;
+  }
+  if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
+    return new Date(message.timestamp).toISOString();
+  }
+  return fallback;
+}
+
+function appendToolCalls(
+  transcript: SessionTranscriptItem[],
+  toolIndexByCallId: Map<string, number>,
+  message: Record<string, unknown>,
+  createdAt: string,
+): void {
+  const { content } = message;
+  if (!Array.isArray(content)) {
+    return;
+  }
+
+  for (const part of content) {
+    if (!isRecord(part) || part.type !== "toolCall" || typeof part.id !== "string") {
+      continue;
+    }
+    toolIndexByCallId.set(part.id, transcript.length);
+    transcript.push({
+      kind: "tool",
+      id: part.id,
+      callId: part.id,
+      toolName: typeof part.name === "string" ? part.name : "tool",
+      status: "error",
+      ...(part.arguments !== undefined ? { input: part.arguments } : {}),
+      createdAt,
+    });
+  }
+}
+
+function applyToolResult(
+  transcript: SessionTranscriptItem[],
+  toolIndexByCallId: Map<string, number>,
+  message: Record<string, unknown>,
+  createdAt: string,
+): void {
+  const callId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+  if (!callId) {
+    return;
+  }
+
+  const status = message.isError === true ? ("error" as const) : ("success" as const);
+  const output = {
+    ...(message.content !== undefined ? { content: message.content } : {}),
+    ...(message.details !== undefined ? { details: message.details } : {}),
+  };
+  const index = toolIndexByCallId.get(callId);
+  const existing = index !== undefined ? transcript[index] : undefined;
+  if (index !== undefined && existing?.kind === "tool") {
+    transcript[index] = { ...existing, status, output };
+    return;
+  }
+
+  transcript.push({
+    kind: "tool",
+    id: callId,
+    callId,
+    toolName: typeof message.toolName === "string" ? message.toolName : "tool",
+    status,
+    output,
+    createdAt,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

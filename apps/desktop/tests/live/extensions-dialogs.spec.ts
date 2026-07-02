@@ -20,6 +20,14 @@ export default function dialogExtension(pi) {
     },
   });
 
+  pi.registerCommand("dialog-confirm-timeout", {
+    description: "Open a confirmation dialog that times out",
+    handler: async (_args, ctx) => {
+      const confirmed = await ctx.ui.confirm("Timeout confirm?", "This should close itself.", { timeout: 100 });
+      ctx.ui.notify(confirmed ? "Timeout accepted" : "Timeout rejected", "info");
+    },
+  });
+
   pi.registerCommand("dialog-select", {
     description: "Open a select dialog",
     handler: async (_args, ctx) => {
@@ -127,16 +135,38 @@ test("renders extension dialogs in the Electron surface and routes responses bac
     await composer.fill("/dialog-confirm ");
     await composer.press("Enter");
     const dialog = window.getByTestId("extension-dialog");
+    await expect(window.getByRole("dialog", { name: "Confirm change?" })).toBeVisible();
     await expect(dialog).toContainText("Confirm change?");
     await expect(dialog).toContainText("Approve this change.");
-    await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(dialog.getByTestId("extension-dialog-cancel")).toBeFocused();
+    await dialog.getByTestId("extension-dialog-cancel").press("Shift+Tab");
+    await expect(dialog.getByTestId("extension-dialog-confirm")).toBeFocused();
+    await dialog.getByTestId("extension-dialog-confirm").press("Tab");
+    await expect(dialog.getByTestId("extension-dialog-cancel")).toBeFocused();
+    await dialog.getByTestId("extension-dialog-confirm").click();
     await expect(dialog).toHaveCount(0);
     await expect(window.locator(".timeline")).toContainText("Confirm accepted");
+
+    await composer.fill("/dialog-confirm-timeout ");
+    await composer.press("Enter");
+    await expect(window.getByRole("dialog", { name: "Timeout confirm?" })).toBeVisible();
+    await expect(dialog).toContainText("This should close itself.");
+    await expect(dialog).toHaveCount(0, { timeout: 5_000 });
+    await expect(window.locator(".timeline")).toContainText("Timeout rejected");
 
     await composer.fill("/dialog-select ");
     await composer.press("Enter");
     await expect(dialog).toContainText("Pick an option");
-    await dialog.getByRole("button", { name: "Beta", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Alpha", exact: true })).toBeFocused();
+    await dialog.getByRole("button", { name: "Alpha", exact: true }).press("Tab");
+    await expect(dialog.getByRole("button", { name: "Beta", exact: true })).toBeFocused();
+    await dialog.getByRole("button", { name: "Beta", exact: true }).press("Tab");
+    await expect(dialog.getByTestId("extension-dialog-cancel")).toBeFocused();
+    await dialog.getByTestId("extension-dialog-cancel").press("Tab");
+    await expect(dialog.getByRole("button", { name: "Alpha", exact: true })).toBeFocused();
+    await dialog.getByRole("button", { name: "Alpha", exact: true }).press("Tab");
+    await expect(dialog.getByRole("button", { name: "Beta", exact: true })).toBeFocused();
+    await dialog.getByRole("button", { name: "Beta", exact: true }).press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(window.locator(".timeline")).toContainText("Selected Beta");
 

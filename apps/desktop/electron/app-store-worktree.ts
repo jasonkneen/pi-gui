@@ -173,7 +173,10 @@ export async function forkThread(store: AppStoreInternals, input: ForkThreadInpu
   return store.withErrorHandling(async () => {
     let targetWorkspace = sourceWorkspace;
     if (input.environment === "worktree") {
-      const rootWorkspace = store.workspaceRefFromState(input.rootWorkspaceId) ?? sourceWorkspace;
+      const rootWorkspace = store.workspaceRefFromState(input.rootWorkspaceId);
+      if (!rootWorkspace) {
+        return store.withError(`Unknown workspace: ${input.rootWorkspaceId}`);
+      }
       const worktreeOptions = buildWorktreeOptions(
         store,
         rootWorkspace,

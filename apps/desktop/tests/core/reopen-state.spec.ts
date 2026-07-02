@@ -9,7 +9,6 @@ import {
   launchDesktop,
   makeUserDataDir,
   makeWorkspace,
-  persistedSessionDataPaths,
   waitForWorkspaceByPath,
 } from "../helpers/electron-app";
 
@@ -37,20 +36,8 @@ test("reopens persisted folders and thread state while a saved running session k
     const state = await getDesktopState(window);
     workspaceId = state.selectedWorkspaceId;
     sessionId = state.selectedSessionId;
-
-    const { transcriptPath } = persistedSessionDataPaths(userDataDir, {
-      workspaceId,
-      sessionId,
-    });
-    await expect
-      .poll(async () => {
-        try {
-          return await readFile(transcriptPath, "utf8");
-        } catch {
-          return "";
-        }
-      })
-      .toContain("\"kind\": \"activity\"");
+    expect(workspaceId).toBeTruthy();
+    expect(sessionId).toBeTruthy();
   } finally {
     await firstRun.close();
   }
@@ -97,7 +84,6 @@ test("reopens persisted folders and thread state while a saved running session k
         sessionTitle: "Reopen reliability session",
       });
     await expect(window.locator(".topbar__session")).toHaveText("Reopen reliability session");
-    await expect(window.getByTestId("transcript")).toContainText(/Model |No session overrides set/);
 
     await emitTestSessionEvent(secondRun, {
       type: "sessionUpdated",

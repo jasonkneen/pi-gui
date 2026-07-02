@@ -126,7 +126,7 @@ test("reviewed checkboxes update counter, prune on changes, and survive relaunch
 
   expect(
     await firstWindow.evaluate((key) => globalThis.localStorage.getItem(key), storageKey),
-  ).toBe(JSON.stringify(["src/foo.ts"]));
+  ).toBe(JSON.stringify([JSON.stringify([sessionRef.workspaceId, "src/foo.ts"])]));
 
   await diffPanel.getByTestId("diff-panel-reviewed-src/foo.ts").uncheck();
   await expect(counter).toHaveText("Reviewed 0 of 3");
@@ -161,9 +161,38 @@ test("reviewed checkboxes update counter, prune on changes, and survive relaunch
 
     expect(
       await window.evaluate((key) => globalThis.localStorage.getItem(key), storageKey),
-    ).toBe(JSON.stringify(["script.py"]));
+    ).toBe(JSON.stringify([JSON.stringify([sessionRef.workspaceId, "script.py"])]));
   } finally {
     await reopened.close();
+  }
+});
+
+test("Files mode shows a file browser and reader instead of the changes reviewer", async () => {
+  test.setTimeout(45_000);
+  const { harness, window } = await launchSeeded("Review UX files mode");
+  try {
+    await window.keyboard.press(desktopShortcut("D"));
+    const diffPanel = window.locator(".diff-panel");
+    await expect(diffPanel).toBeVisible();
+    await expect(diffPanel.locator(".diff-panel__title")).toHaveText("Changes");
+    await expect(diffPanel.getByTestId("diff-panel-counter")).toHaveText("Reviewed 0 of 3");
+
+    await diffPanel.locator('.diff-panel__file[data-file-path="src/foo.ts"] .diff-panel__file-name').click();
+    await expect(diffPanel.locator(".diff-inline")).toBeVisible();
+
+    await window.locator(".topbar__actions").getByLabel("Toggle files").click();
+    await expect(diffPanel.locator(".diff-panel__title")).toHaveText("Files");
+    await expect(diffPanel.getByTestId("diff-panel-counter")).toHaveCount(0);
+    await expect(diffPanel.locator(".file-workbench__section--changes")).toHaveCount(0);
+    await expect(diffPanel.getByTestId("file-workbench-tree")).toBeVisible();
+    await expect(diffPanel.locator(".file-workbench__context-strip")).toHaveCount(0);
+
+    await diffPanel.locator('.file-workbench__tree-row--file[data-file-path="notes.md"]').click();
+    await expect(diffPanel.getByTestId("file-workbench-preview")).toContainText("# notes");
+    await expect(diffPanel.locator(".diff-inline")).toHaveCount(0);
+    await expect(diffPanel.getByRole("group", { name: "Viewer mode" })).toHaveCount(0);
+  } finally {
+    await harness.close();
   }
 });
 
@@ -212,6 +241,138 @@ test("view-in-changes button on a write tool row opens the diff panel without to
 
     await toolHeader.click();
     await expect(toolHeader).toHaveAttribute("aria-expanded", "true");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("tool failures surface actionable Computer Use details in collapsed timeline rows", async () => {
+  test.setTimeout(45_000);
+  const { harness, window } = await launchSeeded("Review UX tool failure");
+  try {
+    const sessionRef = await selectedSessionRef(window);
+    const timestamp = new Date().toISOString();
+    const lockedMessage = "Computer Use is unavailable while the Mac is locked. Unlock the desktop and retry.";
+    const startedEvent: Extract<SessionDriverEvent, { type: "toolStarted" }> = {
+      type: "toolStarted",
+      sessionRef,
+      timestamp,
+      toolName: "click",
+      callId: "computer-use-click-1",
+      input: { app: "Calculator" },
+    };
+    await emitTestSessionEvent(harness, startedEvent);
+
+    const toolItem = window.locator(".timeline-tool").first();
+    await expect(toolItem.locator(".timeline-tool__label")).toHaveText("Ran click: Calculator");
+
+    const finishedEvent: Extract<SessionDriverEvent, { type: "toolFinished" }> = {
+      type: "toolFinished",
+      sessionRef,
+      timestamp,
+      callId: "computer-use-click-1",
+      success: false,
+      output: { error: lockedMessage },
+    };
+    await emitTestSessionEvent(harness, finishedEvent);
+
+    await expect(toolItem).toHaveClass(/timeline-tool--error/);
+    await expect(toolItem.locator(".timeline-tool__header")).toHaveAttribute("aria-expanded", "false");
+    await expect(toolItem.locator(".timeline-tool__detail")).toHaveText(lockedMessage);
+
+    const failedEvent: Extract<SessionDriverEvent, { type: "runFailed" }> = {
+      type: "runFailed",
+      sessionRef,
+      timestamp,
+      error: { message: "terminated", code: "RUN_FAILED" },
+    };
+    await emitTestSessionEvent(harness, failedEvent);
+
+    const failureActivity = window.locator(".timeline-activity--error").last();
+    await expect(failureActivity).toContainText(lockedMessage);
+    await expect(failureActivity).toContainText("RUN_FAILED");
+    await expect(failureActivity).not.toContainText("terminated");
+
+    const laterGenericFailure: Extract<SessionDriverEvent, { type: "runFailed" }> = {
+      type: "runFailed",
+      sessionRef,
+      timestamp: new Date().toISOString(),
+      error: { message: "terminated", code: "RUN_FAILED" },
+    };
+    await emitTestSessionEvent(harness, laterGenericFailure);
+
+    const laterFailureActivity = window.locator(".timeline-activity--error").last();
+    await expect(laterFailureActivity).toContainText("terminated");
+    await expect(laterFailureActivity).not.toContainText(lockedMessage);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("physical-pointer Computer Use failures keep the foreground-safe reason visible", async () => {
+  test.setTimeout(45_000);
+  const { harness, window } = await launchSeeded("Review UX physical pointer failure");
+  try {
+    const sessionRef = await selectedSessionRef(window);
+    const timestamp = new Date().toISOString();
+    const title = "Computer Use blocked: this action would require foreground physical input.";
+    const helperMessage =
+      "Computer Use blocked: this click in Sketch would require foreground physical input by moving the user's physical mouse at 120,120. Use a pressable element_index or a coordinate over a pressable accessibility element to keep Computer Use in the background.";
+    const startedEvent: Extract<SessionDriverEvent, { type: "toolStarted" }> = {
+      type: "toolStarted",
+      sessionRef,
+      timestamp,
+      toolName: "click",
+      callId: "computer-use-physical-click-1",
+      input: { app: "Sketch", x: 120, y: 120 },
+    };
+    await emitTestSessionEvent(harness, startedEvent);
+
+    const toolItem = window.locator(".timeline-tool").first();
+    await expect(toolItem.locator(".timeline-tool__label")).toHaveText("Ran click: Sketch");
+
+    const finishedEvent: Extract<SessionDriverEvent, { type: "toolFinished" }> = {
+      type: "toolFinished",
+      sessionRef,
+      timestamp,
+      callId: "computer-use-physical-click-1",
+      success: false,
+      output: {
+        content: [
+          {
+            type: "text",
+            text: `${title}\n${helperMessage}\n\nRun computer_use_status to check the current helper, permission, and lock-screen state before retrying.`,
+          },
+        ],
+        details: {
+          ok: false,
+          errorCode: "physical_input_required",
+          error: helperMessage,
+        },
+      },
+    };
+    await emitTestSessionEvent(harness, finishedEvent);
+
+    await expect(toolItem).toHaveClass(/timeline-tool--error/);
+    await expect(toolItem.locator(".timeline-tool__detail")).toHaveText(title);
+    await expect(toolItem.locator(".timeline-tool__header")).toHaveAttribute("aria-expanded", "false");
+
+    await toolItem.locator(".timeline-tool__header").click();
+    await expect(toolItem.locator(".timeline-tool__pre")).toContainText("physical_input_required");
+    await expect(toolItem.locator(".timeline-tool__pre")).toContainText(helperMessage);
+
+    const failedEvent: Extract<SessionDriverEvent, { type: "runFailed" }> = {
+      type: "runFailed",
+      sessionRef,
+      timestamp,
+      error: { message: "terminated", code: "RUN_FAILED" },
+    };
+    await emitTestSessionEvent(harness, failedEvent);
+
+    const failureActivity = window.locator(".timeline-activity--error").last();
+    await expect(failureActivity).toContainText(title);
+    await expect(failureActivity).toContainText("RUN_FAILED");
+    await expect(failureActivity).not.toContainText("terminated");
   } finally {
     await harness.close();
   }

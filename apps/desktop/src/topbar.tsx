@@ -1,6 +1,6 @@
-import type { MouseEvent as ReactMouseEvent, Dispatch, SetStateAction } from "react";
-import type { AppView, DesktopAppState, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
-import { DiffIcon, FolderIcon, TerminalIcon } from "./icons";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { AppView, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
+import { DiffIcon, FileIcon, TerminalIcon } from "./icons";
 import { getDesktopShortcutLabel, type PiDesktopApi } from "./ipc";
 import type { WorkspaceMenuState } from "./hooks/use-workspace-menu";
 
@@ -15,17 +15,14 @@ interface TopbarProps {
   readonly workspaces: readonly WorkspaceRecord[];
   readonly wsMenu: WorkspaceMenuState;
   readonly api: PiDesktopApi;
-  readonly setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>;
-  readonly updateSnapshot: (
-    api: PiDesktopApi,
-    setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-    action: () => Promise<DesktopAppState>,
-  ) => Promise<DesktopAppState>;
   readonly terminalAvailable: boolean;
   readonly terminalVisible: boolean;
   readonly onToggleTerminal: () => void;
-  readonly showDiffPanel: boolean;
-  readonly onToggleDiffPanel: () => void;
+  readonly panelAvailable: boolean;
+  readonly changesVisible: boolean;
+  readonly onToggleChanges: () => void;
+  readonly filesVisible: boolean;
+  readonly onToggleFiles: () => void;
 }
 
 export function Topbar(props: TopbarProps) {
@@ -40,13 +37,14 @@ export function Topbar(props: TopbarProps) {
     workspaces,
     wsMenu,
     api,
-    setSnapshot,
-    updateSnapshot,
     terminalAvailable,
     terminalVisible,
     onToggleTerminal,
-    showDiffPanel,
-    onToggleDiffPanel,
+    panelAvailable,
+    changesVisible,
+    onToggleChanges,
+    filesVisible,
+    onToggleFiles,
   } = props;
   const terminalShortcut = getDesktopShortcutLabel(api.platform, "J");
   const diffShortcut = getDesktopShortcutLabel(api.platform, "D");
@@ -133,46 +131,66 @@ export function Topbar(props: TopbarProps) {
       </div>
 
       <div className="topbar__actions">
-        <div className="shortcut-tooltip-wrap topbar__tooltip-wrap">
-          <button
-            aria-label="Toggle terminal"
-            className={`icon-button topbar__icon ${terminalVisible ? "icon-button--active" : ""}`}
-            type="button"
-            disabled={!terminalAvailable}
-            onClick={onToggleTerminal}
-          >
-            <TerminalIcon />
-          </button>
-          <span className="shortcut-tooltip topbar__tooltip" role="tooltip">
-            <span>Toggle terminal</span>
-            <kbd>{terminalShortcut}</kbd>
-          </span>
-        </div>
-        <div className="shortcut-tooltip-wrap topbar__tooltip-wrap">
-          <button
-            aria-label="Toggle changes"
-            className={`icon-button topbar__icon ${showDiffPanel ? "icon-button--active" : ""}`}
-            type="button"
-            onClick={onToggleDiffPanel}
-          >
-            <DiffIcon />
-          </button>
-          <span className="shortcut-tooltip topbar__tooltip" role="tooltip">
-            <span>Toggle changes</span>
-            <kbd>{diffShortcut}</kbd>
-          </span>
-        </div>
-        <button
-          aria-label="Add folder"
-          className="icon-button topbar__icon"
-          type="button"
-          onClick={() => {
-            void updateSnapshot(api, setSnapshot, () => api.pickWorkspace());
-          }}
-        >
-          <FolderIcon />
-        </button>
+        <TopbarActionButton
+          active={terminalVisible}
+          disabled={!terminalAvailable}
+          icon={<TerminalIcon />}
+          label="Toggle terminal"
+          shortcut={terminalShortcut}
+          onClick={onToggleTerminal}
+        />
+        <TopbarActionButton
+          active={changesVisible}
+          disabled={!panelAvailable}
+          icon={<DiffIcon />}
+          label="Toggle changes"
+          shortcut={diffShortcut}
+          onClick={onToggleChanges}
+        />
+        <TopbarActionButton
+          active={filesVisible}
+          disabled={!panelAvailable}
+          icon={<FileIcon />}
+          label="Toggle files"
+          onClick={onToggleFiles}
+        />
       </div>
     </header>
+  );
+}
+
+interface TopbarActionButtonProps {
+  readonly label: string;
+  readonly icon: ReactNode;
+  readonly active?: boolean;
+  readonly disabled?: boolean;
+  readonly shortcut?: string;
+  readonly onClick: () => void;
+}
+
+function TopbarActionButton({
+  label,
+  icon,
+  active = false,
+  disabled = false,
+  shortcut,
+  onClick,
+}: TopbarActionButtonProps) {
+  return (
+    <div className="shortcut-tooltip-wrap topbar__tooltip-wrap">
+      <button
+        aria-label={label}
+        className={`icon-button topbar__icon ${active ? "icon-button--active" : ""}`}
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+      >
+        {icon}
+      </button>
+      <span className="shortcut-tooltip topbar__tooltip" role="tooltip">
+        <span>{label}</span>
+        {shortcut ? <kbd>{shortcut}</kbd> : null}
+      </span>
+    </div>
   );
 }

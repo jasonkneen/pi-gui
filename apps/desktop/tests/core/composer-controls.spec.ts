@@ -138,14 +138,14 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
 
     const appRegions = await window.evaluate(() => {
       const topbar = document.querySelector<HTMLElement>("[data-testid='topbar']");
-      const addFolder = document.querySelector<HTMLElement>(".topbar__actions button");
+      const actionButton = document.querySelector<HTMLElement>(".topbar__actions button");
       return {
         topbar: topbar ? getComputedStyle(topbar).getPropertyValue("-webkit-app-region") : "",
-        addFolder: addFolder ? getComputedStyle(addFolder).getPropertyValue("-webkit-app-region") : "",
+        actionButton: actionButton ? getComputedStyle(actionButton).getPropertyValue("-webkit-app-region") : "",
       };
     });
     expect(appRegions.topbar).toBe("drag");
-    expect(appRegions.addFolder).toBe("no-drag");
+    expect(appRegions.actionButton).toBe("no-drag");
 
     const maximizedBefore = await harness.electronApp.evaluate(({ BrowserWindow }) => {
       return BrowserWindow.getAllWindows()[0]?.isMaximized() ?? false;

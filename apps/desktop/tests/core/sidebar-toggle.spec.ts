@@ -20,6 +20,24 @@ async function restoreSidebarIfNeeded(window: Page): Promise<void> {
   }
 }
 
+async function expectToggleClearOfTopbarDragRegion(window: Page): Promise<void> {
+  const layout = await window.evaluate(() => {
+    const toggle = document.querySelector<HTMLElement>("[data-testid='sidebar-toggle']");
+    const topbar = document.querySelector<HTMLElement>(".topbar");
+    if (!toggle || !topbar) {
+      return null;
+    }
+    const toggleRect = toggle.getBoundingClientRect();
+    const topbarRect = topbar.getBoundingClientRect();
+    return {
+      toggleRight: toggleRect.right,
+      topbarLeft: topbarRect.left,
+    };
+  });
+  expect(layout).not.toBeNull();
+  expect(layout?.toggleRight).toBeLessThanOrEqual(layout?.topbarLeft ?? 0);
+}
+
 test("toggles and persists the primary sidebar from the button and keyboard shortcut", async () => {
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
@@ -41,6 +59,7 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
 
     await toggle.click();
     await expectSidebarCollapsed(window, true);
+    await expectToggleClearOfTopbarDragRegion(window);
     const collapsedMainBox = await window.locator(".main").boundingBox();
     expect(collapsedMainBox).not.toBeNull();
     expect(collapsedMainBox?.x ?? 999).toBeLessThan(expandedMainBox?.x ?? 0);
@@ -97,6 +116,7 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
     await waitForWorkspaceByPath(window, workspacePath);
     await expectSidebarCollapsed(window, true);
     await expect(window.getByTestId("sidebar-toggle")).toBeVisible();
+    await expectToggleClearOfTopbarDragRegion(window);
     await window.getByTestId("sidebar-toggle").click();
     await expectSidebarCollapsed(window, false);
   } finally {

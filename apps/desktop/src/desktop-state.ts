@@ -1,7 +1,7 @@
 import type { HostUiRequest, SessionConfig } from "@pi-gui/session-driver";
 import type { ModelSettingsSnapshot, RuntimeCommandRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 export type SessionStatus = "idle" | "running" | "failed";
-export type { SessionRole, TranscriptMessage } from "./timeline-types";
+export type { SessionRole, TimelineToolCall, TranscriptMessage } from "./timeline-types";
 import type { TranscriptMessage } from "./timeline-types";
 
 export type AppView = "threads" | "new-thread" | "skills" | "extensions" | "settings";
@@ -14,6 +14,7 @@ export type ComposerDraftSyncSource =
   | "state"
   | "selection"
   | "persist"
+  | "remote-persist"
   | "command"
   | "extension-editor-text"
   | "queued-message-edit";
@@ -58,6 +59,7 @@ export interface SessionRecord {
   readonly id: string;
   readonly title: string;
   readonly updatedAt: string;
+  readonly pinnedAt?: string;
   readonly lastViewedAt?: string;
   readonly archivedAt?: string;
   readonly preview: string;
@@ -65,6 +67,99 @@ export interface SessionRecord {
   readonly runningSince?: string;
   readonly hasUnseenUpdate: boolean;
   readonly config?: SessionConfig;
+}
+
+export type OrchestrationChildThreadStatus = "running" | "waiting" | "complete" | "failed";
+export type OrchestrationSupervisionGate = "continue" | "stop" | "wake";
+export type OrchestrationSupervisionStatus = "monitoring" | "attention" | "stopped";
+export type OrchestrationEvidenceKind =
+  | "worker_report"
+  | "orchestrator_acceptance"
+  | "orchestrator_observation"
+  | "orchestrator_action"
+  | "command"
+  | "review_finding"
+  | "blocker";
+export type OrchestrationEvidenceSource =
+  | "worker-reported"
+  | "orchestrator-accepted"
+  | "orchestrator-observed"
+  | "orchestrator-action"
+  | "command"
+  | "review"
+  | "blocker";
+export type OrchestrationEvidenceStatus = "reported" | "accepted" | "running" | "passed" | "failed" | "blocked";
+
+export interface OrchestrationEvidenceGitRef {
+  readonly workspaceId: string;
+  readonly branchName?: string;
+  readonly headSha?: string;
+}
+
+export interface OrchestrationEvidenceRecord {
+  readonly id: string;
+  readonly childThreadId: string;
+  readonly kind: OrchestrationEvidenceKind;
+  readonly source: OrchestrationEvidenceSource;
+  readonly status: OrchestrationEvidenceStatus;
+  readonly title: string;
+  readonly detail?: string;
+  readonly command?: string;
+  readonly toolName?: string;
+  readonly severity?: "P0" | "P1" | "P2" | "P3";
+  readonly parentSessionId?: string;
+  readonly childSessionId?: string;
+  readonly git?: OrchestrationEvidenceGitRef;
+  readonly createdAt: string;
+  readonly updatedAt?: string;
+}
+
+export interface OrchestrationSupervisionLoop {
+  readonly id: string;
+  readonly status: OrchestrationSupervisionStatus;
+  readonly gate: OrchestrationSupervisionGate;
+  readonly intervalMs: number;
+  readonly iterationCount: number;
+  readonly lastCheckedAt: string;
+  readonly nextRunAt?: string;
+  readonly reason: string;
+  readonly lastChildStatus: OrchestrationChildThreadStatus;
+  readonly stoppedAt?: string;
+}
+
+export interface OrchestrationChildTranscriptMessage {
+  readonly id: string;
+  readonly role: "parent" | "child" | "system";
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface OrchestrationChildThread {
+  readonly id: string;
+  readonly sourceToolCallId?: string;
+  readonly parentWorkspaceId: string;
+  readonly parentSessionId: string;
+  readonly childWorkspaceId: string;
+  readonly childSessionId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly status: OrchestrationChildThreadStatus;
+  readonly latestTranscript: string;
+  readonly transcript: readonly OrchestrationChildTranscriptMessage[];
+  readonly evidence: readonly OrchestrationEvidenceRecord[];
+  readonly supervisionLoop?: OrchestrationSupervisionLoop;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SendChildThreadFollowUpInput {
+  readonly childThreadId: string;
+  readonly text: string;
+}
+
+export interface SetChildSupervisionLoopInput {
+  readonly childThreadId: string;
+  readonly gate: Extract<OrchestrationSupervisionGate, "continue" | "stop">;
 }
 
 export interface SelectedTranscriptRecord {
@@ -181,9 +276,12 @@ export interface DesktopAppState {
   readonly sessionCommandsBySession: Readonly<Record<string, readonly RuntimeCommandRecord[]>>;
   readonly sessionExtensionUiBySession: Readonly<Record<string, SessionExtensionUiStateRecord>>;
   readonly extensionCommandCompatibilityByWorkspace: Readonly<Record<string, readonly ExtensionCommandCompatibilityRecord[]>>;
+  readonly orchestrationChildren: readonly OrchestrationChildThread[];
   readonly notificationPreferences: NotificationPreferences;
   readonly integratedTerminalShell: string;
   readonly lastViewedAtBySession: Readonly<Record<string, string>>;
+  readonly pinnedAtBySession: Readonly<Record<string, string>>;
+  readonly pinnedSessionOrder: readonly string[];
   readonly workspaceOrder: readonly string[];
   readonly modelSettingsScopeMode: ModelSettingsScopeMode;
   readonly globalModelSettings: ModelSettingsSnapshot;
@@ -219,6 +317,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
     sessionCommandsBySession: {},
     sessionExtensionUiBySession: {},
     extensionCommandCompatibilityByWorkspace: {},
+    orchestrationChildren: [],
     notificationPreferences: {
       backgroundCompletion: true,
       backgroundFailure: true,
@@ -226,6 +325,8 @@ export function createEmptyDesktopAppState(): DesktopAppState {
     },
     integratedTerminalShell: "",
     lastViewedAtBySession: {},
+    pinnedAtBySession: {},
+    pinnedSessionOrder: [],
     workspaceOrder: [],
     modelSettingsScopeMode: "app-global",
     globalModelSettings: {

@@ -13,7 +13,6 @@ import {
 } from "../helpers/electron-app";
 
 // Slow-paced screen recording of the fork-from-message feature for demo purposes.
-// Run directly: PI_APP_TEST_MODE=background playwright test apps/desktop/tests/demo/fork-demo.spec.ts
 test("records a fork-from-message walkthrough", async () => {
   test.setTimeout(120_000);
   const videoDir = join(process.cwd(), "videos");

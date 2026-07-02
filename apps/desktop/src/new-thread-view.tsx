@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject } from "react";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type { ComposerAttachment, NewThreadEnvironment, WorkspaceRecord } from "./desktop-state";
+import type { MentionOption } from "./hooks/use-mention-menu";
 import { ArrowUpIcon, PiLogoMark, PlusIcon } from "./icons";
 import {
   MODEL_OPTIONS_EMPTY_TITLE,
@@ -37,7 +38,7 @@ interface NewThreadViewProps {
   readonly showSlashOptionMenu: boolean;
   readonly slashOptionEmptyState?: ComposerSlashOptionEmptyState;
   readonly showMentionMenu: boolean;
-  readonly mentionOptions: readonly string[];
+  readonly mentionOptions: readonly MentionOption[];
   readonly selectedMentionIndex: number;
   readonly onChangePrompt: (prompt: string) => void;
   readonly onSelectEnvironment: (environment: NewThreadEnvironment) => void;
@@ -51,7 +52,8 @@ interface NewThreadViewProps {
   readonly onClearSlashCommand: () => void;
   readonly onSelectSlashCommand: (command: ComposerSlashCommand) => void;
   readonly onSelectSlashOption: (option: ComposerSlashOption) => void;
-  readonly onSelectMention: (filePath: string) => void;
+  readonly onSelectMention: (option: MentionOption) => void;
+  readonly onEnableMentionExtension: (option: Extract<MentionOption, { kind: "extension" }>) => void;
   readonly onAddAttachments: (files: File[]) => void;
   readonly onRemoveAttachment: (attachmentId: string) => void;
   readonly onSubmit: () => void;
@@ -95,6 +97,7 @@ export function NewThreadView({
   onSelectSlashCommand,
   onSelectSlashOption,
   onSelectMention,
+  onEnableMentionExtension,
   onAddAttachments,
   onRemoveAttachment,
   onSubmit,
@@ -189,6 +192,7 @@ export function NewThreadView({
               mentionOptions={mentionOptions}
               selectedMentionIndex={selectedMentionIndex}
               onSelectMention={onSelectMention}
+              onEnableMentionExtension={onEnableMentionExtension}
               textareaLabel="New thread prompt"
               textareaTestId="new-thread-composer"
               textareaClassName="new-thread__textarea"

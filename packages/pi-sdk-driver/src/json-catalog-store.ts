@@ -395,7 +395,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isMissingFileError(error: unknown): boolean {
+export function isMissingFileError(error: unknown): boolean {
   return (
     isRecord(error) &&
     typeof error.code === "string" &&

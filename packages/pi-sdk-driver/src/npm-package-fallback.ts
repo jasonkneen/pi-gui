@@ -8,7 +8,16 @@ import {
   type AgentSessionRuntime,
   type CreateAgentSessionOptions,
   type CreateAgentSessionRuntimeResult,
+  type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+
+export interface PiResourceLoaderOptions {
+  readonly extensionFactories?: ExtensionFactory[];
+}
+
+export interface PiCreateAgentSessionOptions extends CreateAgentSessionOptions {
+  readonly resourceLoaderOptions?: PiResourceLoaderOptions;
+}
 
 export function isGlobalNpmLookupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -43,7 +52,7 @@ export function createSettingsManagerWithoutNpmPackages(current: SettingsManager
 async function createAgentSessionServicesWithNpmFallback(
   cwd: string,
   agentDir: string,
-  options?: Pick<CreateAgentSessionOptions, "authStorage" | "settingsManager" | "modelRegistry">,
+  options?: Pick<PiCreateAgentSessionOptions, "authStorage" | "settingsManager" | "modelRegistry" | "resourceLoaderOptions">,
 ) {
   try {
     return await createAgentSessionServices({
@@ -52,6 +61,7 @@ async function createAgentSessionServicesWithNpmFallback(
       ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
       ...(options?.settingsManager ? { settingsManager: options.settingsManager } : {}),
       ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
+      ...(options?.resourceLoaderOptions ? { resourceLoaderOptions: options.resourceLoaderOptions } : {}),
     });
   } catch (error) {
     if (!isGlobalNpmLookupError(error)) {
@@ -76,6 +86,7 @@ async function createAgentSessionServicesWithNpmFallback(
       ...(options?.authStorage ? { authStorage: options.authStorage } : {}),
       settingsManager: fallbackSettingsManager,
       ...(options?.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
+      ...(options?.resourceLoaderOptions ? { resourceLoaderOptions: options.resourceLoaderOptions } : {}),
     });
   }
 }
@@ -84,7 +95,7 @@ async function createAgentSessionResultWithNpmFallback(
   cwd: string,
   agentDir: string,
   sessionManager: SessionManager,
-  options?: CreateAgentSessionOptions,
+  options?: PiCreateAgentSessionOptions,
 ): Promise<CreateAgentSessionRuntimeResult> {
   const services = await createAgentSessionServicesWithNpmFallback(cwd, agentDir, options);
   return {
@@ -103,7 +114,7 @@ async function createAgentSessionResultWithNpmFallback(
   };
 }
 
-export async function createAgentSessionWithNpmFallback(options?: CreateAgentSessionOptions) {
+export async function createAgentSessionWithNpmFallback(options?: PiCreateAgentSessionOptions) {
   const cwd = options?.cwd ?? process.cwd();
   const agentDir = options?.agentDir ?? getAgentDir();
   const sessionManager = options?.sessionManager ?? SessionManager.create(cwd);
@@ -111,7 +122,7 @@ export async function createAgentSessionWithNpmFallback(options?: CreateAgentSes
 }
 
 export async function createAgentSessionRuntimeWithNpmFallback(
-  options?: CreateAgentSessionOptions,
+  options?: PiCreateAgentSessionOptions,
 ): Promise<AgentSessionRuntime> {
   const cwd = options?.cwd ?? process.cwd();
   const agentDir = options?.agentDir ?? getAgentDir();
@@ -121,6 +132,7 @@ export async function createAgentSessionRuntimeWithNpmFallback(
     agentDir: _optionAgentDir,
     sessionManager: _optionSessionManager,
     sessionStartEvent: _optionSessionStartEvent,
+    resourceLoaderOptions: stableResourceLoaderOptions,
     model: initialModel,
     thinkingLevel: initialThinkingLevel,
     ...stableOptions
@@ -132,6 +144,7 @@ export async function createAgentSessionRuntimeWithNpmFallback(
       useInitialSessionOptions = false;
       return createAgentSessionResultWithNpmFallback(runtimeCwd, runtimeAgentDir, sessionManager, {
         ...stableOptions,
+        ...(stableResourceLoaderOptions ? { resourceLoaderOptions: stableResourceLoaderOptions } : {}),
         cwd: runtimeCwd,
         agentDir: runtimeAgentDir,
         sessionManager,

@@ -25,3 +25,17 @@ export interface SessionTranscriptMessage {
   readonly createdAt: string;
   readonly id: string;
 }
+
+export interface SessionTranscriptToolCall {
+  readonly kind: "tool";
+  readonly id: string;
+  readonly callId: string;
+  readonly toolName: string;
+  /** "error" also covers calls whose result never arrived (interrupted runs). */
+  readonly status: "success" | "error";
+  readonly input?: unknown;
+  readonly output?: unknown;
+  readonly createdAt: string;
+}
+
+export type SessionTranscriptItem = SessionTranscriptMessage | SessionTranscriptToolCall;

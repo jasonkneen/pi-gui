@@ -40,12 +40,27 @@ mac:
   extraFiles:
     - from: build/native/pi-gui-notification-status-helper
       to: MacOS/pi-gui-notification-status-helper
+    - from: build/native/pi-gui-computer-use-helper
+      to: MacOS/pi-gui-computer-use-helper
+    - from: build/native/pi-gui Computer Use.app
+      to: SharedSupport/pi-gui Computer Use.app
 
 linux:
   category: Development
   executableName: pi-gui
   target:
     - target: AppImage
+
+win:
+  executableName: pi-gui
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
 
 toolsets:
   appimage: "1.0.2"

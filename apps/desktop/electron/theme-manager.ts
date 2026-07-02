@@ -4,7 +4,7 @@ import type { ThemeMode } from "../src/desktop-state";
 
 export class ThemeManager {
   private mode: ThemeMode = "system";
-  private window: BrowserWindow | null = null;
+  private readonly windows = new Set<BrowserWindow>();
 
   constructor() {
     nativeTheme.on("updated", () => {
@@ -12,8 +12,14 @@ export class ThemeManager {
     });
   }
 
-  setWindow(win: BrowserWindow) {
-    this.window = win;
+  trackWindow(win: BrowserWindow) {
+    if (win.isDestroyed() || this.windows.has(win)) {
+      return;
+    }
+    this.windows.add(win);
+    win.once("closed", () => {
+      this.windows.delete(win);
+    });
   }
 
   getMode(): ThemeMode {
@@ -38,6 +44,10 @@ export class ThemeManager {
   }
 
   private broadcast() {
-    this.window?.webContents.send(desktopIpc.themeChanged, this.getResolvedTheme());
+    for (const window of this.windows) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(desktopIpc.themeChanged, this.getResolvedTheme());
+      }
+    }
   }
 }

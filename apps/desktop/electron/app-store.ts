@@ -47,6 +47,8 @@ import {
   type NotificationPreferences,
   type QueuedComposerMessage,
   type RemoveWorktreeInput,
+  type SendChildThreadFollowUpInput,
+  type SetChildSupervisionLoopInput,
   type SelectedTranscriptRecord,
   type StartThreadInput,
   type TranscriptMessage,
@@ -56,6 +58,7 @@ import {
   applyTimelineEvent,
   appendAssistantDelta,
   clearActiveAssistantMessage,
+  timelineFromDriverTranscript,
 } from "./app-store-timeline";
 import { applySessionEventState, updateSessionRecord } from "./app-store-session-state";
 import type { AppStoreInternals, RefreshStateOptions } from "./app-store-internals";
@@ -87,6 +90,7 @@ import {
   toSessionQueuedMessages,
   toSessionRef,
 } from "./app-store-utils";
+import type { CustomProviderConfig } from "../src/ipc";
 import { resolveRepoWorkspaceId } from "../src/workspace-roots";
 import { SessionStateMap, type QueuedComposerEditState } from "./session-state-map";
 import { createEmptyExtensionUiState, serializeExtensionUiState } from "./session-state-map";
@@ -94,38 +98,33 @@ import { GitWorktreeManager } from "./worktree-manager";
 import * as workspace from "./app-store-workspace";
 import * as worktree from "./app-store-worktree";
 import * as composer from "./app-store-composer";
-import { isSessionActivelyViewed } from "./session-visibility";
+import * as orchestration from "./app-store-orchestration";
+import { isSessionActivelyViewed, isSessionVisibleInWindow } from "./session-visibility";
 
 type StateListener = (state: DesktopAppState) => void;
 type SelectedTranscriptListener = (payload: SelectedTranscriptRecord | null) => void;
 type SessionEventListener = (event: SessionDriverEvent, state: DesktopAppState) => void | Promise<void>;
-type TranscriptMessageRow = Extract<TranscriptMessage, { kind: "message" }>;
-
-const LEGACY_TRANSCRIPT_HISTORY_LIMIT = 180;
-
-interface PersistedTranscriptRecord {
-  readonly version: 1;
-  readonly transcript: readonly TranscriptMessage[];
-}
-
-type PersistedTranscriptStoreValue = PersistedTranscriptRecord | readonly TranscriptMessage[];
-
-function isPersistedTranscriptRecord(value: PersistedTranscriptStoreValue): value is PersistedTranscriptRecord {
-  if (Array.isArray(value)) {
-    return false;
-  }
-  const candidate = value as { version?: unknown; transcript?: unknown };
-  return candidate.version === 1 && Array.isArray(candidate.transcript);
-}
-
+type ExtensionUiDialogRequest = Extract<SessionDriverEvent, { type: "hostUiRequest" }>["request"] & {
+  readonly requestId: string;
+  readonly timeoutMs?: number;
+};
 export interface DesktopAppStoreOptions {
   readonly userDataDir: string;
   readonly initialWorkspacePaths: readonly string[];
   readonly getWindow?: () => BrowserWindow | null;
+  readonly shouldKeepSessionDialogs?: (sessionRef: SessionRef) => boolean;
+  readonly driverOptions?: Pick<PiSdkDriverConfig, "extensionFactories" | "inlineExtensionMetadata">;
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
     options: GenerateThreadTitleOptions,
   ) => Promise<string | null | undefined>;
+}
+
+export interface DesktopAppViewState {
+  readonly selectedWorkspaceId?: string;
+  readonly selectedSessionId?: string;
+  readonly activeView?: AppView;
+  readonly sidebarCollapsed?: boolean;
 }
 
 export class DesktopAppStore implements AppStoreInternals {
@@ -137,7 +136,6 @@ export class DesktopAppStore implements AppStoreInternals {
   readonly catalogStore: JsonCatalogStore;
   readonly worktreeManager: GitWorktreeManager;
   private readonly uiStateFilePath: string;
-  private readonly transcriptStore: JsonFileStore<PersistedTranscriptStoreValue>;
   readonly attachmentStore: JsonFileStore<ComposerAttachment[]>;
   readonly sessionState = new SessionStateMap();
   readonly runtimeByWorkspace = new Map<string, RuntimeSnapshot>();
@@ -146,8 +144,13 @@ export class DesktopAppStore implements AppStoreInternals {
   private readonly reportedCompatibilityIssuesBySession = new Map<string, Set<string>>();
   private readonly initialWorkspacePaths: readonly string[];
   private readonly getWindow: () => BrowserWindow | null;
+  private readonly shouldKeepSessionDialogs: (sessionRef: SessionRef) => boolean;
+  private composerDraftSyncTarget: SessionRef | undefined;
+  private composerDraftProjectionNonce = 0;
   private persistUiStateTimer: NodeJS.Timeout | undefined;
-  private readonly transcriptPersistTimers = new Map<string, NodeJS.Timeout>();
+  private orchestrationSupervisionTimer: NodeJS.Timeout | undefined;
+  private scheduledOrchestrationSupervisionRunAt: string | undefined;
+  private readonly extensionDialogTimeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly restoredSelectedSessionKeysAwaitingSelection = new Set<string>();
   private initPromise: Promise<void> | undefined;
   private selectionEpoch = 0;
@@ -157,6 +160,7 @@ export class DesktopAppStore implements AppStoreInternals {
     const catalogFilePath = join(options.userDataDir, "catalogs.json");
     const driverOptions: PiSdkDriverConfig = {
       catalogFilePath,
+      ...(options.driverOptions ?? {}),
       ...(options.generateThreadTitleOverride
         ? { generateThreadTitleOverride: options.generateThreadTitleOverride }
         : {}),
@@ -166,10 +170,10 @@ export class DesktopAppStore implements AppStoreInternals {
     this.catalogStore = new JsonCatalogStore({ catalogFilePath });
     this.worktreeManager = new GitWorktreeManager({ catalogStorage: this.catalogStore });
     this.uiStateFilePath = join(options.userDataDir, "ui-state.json");
-    this.transcriptStore = new JsonFileStore<PersistedTranscriptStoreValue>(options.userDataDir, "transcripts");
     this.attachmentStore = new JsonFileStore<ComposerAttachment[]>(options.userDataDir, "attachments");
     this.initialWorkspacePaths = options.initialWorkspacePaths;
     this.getWindow = options.getWindow ?? (() => null);
+    this.shouldKeepSessionDialogs = options.shouldKeepSessionDialogs ?? (() => false);
   }
 
   /* ── Lifecycle ──────────────────────────────────────────── */
@@ -186,6 +190,11 @@ export class DesktopAppStore implements AppStoreInternals {
     return structuredClone(this.state);
   }
 
+  async getStateForView(view: DesktopAppViewState): Promise<DesktopAppState> {
+    await this.initialize();
+    return this.projectStateForView(view);
+  }
+
   async getSelectedTranscript(): Promise<SelectedTranscriptRecord | null> {
     await this.initialize();
     const sessionRef = this.selectedSessionRef();
@@ -196,6 +205,64 @@ export class DesktopAppStore implements AppStoreInternals {
     return this.buildSelectedTranscriptRecord(sessionRef);
   }
 
+  async getSelectedTranscriptForView(view: DesktopAppViewState): Promise<SelectedTranscriptRecord | null> {
+    await this.initialize();
+    const sessionRef = this.selectedSessionRefForView(view);
+    if (!sessionRef) {
+      return null;
+    }
+    await this.ensureTranscriptLoaded(sessionRef);
+    return this.buildSelectedTranscriptRecord(sessionRef);
+  }
+
+  projectStateForView(
+    view: DesktopAppViewState,
+    state: DesktopAppState = this.state,
+    previousView?: DesktopAppViewState,
+  ): DesktopAppState {
+    const selectedWorkspaceId = this.resolveViewWorkspaceId(view.selectedWorkspaceId, state);
+    const selectedSessionId = this.resolveViewSessionId(selectedWorkspaceId, view.selectedSessionId, state);
+    const previousWorkspaceId = previousView
+      ? this.resolveViewWorkspaceId(previousView.selectedWorkspaceId, state)
+      : selectedWorkspaceId;
+    const previousSessionId = previousView
+      ? this.resolveViewSessionId(previousWorkspaceId, previousView.selectedSessionId, state)
+      : selectedSessionId;
+    const selectionChanged =
+      selectedWorkspaceId !== previousWorkspaceId || selectedSessionId !== previousSessionId;
+    const matchesStateSelection =
+      selectedWorkspaceId === state.selectedWorkspaceId && selectedSessionId === state.selectedSessionId;
+    const syncTargetsProjectedSession =
+      state.composerDraftSyncSource === "extension-editor-text" &&
+      this.composerDraftSyncTarget?.workspaceId === selectedWorkspaceId &&
+      this.composerDraftSyncTarget?.sessionId === selectedSessionId;
+    const activeView = view.activeView ?? state.activeView;
+    const sidebarCollapsed = view.sidebarCollapsed ?? state.sidebarCollapsed;
+
+    return {
+      ...structuredClone(state),
+      selectedWorkspaceId,
+      selectedSessionId,
+      activeView,
+      sidebarCollapsed,
+      composerDraft: this.resolveComposerDraft(selectedWorkspaceId, selectedSessionId),
+      composerDraftSyncSource: selectionChanged
+        ? "selection"
+        : syncTargetsProjectedSession || (matchesStateSelection && state.composerDraftSyncSource !== "extension-editor-text")
+          ? state.composerDraftSyncSource
+          : "state",
+      composerDraftSyncNonce: selectionChanged
+        ? this.allocateComposerDraftSyncNonce(state.composerDraftSyncNonce)
+        : state.composerDraftSyncNonce,
+      composerAttachments: this.resolveComposerAttachments(selectedWorkspaceId, selectedSessionId),
+      queuedComposerMessages: this.resolveQueuedComposerMessages(selectedWorkspaceId, selectedSessionId),
+      editingQueuedMessageId: this.resolveEditingQueuedMessageId(selectedWorkspaceId, selectedSessionId),
+      lastError: this.resolveSelectedSessionError(selectedWorkspaceId, selectedSessionId, false) ?? (
+        selectedSessionId ? undefined : state.lastError
+      ),
+    };
+  }
+
   async flushPersistence(): Promise<void> {
     await this.initialize();
     if (this.persistUiStateTimer) {
@@ -203,17 +270,39 @@ export class DesktopAppStore implements AppStoreInternals {
       this.persistUiStateTimer = undefined;
     }
 
-    const pendingTranscriptWrites = [...this.transcriptPersistTimers.entries()];
-    this.transcriptPersistTimers.clear();
-    await Promise.all(
-      pendingTranscriptWrites.map(async ([key, timer]) => {
-        clearTimeout(timer);
-        const transcript = (this.sessionState.transcriptCache.get(key) ?? []).map(cloneTranscriptMessage);
-        await this.writePersistedTranscript(key, transcript);
-      }),
-    );
-
     await this.persistUiState();
+  }
+
+  private scheduleOrchestrationSupervision(): void {
+    const nextRunAt = orchestration.nextSupervisionRunAt(this.state.orchestrationChildren);
+    if (nextRunAt && nextRunAt === this.scheduledOrchestrationSupervisionRunAt && this.orchestrationSupervisionTimer) {
+      return;
+    }
+    if (this.orchestrationSupervisionTimer) {
+      clearTimeout(this.orchestrationSupervisionTimer);
+      this.orchestrationSupervisionTimer = undefined;
+    }
+    this.scheduledOrchestrationSupervisionRunAt = nextRunAt;
+    if (!nextRunAt) {
+      return;
+    }
+    const delayMs = Math.max(0, Date.parse(nextRunAt) - Date.now());
+    this.orchestrationSupervisionTimer = setTimeout(() => {
+      this.orchestrationSupervisionTimer = undefined;
+      this.scheduledOrchestrationSupervisionRunAt = undefined;
+      void this.runOrchestrationSupervisionTick();
+    }, delayMs);
+    this.orchestrationSupervisionTimer.unref?.();
+  }
+
+  private async runOrchestrationSupervisionTick(): Promise<void> {
+    await this.initialize();
+    const result = orchestration.reconcileDueSupervisionLoops(this);
+    if (result.changed) {
+      await this.persistUiState();
+      this.emit();
+    }
+    this.scheduleOrchestrationSupervision();
   }
 
   async emitTestSessionEvent(event: SessionDriverEvent): Promise<void> {
@@ -284,6 +373,20 @@ export class DesktopAppStore implements AppStoreInternals {
     return this.emit();
   }
 
+  async reorderPinnedSessions(order: readonly string[]): Promise<DesktopAppState> {
+    await this.initialize();
+    const pinnedSessionOrder = reconcilePinnedSessionOrder(this.sessionState.pinnedAtBySession, order);
+    this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
+    this.state = {
+      ...this.state,
+      pinnedSessionOrder,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
+  }
+
   async selectWorkspace(workspaceId: string): Promise<DesktopAppState> {
     return workspace.selectWorkspace(this, workspaceId);
   }
@@ -310,7 +413,7 @@ export class DesktopAppStore implements AppStoreInternals {
       const selectionEpoch = ++this.selectionEpoch;
       this.applyFastSessionSelection(sessionRef);
       try {
-        await this.hydrateSelectedSessionAfterSelection(sessionRef, selectionEpoch);
+        await this.hydrateSelectedSessionAfterSelection(sessionRef, selectionEpoch, { markViewed: true });
       } catch (error) {
         await this.handleSelectedSessionHydrationError(sessionRef, selectionEpoch, error);
       }
@@ -324,6 +427,66 @@ export class DesktopAppStore implements AppStoreInternals {
 
   async unarchiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
     return workspace.unarchiveSession(this, target);
+  }
+
+  async setSessionPinned(target: WorkspaceSessionTarget, pinned: boolean): Promise<DesktopAppState> {
+    await this.initialize();
+    const sessionRef = toSessionRef(target);
+    const session = this.sessionFromState(sessionRef);
+    if (!session) {
+      return this.withError(`Unknown session: ${target.workspaceId}:${target.sessionId}`);
+    }
+    if (pinned && session.archivedAt) {
+      return this.withError(`Cannot pin archived session: ${target.workspaceId}:${target.sessionId}`);
+    }
+
+    const key = sessionKey(sessionRef);
+    const currentPinnedAt = this.sessionState.pinnedAtBySession.get(key);
+    const nextPinnedAt = pinned ? (currentPinnedAt ?? new Date().toISOString()) : undefined;
+    if (currentPinnedAt === nextPinnedAt && session.pinnedAt === nextPinnedAt) {
+      return structuredClone(this.state);
+    }
+
+    if (nextPinnedAt) {
+      this.sessionState.pinnedAtBySession.set(key, nextPinnedAt);
+      this.sessionState.pinnedSessionOrder = [
+        key,
+        ...this.sessionState.pinnedSessionOrder.filter((entry) => entry !== key),
+      ];
+    } else {
+      this.sessionState.pinnedAtBySession.delete(key);
+      this.sessionState.pinnedSessionOrder = this.sessionState.pinnedSessionOrder.filter((entry) => entry !== key);
+    }
+
+    const pinnedSessionOrder = reconcilePinnedSessionOrder(
+      this.sessionState.pinnedAtBySession,
+      this.sessionState.pinnedSessionOrder,
+    );
+    this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map((workspaceEntry) =>
+        workspaceEntry.id === target.workspaceId
+          ? {
+              ...workspaceEntry,
+              sessions: workspaceEntry.sessions.map((entry) =>
+                entry.id === target.sessionId
+                  ? {
+                      ...entry,
+                      pinnedAt: nextPinnedAt,
+                    }
+                  : entry,
+              ),
+            }
+          : workspaceEntry,
+      ),
+      pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+      pinnedSessionOrder,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
   }
 
   async syncCurrentWorkspace(): Promise<DesktopAppState> {
@@ -430,6 +593,18 @@ export class DesktopAppStore implements AppStoreInternals {
     return workspace.createSession(this, input);
   }
 
+  async sendChildThreadFollowUp(input: SendChildThreadFollowUpInput): Promise<DesktopAppState> {
+    const state = await orchestration.sendChildThreadFollowUp(this, input);
+    this.scheduleOrchestrationSupervision();
+    return state;
+  }
+
+  async setChildSupervisionLoop(input: SetChildSupervisionLoopInput): Promise<DesktopAppState> {
+    const state = await orchestration.setChildSupervisionLoopGate(this, input);
+    this.scheduleOrchestrationSupervision();
+    return state;
+  }
+
   /* ── View / UI state ───────────────────────────────────── */
 
   async setActiveView(activeView: AppView): Promise<DesktopAppState> {
@@ -487,7 +662,7 @@ export class DesktopAppStore implements AppStoreInternals {
     await this.initialize();
     const normalizedShell = integratedTerminalShell.trim();
     if (this.state.integratedTerminalShell === normalizedShell) {
-      return this.emit();
+      return structuredClone(this.state);
     }
     this.state = {
       ...this.state,
@@ -638,6 +813,42 @@ export class DesktopAppStore implements AppStoreInternals {
     );
   }
 
+  async listCustomProviders(): Promise<readonly CustomProviderConfig[]> {
+    await this.initialize();
+    const entries = await this.driver.runtimeSupervisor.listCustomProviders();
+    return entries.map((entry) => ({
+      providerId: entry.providerId,
+      baseUrl: entry.baseUrl,
+      ...(entry.apiKey !== undefined ? { apiKey: entry.apiKey } : {}),
+      models: entry.models.map((model) => ({
+        id: model.id,
+        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+      })),
+    }));
+  }
+
+  async setCustomProvider(workspaceId: string, config: CustomProviderConfig): Promise<DesktopAppState> {
+    return this.withRuntimeUpdate(workspaceId, (ws) =>
+      this.driver.runtimeSupervisor.setCustomProvider(ws, {
+        providerId: config.providerId,
+        baseUrl: config.baseUrl,
+        ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
+        models: config.models.map((model) => ({
+          id: model.id,
+          ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+        })),
+      }),
+      { refreshAllWorkspaces: true },
+    );
+  }
+
+  async deleteCustomProvider(workspaceId: string, providerId: string): Promise<DesktopAppState> {
+    return this.withRuntimeUpdate(workspaceId, (ws) =>
+      this.driver.runtimeSupervisor.deleteCustomProvider(ws, providerId),
+      { refreshAllWorkspaces: true },
+    );
+  }
+
   async setEnableSkillCommands(workspaceId: string, enabled: boolean): Promise<DesktopAppState> {
     return this.withRuntimeUpdate(workspaceId, (ws) =>
       this.driver.runtimeSupervisor.setEnableSkillCommands(ws, enabled),
@@ -729,6 +940,7 @@ export class DesktopAppStore implements AppStoreInternals {
     action: (ws: WorkspaceRef) => Promise<RuntimeSnapshot>,
     options?: {
       readonly reloadSessions?: boolean;
+      readonly refreshAllWorkspaces?: boolean;
     },
   ): Promise<DesktopAppState> {
     await this.initialize();
@@ -739,13 +951,68 @@ export class DesktopAppStore implements AppStoreInternals {
 
     return this.withErrorHandling(async () => {
       const snapshot = await action(ws);
-      this.runtimeByWorkspace.set(workspaceId, snapshot);
+      if (options?.refreshAllWorkspaces) {
+        await this.refreshRuntimeForAllWorkspaces(workspaceId, snapshot);
+      } else {
+        this.runtimeByWorkspace.set(workspaceId, snapshot);
+      }
       if (options?.reloadSessions) {
         this.clearExtensionUiForWorkspace(workspaceId);
         await this.reloadSessionsForWorkspace(workspaceId);
       }
-      await this.refreshSessionCommandsForWorkspace(workspaceId);
+      if (options?.refreshAllWorkspaces) {
+        await this.refreshSessionCommandsForAllWorkspaces();
+      } else {
+        await this.refreshSessionCommandsForWorkspace(workspaceId);
+      }
       return this.refreshState({ clearLastError: true });
+    });
+  }
+
+  private async refreshRuntimeForAllWorkspaces(
+    updatedWorkspaceId: string,
+    updatedSnapshot: RuntimeSnapshot,
+  ): Promise<void> {
+    this.runtimeByWorkspace.set(updatedWorkspaceId, updatedSnapshot);
+    const workspacesToRefresh = this.state.workspaces.filter((workspace) => workspace.id !== updatedWorkspaceId);
+    const snapshots = await Promise.allSettled(
+      workspacesToRefresh.map(async (workspace) => {
+        const runtime = await this.driver.runtimeSupervisor.refreshRuntime({
+          workspaceId: workspace.id,
+          path: workspace.path,
+          displayName: workspace.name,
+        });
+        return [workspace, runtime] as const;
+      }),
+    );
+    snapshots.forEach((result, index) => {
+      const workspace = workspacesToRefresh[index];
+      if (result.status === "fulfilled") {
+        this.runtimeByWorkspace.set(result.value[0].id, result.value[1]);
+        return;
+      }
+      console.warn(
+        `[pi-gui] Failed to refresh runtime for ${workspace?.path ?? "unknown workspace"} after custom provider update: ${
+          result.reason instanceof Error ? result.reason.message : String(result.reason)
+        }`,
+      );
+    });
+  }
+
+  private async refreshSessionCommandsForAllWorkspaces(): Promise<void> {
+    const results = await Promise.allSettled(
+      this.state.workspaces.map((workspace) => this.refreshSessionCommandsForWorkspace(workspace.id)),
+    );
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        return;
+      }
+      const workspace = this.state.workspaces[index];
+      console.warn(
+        `[pi-gui] Failed to refresh session commands for ${workspace?.path ?? "unknown workspace"} after custom provider update: ${
+          result.reason instanceof Error ? result.reason.message : String(result.reason)
+        }`,
+      );
     });
   }
 
@@ -765,9 +1032,12 @@ export class DesktopAppStore implements AppStoreInternals {
         },
         integratedTerminalShell: persisted.integratedTerminalShell ?? this.state.integratedTerminalShell,
         lastViewedAtBySession: persisted.lastViewedAtBySession ?? {},
+        pinnedAtBySession: persisted.pinnedAtBySession ?? {},
+        pinnedSessionOrder: persisted.pinnedSessionOrder ?? [],
         workspaceOrder: persisted.workspaceOrder ?? [],
         sidebarCollapsed: persisted.sidebarCollapsed ?? this.state.sidebarCollapsed,
         enableTransparency: persisted.enableTransparency ?? this.state.enableTransparency,
+        orchestrationChildren: persisted.orchestrationChildren ?? [],
       };
       await this.migrateLegacyPersistence(persisted);
       this.sessionState.lastViewedAtBySession.clear();
@@ -776,6 +1046,16 @@ export class DesktopAppStore implements AppStoreInternals {
           this.sessionState.lastViewedAtBySession.set(key, viewedAt);
         }
       }
+      this.sessionState.pinnedAtBySession.clear();
+      for (const [key, pinnedAt] of Object.entries(persisted.pinnedAtBySession ?? {})) {
+        if (pinnedAt) {
+          this.sessionState.pinnedAtBySession.set(key, pinnedAt);
+        }
+      }
+      this.sessionState.pinnedSessionOrder = reconcilePinnedSessionOrder(
+        this.sessionState.pinnedAtBySession,
+        persisted.pinnedSessionOrder ?? [],
+      ).slice();
       this.sessionState.composerDraftsBySession.clear();
       for (const [key, draft] of Object.entries(persisted.composerDraftsBySession ?? {})) {
         if (draft) {
@@ -820,6 +1100,7 @@ export class DesktopAppStore implements AppStoreInternals {
         this.restoredSelectedSessionKeysAwaitingSelection.add(sessionKey(restoredSessionRef));
       }
       this.startSelectedSessionHydration(restoredSessionRef, { markViewed: false });
+      this.scheduleOrchestrationSupervision();
     } catch (error) {
       this.state = {
         ...createEmptyDesktopAppState(),
@@ -833,21 +1114,6 @@ export class DesktopAppStore implements AppStoreInternals {
   }
 
   private async migrateLegacyPersistence(persisted: LegacyPersistedUiState): Promise<void> {
-    const transcriptEntries = Object.entries(persisted.transcripts ?? {});
-    await Promise.all(
-      transcriptEntries.map(async ([key, transcript]) => {
-        const clonedTranscript = transcript.map((item) => cloneTranscriptMessage(item as TranscriptMessage));
-        if (clonedTranscript.length > 0) {
-          if (this.isPossiblyTrimmedLegacyTranscript(clonedTranscript)) {
-            return;
-          }
-          this.sessionState.transcriptCache.set(key, clonedTranscript);
-          this.sessionState.loadedTranscriptKeys.add(key);
-          await this.writePersistedTranscript(key, clonedTranscript);
-        }
-      }),
-    );
-
     const attachmentEntries = Object.entries(persisted.composerAttachmentsBySession ?? {});
     await Promise.all(
       attachmentEntries.map(async ([key, attachments]) => {
@@ -902,6 +1168,7 @@ export class DesktopAppStore implements AppStoreInternals {
         this.sessionState.runningSinceBySession,
         this.sessionState.sessionConfigBySession,
         this.sessionState.lastViewedAtBySession,
+        this.sessionState.pinnedAtBySession,
       );
       const worktreesByWorkspace = buildWorktreeRecords(workspacesSnapshot.workspaces, worktreeEntries);
       const liveWorkspaceIds = new Set(workspaces.map((w) => w.id));
@@ -959,6 +1226,11 @@ export class DesktopAppStore implements AppStoreInternals {
           ? await this.loadScopedModelSettingsByWorkspace(workspaces, workspacesSnapshot.workspaces, globalModelSettings)
           : undefined;
       const runtimeByWorkspace = this.serializeEffectiveRuntimeState(workspaces, scopedModelSettingsByWorkspace);
+      const pinnedSessionOrder = reconcilePinnedSessionOrder(
+        this.sessionState.pinnedAtBySession,
+        this.sessionState.pinnedSessionOrder,
+      );
+      this.sessionState.pinnedSessionOrder = [...pinnedSessionOrder];
 
       const activeView = options.activeView ?? this.state.activeView;
       const composerDraftSync = this.resolveComposerDraftSync(selectedWorkspaceId, selectedSessionId, options);
@@ -973,7 +1245,10 @@ export class DesktopAppStore implements AppStoreInternals {
         sessionCommandsBySession: mapToRecord(this.sessionState.sessionCommandsBySession),
         sessionExtensionUiBySession: this.serializeSessionExtensionUiState(),
         extensionCommandCompatibilityByWorkspace: serializeCompatibilityByWorkspace(this.extensionCommandCompatibilityByWorkspace),
+        orchestrationChildren: this.state.orchestrationChildren,
         lastViewedAtBySession: mapToRecord(this.sessionState.lastViewedAtBySession),
+        pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+        pinnedSessionOrder,
         workspaceOrder: this.state.workspaceOrder,
         modelSettingsScopeMode: this.state.modelSettingsScopeMode,
         globalModelSettings,
@@ -986,14 +1261,22 @@ export class DesktopAppStore implements AppStoreInternals {
         lastError: this.resolveSelectedSessionError(selectedWorkspaceId, selectedSessionId, options.clearLastError),
         revision: this.state.revision + 1,
       };
+      await orchestration.hydrateOrchestrationChildren(this);
+      this.state = {
+        ...this.state,
+        orchestrationChildren: orchestration.projectOrchestrationChildren(this),
+      };
+      this.scheduleOrchestrationSupervision();
 
       if (options.markSelectedSessionViewed ?? true) {
         this.markSelectedSessionViewedIfVisible();
       }
 
-      await this.persistUiState();
-      const snapshot = this.emit();
-      if (this.currentSelectedSessionKey() !== previousSelectedKey) {
+      if (options.persistState ?? true) {
+        await this.persistUiState();
+      }
+      const snapshot = options.emitState === false ? structuredClone(this.state) : this.emit();
+      if ((options.publishSelectedTranscript ?? true) && this.currentSelectedSessionKey() !== previousSelectedKey) {
         this.publishSelectedTranscript();
       }
       return snapshot;
@@ -1004,7 +1287,21 @@ export class DesktopAppStore implements AppStoreInternals {
 
   private async pruneStaleSessionSubscriptions(sessions: readonly SessionCatalogEntry[]): Promise<void> {
     const activeKeys = new Set(sessions.map((session) => sessionKey(session.sessionRef)));
-    this.sessionState.prune(activeKeys);
+    const persistedUiChanged = this.sessionState.prune(activeKeys);
+    this.pruneOrphanedUiState(activeKeys, persistedUiChanged);
+    await this.pruneOrphanedAttachmentFiles(activeKeys);
+  }
+
+  /** Drop ui-state entries for sessions that no longer exist in the catalog. */
+  private pruneOrphanedUiState(activeKeys: Set<string>, alreadyChanged = false): void {
+    if (this.sessionState.prunePersistedUiState(activeKeys) || alreadyChanged) {
+      this.schedulePersistUiState();
+    }
+  }
+
+  private async pruneOrphanedAttachmentFiles(activeKeys: Set<string>): Promise<void> {
+    const keys = await this.attachmentStore.listKeys();
+    await Promise.all(keys.filter((key) => !activeKeys.has(key)).map((key) => this.attachmentStore.remove(key)));
   }
 
   private async ensureSubscriptionsForSessions(sessions: readonly SessionCatalogEntry[]): Promise<void> {
@@ -1043,25 +1340,16 @@ export class DesktopAppStore implements AppStoreInternals {
       return;
     }
 
-    const cachedTranscript = await this.readPersistedTranscript(key);
-    const transcript = cachedTranscript
-      ? await this.resolveLoadedTranscript(sessionRef, cachedTranscript)
-      : await this.driver.getTranscript(sessionRef);
-
-    if (!cachedTranscript || cachedTranscript.format === "legacy") {
-      await this.writePersistedTranscript(key, transcript);
-    }
-
+    const transcript = timelineFromDriverTranscript(await this.driver.getTranscript(sessionRef));
     this.sessionState.loadedTranscriptKeys.add(key);
     this.sessionState.transcriptCache.set(key, transcript);
   }
 
   async reloadTranscriptFromDriver(sessionRef: SessionRef): Promise<void> {
     const key = sessionKey(sessionRef);
-    const transcript = await this.driver.getTranscript(sessionRef);
+    const transcript = timelineFromDriverTranscript(await this.driver.getTranscript(sessionRef));
     this.sessionState.loadedTranscriptKeys.add(key);
     this.sessionState.transcriptCache.set(key, transcript);
-    void this.writePersistedTranscript(key, transcript);
     this.publishSelectedTranscriptFor(sessionRef);
   }
 
@@ -1132,7 +1420,13 @@ export class DesktopAppStore implements AppStoreInternals {
     this.sessionState.sessionSubscriptions.set(targetKey, unsubscribe);
   }
 
-  async cancelPendingDialogsForSession(sessionRef: SessionRef): Promise<void> {
+  async cancelPendingDialogsForSession(
+    sessionRef: SessionRef,
+    options: { readonly force?: boolean } = {},
+  ): Promise<void> {
+    if (!options.force && this.shouldKeepSessionDialogs(sessionRef)) {
+      return;
+    }
     const key = sessionKey(sessionRef);
     const uiState = this.sessionState.extensionUiBySession.get(key);
     if (!uiState || uiState.pendingDialogs.length === 0) {
@@ -1141,6 +1435,17 @@ export class DesktopAppStore implements AppStoreInternals {
 
     const pendingDialogs = [...uiState.pendingDialogs];
     uiState.pendingDialogs = [];
+    for (const dialog of pendingDialogs) {
+      this.clearExtensionDialogTimeout(sessionRef, dialog.requestId);
+    }
+    this.state = this.syncDerivedSessionState(
+      {
+        ...this.state,
+        revision: this.state.revision + 1,
+      },
+      sessionRef,
+    );
+    this.emit();
     await Promise.all(
       pendingDialogs.map((dialog) =>
         this.driver.respondToHostUiRequest(sessionRef, {
@@ -1151,15 +1456,32 @@ export class DesktopAppStore implements AppStoreInternals {
     );
   }
 
+  async cancelPendingDialogsWithoutVisibleWindow(
+    isSessionVisible: (sessionRef: SessionRef) => boolean,
+  ): Promise<void> {
+    await this.initialize();
+    const pendingSessionRefs: SessionRef[] = [];
+    for (const workspace of this.state.workspaces) {
+      for (const session of workspace.sessions) {
+        const sessionRef = { workspaceId: workspace.id, sessionId: session.id };
+        const uiState = this.sessionState.extensionUiBySession.get(sessionKey(sessionRef));
+        if (uiState && uiState.pendingDialogs.length > 0 && !isSessionVisible(sessionRef)) {
+          pendingSessionRefs.push(sessionRef);
+        }
+      }
+    }
+
+    await Promise.all(
+      pendingSessionRefs.map((sessionRef) => this.cancelPendingDialogsForSession(sessionRef, { force: true })),
+    );
+  }
+
   async respondToHostUiRequest(
     sessionRef: SessionRef,
     response: HostUiResponse,
   ): Promise<DesktopAppState> {
-    const key = sessionKey(sessionRef);
-    const uiState = this.sessionState.extensionUiBySession.get(key);
-    if (uiState) {
-      uiState.pendingDialogs = uiState.pendingDialogs.filter((dialog) => dialog.requestId !== response.requestId);
-    }
+    this.removePendingExtensionDialog(sessionRef, response.requestId);
+    this.clearExtensionDialogTimeout(sessionRef, response.requestId);
 
     return this.withErrorHandling(async () => {
       await this.driver.respondToHostUiRequest(sessionRef, response);
@@ -1219,6 +1541,7 @@ export class DesktopAppStore implements AppStoreInternals {
       return;
     }
 
+    this.clearExtensionDialogTimeoutsForSession(sessionRef);
     this.sessionState.extensionUiBySession.delete(key);
     this.state = this.syncDerivedSessionState(this.state, sessionRef);
   }
@@ -1308,6 +1631,7 @@ export class DesktopAppStore implements AppStoreInternals {
   private applyHostUiRequest(event: Extract<SessionDriverEvent, { type: "hostUiRequest" }>): void {
     const key = sessionKey(event.sessionRef);
     if (event.request.kind === "reset") {
+      this.clearExtensionDialogTimeoutsForSession(event.sessionRef);
       this.sessionState.extensionUiBySession.delete(key);
       return;
     }
@@ -1318,6 +1642,8 @@ export class DesktopAppStore implements AppStoreInternals {
     switch (event.request.kind) {
       case "editorText":
         this.sessionState.composerDraftsBySession.set(key, event.request.text);
+        this.composerDraftSyncTarget = event.sessionRef;
+        const composerDraftSyncNonce = this.allocateComposerDraftSyncNonce();
         if (
           this.state.selectedWorkspaceId === event.sessionRef.workspaceId &&
           this.state.selectedSessionId === event.sessionRef.sessionId
@@ -1326,20 +1652,93 @@ export class DesktopAppStore implements AppStoreInternals {
             ...this.state,
             composerDraft: event.request.text,
             composerDraftSyncSource: "extension-editor-text",
-            composerDraftSyncNonce: this.state.composerDraftSyncNonce + 1,
+            composerDraftSyncNonce,
+          };
+        } else {
+          this.state = {
+            ...this.state,
+            composerDraftSyncSource: "extension-editor-text",
+            composerDraftSyncNonce,
           };
         }
         break;
       default:
         if (isExtensionUiDialogRequest(event.request)) {
           const dialog = event.request;
+          this.clearExtensionDialogTimeout(event.sessionRef, dialog.requestId);
           uiState.pendingDialogs = [
             ...uiState.pendingDialogs.filter((entry) => entry.requestId !== dialog.requestId),
             dialog,
           ];
+          this.scheduleExtensionDialogTimeout(event.sessionRef, dialog);
         }
         break;
     }
+  }
+
+  private extensionDialogTimeoutKey(sessionRef: SessionRef, requestId: string): string {
+    return `${sessionKey(sessionRef)}:${requestId}`;
+  }
+
+  private clearExtensionDialogTimeout(sessionRef: SessionRef, requestId: string): void {
+    const key = this.extensionDialogTimeoutKey(sessionRef, requestId);
+    const timer = this.extensionDialogTimeoutTimers.get(key);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    this.extensionDialogTimeoutTimers.delete(key);
+  }
+
+  private clearExtensionDialogTimeoutsForSession(sessionRef: SessionRef): void {
+    const prefix = `${sessionKey(sessionRef)}:`;
+    for (const [key, timer] of this.extensionDialogTimeoutTimers) {
+      if (!key.startsWith(prefix)) {
+        continue;
+      }
+      clearTimeout(timer);
+      this.extensionDialogTimeoutTimers.delete(key);
+    }
+  }
+
+  private removePendingExtensionDialog(sessionRef: SessionRef, requestId: string): boolean {
+    const key = sessionKey(sessionRef);
+    const uiState = this.sessionState.extensionUiBySession.get(key);
+    if (!uiState) {
+      return false;
+    }
+
+    const nextDialogs = uiState.pendingDialogs.filter((entry) => entry.requestId !== requestId);
+    if (nextDialogs.length === uiState.pendingDialogs.length) {
+      return false;
+    }
+
+    uiState.pendingDialogs = nextDialogs;
+    this.state = this.syncDerivedSessionState(
+      {
+        ...this.state,
+        revision: this.state.revision + 1,
+      },
+      sessionRef,
+    );
+    this.emit();
+    return true;
+  }
+
+  private scheduleExtensionDialogTimeout(
+    sessionRef: SessionRef,
+    dialog: ExtensionUiDialogRequest,
+  ): void {
+    if (dialog.timeoutMs === undefined) {
+      return;
+    }
+
+    const timerKey = this.extensionDialogTimeoutKey(sessionRef, dialog.requestId);
+    const timer = setTimeout(() => {
+      this.extensionDialogTimeoutTimers.delete(timerKey);
+      this.removePendingExtensionDialog(sessionRef, dialog.requestId);
+    }, dialog.timeoutMs);
+    this.extensionDialogTimeoutTimers.set(timerKey, timer);
   }
 
   private async handleSessionEvent(event: SessionDriverEvent, subscriptionKey = sessionKey(event.sessionRef)): Promise<void> {
@@ -1398,6 +1797,7 @@ export class DesktopAppStore implements AppStoreInternals {
         this.reportExtensionCompatibilityIssue(event.sessionRef, event.issue, event.timestamp);
         break;
       case "sessionClosed":
+        this.clearExtensionDialogTimeoutsForSession(event.sessionRef);
         this.sessionState.extensionUiBySession.delete(key);
         this.sessionState.sessionCommandsBySession.delete(key);
         this.sessionState.queuedComposerMessagesBySession.delete(key);
@@ -1441,16 +1841,26 @@ export class DesktopAppStore implements AppStoreInternals {
       this.sessionState.runningSinceBySession,
       this.sessionState.lastViewedAtBySession,
     );
+    if (event.type === "toolFinished") {
+      await orchestration.handleOrchestrationThreadToolResult(this, event);
+    }
     this.markSessionViewedIfActivelyViewed(event.sessionRef);
     this.state = this.syncDerivedSessionState(this.state, event.sessionRef);
+    if (
+      orchestration.hasOrchestrationChildSession(this.state.orchestrationChildren, event.sessionRef) ||
+      orchestration.hasOrchestrationParentSession(this.state.orchestrationChildren, event.sessionRef)
+    ) {
+      this.state = {
+        ...this.state,
+        orchestrationChildren: orchestration.projectOrchestrationChildrenForSession(this, event.sessionRef),
+      };
+      this.scheduleOrchestrationSupervision();
+    }
     if (shouldFollowSessionMutation && event.type !== "sessionClosed") {
       this.applyFastSessionSelection(event.sessionRef);
       if (!refreshedFollowedSession) {
         this.startSelectedSessionHydration(event.sessionRef);
       }
-    }
-    if (event.type !== "hostUiRequest") {
-      this.persistTranscriptCacheForSession(event.sessionRef);
     }
     if (event.type === "runCompleted" || event.type === "runFailed" || event.type === "sessionClosed") {
       await this.persistUiState();
@@ -1627,6 +2037,50 @@ export class DesktopAppStore implements AppStoreInternals {
     });
   }
 
+  private selectedSessionRefForView(view: DesktopAppViewState): SessionRef | undefined {
+    const selectedWorkspaceId = this.resolveViewWorkspaceId(view.selectedWorkspaceId, this.state);
+    const selectedSessionId = this.resolveViewSessionId(selectedWorkspaceId, view.selectedSessionId, this.state);
+    if (!selectedWorkspaceId || !selectedSessionId) {
+      return undefined;
+    }
+
+    return toSessionRef({
+      workspaceId: selectedWorkspaceId,
+      sessionId: selectedSessionId,
+    });
+  }
+
+  private resolveViewWorkspaceId(
+    preferredWorkspaceId: string | undefined,
+    state: DesktopAppState,
+  ): string {
+    if (preferredWorkspaceId && state.workspaces.some((workspace) => workspace.id === preferredWorkspaceId)) {
+      return preferredWorkspaceId;
+    }
+    if (state.selectedWorkspaceId && state.workspaces.some((workspace) => workspace.id === state.selectedWorkspaceId)) {
+      return state.selectedWorkspaceId;
+    }
+    return state.workspaces[0]?.id ?? "";
+  }
+
+  private resolveViewSessionId(
+    selectedWorkspaceId: string,
+    preferredSessionId: string | undefined,
+    state: DesktopAppState,
+  ): string {
+    const workspace = state.workspaces.find((entry) => entry.id === selectedWorkspaceId);
+    if (!workspace) {
+      return "";
+    }
+    if (preferredSessionId && workspace.sessions.some((session) => session.id === preferredSessionId)) {
+      return preferredSessionId;
+    }
+    if (state.selectedWorkspaceId === selectedWorkspaceId && workspace.sessions.some((session) => session.id === state.selectedSessionId)) {
+      return state.selectedSessionId;
+    }
+    return workspace.sessions[0]?.id ?? "";
+  }
+
   sessionFromState(sessionRef: SessionRef) {
     return this.state.workspaces
       .find((w) => w.id === sessionRef.workspaceId)
@@ -1713,11 +2167,14 @@ export class DesktopAppStore implements AppStoreInternals {
       notificationPreferences: this.state.notificationPreferences,
       integratedTerminalShell: this.state.integratedTerminalShell || undefined,
       lastViewedAtBySession: mapToRecord(this.sessionState.lastViewedAtBySession),
+      pinnedAtBySession: mapToRecord(this.sessionState.pinnedAtBySession),
+      pinnedSessionOrder: this.sessionState.pinnedSessionOrder.length > 0 ? this.sessionState.pinnedSessionOrder : undefined,
       workspaceOrder: this.state.workspaceOrder.length > 0 ? this.state.workspaceOrder : undefined,
       modelSettingsScopeMode: this.state.modelSettingsScopeMode,
       appGlobalModelSettings: hasStoredModelSettings(this.state.globalModelSettings) ? this.state.globalModelSettings : undefined,
       sidebarCollapsed: this.state.sidebarCollapsed || undefined,
       enableTransparency: this.state.enableTransparency,
+      orchestrationChildren: orchestration.toPersistedOrchestrationChildren(this.state.orchestrationChildren),
     };
 
     await writePersistedUiState(this.uiStateFilePath, payload);
@@ -1729,79 +2186,6 @@ export class DesktopAppStore implements AppStoreInternals {
   ): Promise<void> {
     await this.attachmentStore.write(key, cloneComposerAttachments(attachments));
     await this.persistUiState();
-  }
-
-  persistTranscriptCacheForSession(sessionRef: SessionRef): void {
-    const key = sessionKey(sessionRef);
-    const existing = this.transcriptPersistTimers.get(key);
-    if (existing) {
-      clearTimeout(existing);
-    }
-
-    const timer = setTimeout(() => {
-      this.transcriptPersistTimers.delete(key);
-      const transcript = (this.sessionState.transcriptCache.get(key) ?? []).map(cloneTranscriptMessage);
-      void this.writePersistedTranscript(key, transcript);
-    }, 250);
-
-    this.transcriptPersistTimers.set(key, timer);
-  }
-
-  private async readPersistedTranscript(
-    key: string,
-  ): Promise<
-    | {
-        readonly format: "versioned" | "legacy";
-        readonly transcript: TranscriptMessage[];
-      }
-    | null
-  > {
-    const persisted = await this.transcriptStore.read(key);
-    if (!persisted) {
-      return null;
-    }
-
-    if (isPersistedTranscriptRecord(persisted)) {
-      return {
-        format: "versioned",
-        transcript: persisted.transcript.map((item) => cloneTranscriptMessage(item as TranscriptMessage)),
-      };
-    }
-
-    if (Array.isArray(persisted)) {
-      return {
-        format: "legacy",
-        transcript: persisted.map((item) => cloneTranscriptMessage(item as TranscriptMessage)),
-      };
-    }
-
-    return null;
-  }
-
-  private async resolveLoadedTranscript(
-    sessionRef: SessionRef,
-    persisted: {
-      readonly format: "versioned" | "legacy";
-      readonly transcript: TranscriptMessage[];
-    },
-  ): Promise<TranscriptMessage[]> {
-    if (persisted.format !== "legacy" || !this.isPossiblyTrimmedLegacyTranscript(persisted.transcript)) {
-      return persisted.transcript;
-    }
-
-    const driverTranscript = await this.driver.getTranscript(sessionRef);
-    return shouldReplaceLegacyTranscript(persisted.transcript, driverTranscript) ? driverTranscript : persisted.transcript;
-  }
-
-  private isPossiblyTrimmedLegacyTranscript(transcript: readonly TranscriptMessage[]): boolean {
-    return transcript.length === LEGACY_TRANSCRIPT_HISTORY_LIMIT;
-  }
-
-  private async writePersistedTranscript(key: string, transcript: readonly TranscriptMessage[]): Promise<void> {
-    await this.transcriptStore.write(key, {
-      version: 1,
-      transcript: transcript.map(cloneTranscriptMessage),
-    });
   }
 
   schedulePersistUiState(): void {
@@ -1894,6 +2278,18 @@ export class DesktopAppStore implements AppStoreInternals {
     return this.emit();
   }
 
+  async withSessionError(sessionRef: SessionRef, error: unknown): Promise<DesktopAppState> {
+    const message = error instanceof Error ? error.message : String(error);
+    this.sessionState.sessionErrorsBySession.set(sessionKey(sessionRef), message);
+    this.state = {
+      ...this.state,
+      lastError: this.isSelectedSession(sessionRef) ? message : this.state.lastError,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
+  }
+
   async withErrorHandling(fn: () => Promise<DesktopAppState>): Promise<DesktopAppState> {
     try {
       return await fn();
@@ -1911,7 +2307,7 @@ export class DesktopAppStore implements AppStoreInternals {
       activeView: "threads",
       composerDraft: this.resolveComposerDraft(sessionRef.workspaceId, sessionRef.sessionId),
       composerDraftSyncSource: "selection",
-      composerDraftSyncNonce: this.state.composerDraftSyncNonce + 1,
+      composerDraftSyncNonce: this.allocateComposerDraftSyncNonce(),
       composerAttachments: this.resolveComposerAttachments(sessionRef.workspaceId, sessionRef.sessionId),
       lastError: undefined,
       revision: this.state.revision + 1,
@@ -2002,7 +2398,7 @@ export class DesktopAppStore implements AppStoreInternals {
       workspaceId: this.state.selectedWorkspaceId,
       sessionId: this.state.selectedSessionId,
     } satisfies SessionRef;
-    if (!isSessionActivelyViewed(this.state, sessionRef, this.getWindow())) {
+    if (!isSessionVisibleInWindow(this.state, sessionRef, this.getWindow())) {
       return false;
     }
     if (this.restoredSelectedSessionKeysAwaitingSelection.has(sessionKey(sessionRef))) {
@@ -2111,7 +2507,7 @@ export class DesktopAppStore implements AppStoreInternals {
     if (options.composerDraftSyncSource) {
       return {
         source: options.composerDraftSyncSource,
-        nonce: this.state.composerDraftSyncNonce + 1,
+        nonce: this.allocateComposerDraftSyncNonce(),
       };
     }
 
@@ -2121,7 +2517,7 @@ export class DesktopAppStore implements AppStoreInternals {
     ) {
       return {
         source: "selection",
-        nonce: this.state.composerDraftSyncNonce + 1,
+        nonce: this.allocateComposerDraftSyncNonce(),
       };
     }
 
@@ -2129,6 +2525,11 @@ export class DesktopAppStore implements AppStoreInternals {
       source: this.state.composerDraftSyncSource,
       nonce: this.state.composerDraftSyncNonce,
     };
+  }
+
+  allocateComposerDraftSyncNonce(baseNonce = this.state.composerDraftSyncNonce): number {
+    this.composerDraftProjectionNonce = Math.max(this.composerDraftProjectionNonce, baseNonce) + 1;
+    return this.composerDraftProjectionNonce;
   }
 
   private resolveComposerAttachments(
@@ -2427,6 +2828,23 @@ function mergeEnabledModelPatterns(
   return merged;
 }
 
+function reconcilePinnedSessionOrder(
+  pinnedAtBySession: ReadonlyMap<string, string>,
+  preferredOrder: readonly string[],
+): readonly string[] {
+  const pinnedKeys = new Set(pinnedAtBySession.keys());
+  const ordered = [...new Set(preferredOrder)].filter((key) => pinnedKeys.has(key));
+  const seen = new Set(ordered);
+  const missing = [...pinnedAtBySession.keys()]
+    .filter((key) => !seen.has(key))
+    .sort((left, right) => {
+      const leftPinnedAt = pinnedAtBySession.get(left) ?? "";
+      const rightPinnedAt = pinnedAtBySession.get(right) ?? "";
+      return rightPinnedAt.localeCompare(leftPinnedAt);
+    });
+  return [...ordered, ...missing];
+}
+
 function formatCapabilityLabel(capability: string): string {
   switch (capability) {
     case "custom":
@@ -2452,44 +2870,6 @@ function resolveSelectedWorkspaceIdFromCatalog(
     return preferredWorkspaceId;
   }
   return workspaces[0]?.workspaceId ?? "";
-}
-
-function shouldReplaceLegacyTranscript(
-  legacyTranscript: readonly TranscriptMessage[],
-  driverTranscript: readonly TranscriptMessageRow[],
-): boolean {
-  if (driverTranscript.length === 0) {
-    return false;
-  }
-
-  const legacyMessages = legacyTranscript.filter(isTranscriptMessageRow);
-  if (driverTranscript.length > legacyMessages.length) {
-    return true;
-  }
-  if (driverTranscript.length < legacyMessages.length) {
-    return false;
-  }
-
-  return !sameTranscriptMessage(legacyMessages[0], driverTranscript[0]) ||
-    !sameTranscriptMessage(legacyMessages.at(-1), driverTranscript.at(-1));
-}
-
-function isTranscriptMessageRow(item: TranscriptMessage): item is TranscriptMessageRow {
-  return item.kind === "message";
-}
-
-function sameTranscriptMessage(
-  left: TranscriptMessageRow | undefined,
-  right: TranscriptMessageRow | undefined,
-): boolean {
-  if (!left || !right) {
-    return left === right;
-  }
-
-  return left.id === right.id &&
-    left.role === right.role &&
-    left.text === right.text &&
-    left.createdAt === right.createdAt;
 }
 
 function resolveSelectedSessionIdFromCatalog(

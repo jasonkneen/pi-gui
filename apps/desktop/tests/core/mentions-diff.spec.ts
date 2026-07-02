@@ -23,6 +23,9 @@ test("shows workspace file mentions from the composer and inserts the selected f
 
   const harness = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath],
+    envOverrides: {
+      PI_GUI_DISABLE_BUILTIN_COMPUTER_USE: "1",
+    },
     testMode: "background",
   });
 
@@ -36,9 +39,10 @@ test("shows workspace file mentions from the composer and inserts the selected f
 
     const mentionMenu = window.getByTestId("mention-menu");
     await expect(mentionMenu).toBeVisible();
-    await expect(mentionMenu.locator(".mention-menu__item")).toHaveCount(2);
+    await expect(mentionMenu.locator(".mention-menu__section-title")).toHaveText(["Extensions", "Files"]);
+    await expect(mentionMenu.locator(".mention-menu__item")).toHaveCount(3);
 
-    await composer.pressSequentially("READ");
+    await composer.pressSequentially("README");
     await expect(mentionMenu.locator(".mention-menu__item")).toHaveCount(1);
     await expect(mentionMenu.locator(".mention-menu__filename")).toContainText("README.md");
 
@@ -46,8 +50,7 @@ test("shows workspace file mentions from the composer and inserts the selected f
     await expect(mentionMenu).toHaveCount(0);
     await expect(composer).toHaveValue("@README.md ");
 
-    await composer.selectText();
-    await composer.press("Backspace");
+    await composer.fill("");
     await expect(composer).toHaveValue("");
     await composer.pressSequentially("@src");
     await expect(mentionMenu).toBeVisible();
@@ -75,6 +78,13 @@ test("toggles the diff panel from the keyboard shortcut and renders changed file
   try {
     const window = await harness.firstWindow();
     await createNamedThread(window, "Diff test");
+
+    const topbarActions = window.locator(".topbar__actions");
+    await expect(topbarActions.locator(".topbar__icon")).toHaveCount(3);
+    await expect(topbarActions.getByLabel("Toggle terminal")).toBeVisible();
+    await expect(topbarActions.getByLabel("Toggle changes")).toBeVisible();
+    await expect(topbarActions.getByLabel("Toggle files")).toBeVisible();
+    await expect(topbarActions.getByLabel(/Evidence|Workbench|Open folder/i)).toHaveCount(0);
 
     const diffPanel = window.locator(".diff-panel");
     await expect(diffPanel).toHaveCount(0);

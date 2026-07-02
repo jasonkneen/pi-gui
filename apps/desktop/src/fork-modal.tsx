@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { NewThreadEnvironment } from "./desktop-state";
+import { trapDialogFocus } from "./dialog-focus";
 
 interface ForkModalProps {
   readonly submitting: boolean;
@@ -28,6 +29,11 @@ export function ForkModal({
   }, []);
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      trapDialogFocus(event, dialogRef.current);
+      return;
+    }
+
     if (event.key === "Escape" && !submitting) {
       event.preventDefault();
       onClose();

@@ -21,6 +21,12 @@ let nodePty: NodePty | undefined;
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { cols: 80, rows: 24 };
 const MAX_WRITE_LENGTH = 128 * 1024;
 const MAX_TERMINAL_SESSIONS_PER_ROOT = 8;
+const computerUsePrivateEnvKeys = [
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_APP_TOKEN",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PID",
+  "PI_GUI_COMPUTER_USE_DESKTOP_PATH",
+  "PI_GUI_COMPUTER_USE_LOCKED_USE_AUTH_SOCKET",
+];
 
 interface TerminalRoot {
   readonly rootKey: string;
@@ -71,7 +77,7 @@ export class TerminalService {
     terminalScopeId: string,
     size?: Partial<TerminalSize>,
   ): TerminalPanelSnapshot {
-    const root = this.ensureRoot(workspaceId, terminalScopeId);
+    const root = this.ensureRoot(webContents, workspaceId, terminalScopeId);
     if (!root.activeSessionId || root.sessionIds.length === 0) {
       const session = this.createSessionForRoot(webContents, root, size);
       root.sessionIds.push(session.id);
@@ -86,7 +92,7 @@ export class TerminalService {
     terminalScopeId: string,
     size?: Partial<TerminalSize>,
   ): TerminalPanelSnapshot {
-    const root = this.ensureRoot(workspaceId, terminalScopeId);
+    const root = this.ensureRoot(webContents, workspaceId, terminalScopeId);
     if (root.sessionIds.length >= MAX_TERMINAL_SESSIONS_PER_ROOT) {
       throw new Error(`A workspace can have up to ${MAX_TERMINAL_SESSIONS_PER_ROOT} terminal tabs.`);
     }
@@ -189,6 +195,21 @@ export class TerminalService {
     }
   }
 
+  disposeWebContents(webContentsId: number): void {
+    const rootKeysToDelete = new Set<string>();
+    for (const [sessionId, session] of this.sessionsById) {
+      if (session.ownerWebContentsId !== webContentsId) {
+        continue;
+      }
+      this.disposeSession(session);
+      this.sessionsById.delete(sessionId);
+      rootKeysToDelete.add(session.rootKey);
+    }
+    for (const rootKey of rootKeysToDelete) {
+      this.rootsByKey.delete(rootKey);
+    }
+  }
+
   dispose(): void {
     for (const session of this.sessionsById.values()) {
       this.disposeSession(session);
@@ -197,7 +218,7 @@ export class TerminalService {
     this.rootsByKey.clear();
   }
 
-  private ensureRoot(workspaceId: string, terminalScopeId: string): TerminalRoot {
+  private ensureRoot(webContents: WebContents, workspaceId: string, terminalScopeId: string): TerminalRoot {
     const normalizedScopeId = terminalScopeId.trim();
     if (!normalizedScopeId) {
       throw new Error("Terminal scope is required");
@@ -208,7 +229,7 @@ export class TerminalService {
     }
     ensureDirectory(workspacePath);
     const workspaceRootKey = normalizeRootKey(workspacePath);
-    const rootKey = `${workspaceRootKey}\0${normalizedScopeId}`;
+    const rootKey = `${webContents.id}\0${workspaceRootKey}\0${normalizedScopeId}`;
     const existingRoot = this.rootsByKey.get(rootKey);
     if (existingRoot) {
       return existingRoot;
@@ -440,6 +461,9 @@ function buildTerminalEnv(): Record<string, string> {
   env.TERM = "xterm-256color";
   delete env.TERMINFO;
   delete env.TERMINFO_DIRS;
+  for (const key of computerUsePrivateEnvKeys) {
+    delete env[key];
+  }
   return env;
 }
 

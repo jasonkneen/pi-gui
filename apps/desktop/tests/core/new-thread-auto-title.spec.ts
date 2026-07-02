@@ -13,6 +13,7 @@ import {
   selectSession,
   setDeferredThreadTitleMode,
   startThreadViaIpc,
+  waitForSessionByTitle,
   waitForWorkspaceByPath,
 } from "../helpers/electron-app";
 
@@ -102,14 +103,7 @@ test("switching away does not cancel a pending auto-title", async () => {
     await expect.poll(async () => (await getDesktopState(window)).selectedWorkspaceId).toBe(workspace.id);
 
     await resolveDeferredThreadTitleEventually(harness, "Keep title after nav");
-    await expect
-      .poll(async () => {
-        const state = await getDesktopState(window);
-        return state.workspaces.some((candidateWorkspace) =>
-          candidateWorkspace.sessions.some((session) => session.title === "Keep title after nav"),
-        );
-      })
-      .toBe(true);
+    await waitForSessionByTitle(window, workspace.id, "Keep title after nav");
 
     const autoTitledRow = window.locator(".session-row__select", { hasText: "Keep title after nav" }).first();
     await expect(autoTitledRow).toBeVisible({ timeout: 15_000 });

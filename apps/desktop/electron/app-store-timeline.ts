@@ -1,4 +1,5 @@
 import { sessionKey } from "@pi-gui/pi-sdk-driver";
+import type { SessionTranscriptItem } from "@pi-gui/pi-sdk-driver";
 import type { SessionDriverEvent, SessionQueuedMessage, SessionRef } from "@pi-gui/session-driver";
 import type { TranscriptMessage } from "../src/desktop-state";
 import {
@@ -9,6 +10,12 @@ import {
   makeTranscriptMessage,
   makeTranscriptMessageWithAttachments,
 } from "./app-store-utils";
+import {
+  createChildThreadToolName,
+  listThreadsToolName,
+  readThreadToolName,
+  sendMessageToThreadToolName,
+} from "./orchestration-runtime";
 
 export interface RunMetrics {
   readonly startedAt: string;
@@ -22,6 +29,23 @@ interface TimelineRuntimeState {
   readonly runningSinceBySession: Map<string, string>;
   readonly activeAssistantMessageBySession: Map<string, string>;
   readonly activeWorkingActivityBySession: Map<string, string>;
+}
+
+export function timelineFromDriverTranscript(items: readonly SessionTranscriptItem[]): TranscriptMessage[] {
+  return items.map((item) => {
+    if (item.kind !== "tool") {
+      return item;
+    }
+    const detail = detailFromOutput(item.output);
+    return {
+      ...makeToolItem(item.callId, item.toolName, item.status, toolLabel(item.toolName, item.input), {
+        ...(detail !== undefined ? { detail } : {}),
+        ...(item.input !== undefined ? { input: item.input } : {}),
+        ...(item.output !== undefined ? { output: item.output } : {}),
+      }),
+      createdAt: item.createdAt,
+    };
+  });
 }
 
 export function appendUserMessage(
@@ -195,12 +219,15 @@ export function applyTimelineEvent(
     }
     case "runFailed": {
       const metrics = currentMetrics;
+      const latestToolError = metrics ? latestErrorToolDetail(transcript, metrics.startedAt) : undefined;
+      const failureLabel = clearerRunFailureLabel(event.error.message, latestToolError);
+      const failureDetail = event.error.code;
       clearRunState(transcript, key, event.sessionRef, state);
       transcript.push(
-        makeActivityItem(event.error.message, {
+        makeActivityItem(failureLabel, {
           tone: "error",
           metadata: metrics ? workedForLabel(metrics.startedAt, event.timestamp) : undefined,
-          detail: event.error.code,
+          detail: failureDetail,
         }),
       );
       break;
@@ -283,6 +310,18 @@ function clearRunState(
 
 function toolLabel(toolName: string, input: unknown): string {
   const detail = inputLabel(input);
+  if (toolName === createChildThreadToolName) {
+    return detail ? `Started child thread: ${detail}` : "Started child thread";
+  }
+  if (toolName === listThreadsToolName) {
+    return "Listed threads";
+  }
+  if (toolName === readThreadToolName) {
+    return detail ? `Read thread: ${detail}` : "Read thread";
+  }
+  if (toolName === sendMessageToThreadToolName) {
+    return detail ? `Sent message to thread: ${detail}` : "Sent message to thread";
+  }
   if (looksLikeSearch(toolName, input)) {
     return detail ? `Searched ${detail}` : `Searched with ${toolName}`;
   }
@@ -306,17 +345,24 @@ function progressLabel(progress: number | undefined): string | undefined {
 }
 
 function detailFromOutput(output: unknown): string | undefined {
+  if (isRecord(output)) {
+    const directError =
+      stringProperty(output, "error") ?? stringProperty(output, "message") ?? stringProperty(output, "stderr");
+    if (directError) {
+      return summarizeToolDetail(directError);
+    }
+  }
   if (isRecord(output) && Array.isArray(output.content)) {
     const text = output.content
       .map((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? part.text : ""))
-      .join(" ")
+      .join("\n")
       .trim();
     if (text) {
-      return truncate(text);
+      return summarizeToolDetail(text);
     }
   }
   if (typeof output === "string") {
-    return truncate(output);
+    return summarizeToolDetail(output);
   }
   if (output === undefined || output === null) {
     return undefined;
@@ -368,6 +414,14 @@ function truncate(value: string, limit = 160): string {
   return `${normalized.slice(0, limit - 1)}…`;
 }
 
+function summarizeToolDetail(value: string): string {
+  const firstLine = value.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (firstLine && /^Computer Use (blocked|unavailable|failed):/.test(firstLine)) {
+    return truncate(firstLine);
+  }
+  return truncate(value);
+}
+
 function inputLabel(input: unknown): string | undefined {
   if (typeof input === "string") {
     return truncate(input, 80);
@@ -376,7 +430,7 @@ function inputLabel(input: unknown): string | undefined {
     return undefined;
   }
 
-  const candidates = ["path", "filePath", "query", "q", "url", "command", "text", "title"];
+  const candidates = ["path", "filePath", "query", "q", "url", "command", "text", "prompt", "title", "app"];
   for (const key of candidates) {
     const value = input[key];
     if (typeof value === "string" && value.trim()) {
@@ -385,6 +439,39 @@ function inputLabel(input: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function latestErrorToolDetail(transcript: readonly TranscriptMessage[], runStartedAt: string): string | undefined {
+  const runStartedAtMs = Date.parse(runStartedAt);
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = transcript[index];
+    if (!item) {
+      continue;
+    }
+    if (Number.isFinite(runStartedAtMs) && Date.parse(item.createdAt) < runStartedAtMs) {
+      break;
+    }
+    if (item.kind === "tool" && item.status === "error" && item.detail) {
+      return item.detail;
+    }
+  }
+  return undefined;
+}
+
+function clearerRunFailureLabel(message: string, latestToolError: string | undefined): string {
+  if (!latestToolError) {
+    return message;
+  }
+  const normalized = message.trim().toLowerCase();
+  if (normalized === "terminated" || normalized === "failed" || normalized === "error" || normalized === "run failed") {
+    return latestToolError;
+  }
+  return message;
+}
+
+function stringProperty(record: Readonly<Record<string, unknown>>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -9,13 +9,7 @@ export function isSessionActivelyViewed(
   sessionRef: SessionRef,
   window: BrowserWindow | null,
 ): boolean {
-  if (!state) {
-    return false;
-  }
-  if (state.activeView !== "threads") {
-    return false;
-  }
-  if (state.selectedWorkspaceId !== sessionRef.workspaceId || state.selectedSessionId !== sessionRef.sessionId) {
+  if (!isSelectedSession(state, sessionRef)) {
     return false;
   }
   const override = sessionVisibilityOverride();
@@ -29,6 +23,30 @@ export function isSessionActivelyViewed(
     return false;
   }
   return window.isFocused();
+}
+
+export function isSessionVisibleInWindow(
+  state: Pick<DesktopAppState, "activeView" | "selectedWorkspaceId" | "selectedSessionId"> | undefined,
+  sessionRef: SessionRef,
+  window: BrowserWindow | null,
+): boolean {
+  if (!isSelectedSession(state, sessionRef)) {
+    return false;
+  }
+  return Boolean(window && !window.isDestroyed() && !window.isMinimized() && window.isVisible());
+}
+
+function isSelectedSession(
+  state: Pick<DesktopAppState, "activeView" | "selectedWorkspaceId" | "selectedSessionId"> | undefined,
+  sessionRef: SessionRef,
+): boolean {
+  if (!state) {
+    return false;
+  }
+  if (state.activeView !== "threads") {
+    return false;
+  }
+  return state.selectedWorkspaceId === sessionRef.workspaceId && state.selectedSessionId === sessionRef.sessionId;
 }
 
 function sessionVisibilityOverride(): SessionVisibilityOverride {

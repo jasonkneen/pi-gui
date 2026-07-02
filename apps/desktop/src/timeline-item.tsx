@@ -152,6 +152,7 @@ function TimelineToolCallItem({
   const compactLabel = buildCompactLabel(item, diffStats);
   const filePath = isWriteTool(item.toolName) ? extractFilename(item.input) || undefined : undefined;
   const diffLanguage = diffText && filePath ? extensionToLanguage(filePath) : undefined;
+  const inlineDetail = item.status === "error" ? item.detail : undefined;
 
   const handleCopy = () => {
     const text = diffText ?? formatToolContent(item.input, item.output);
@@ -174,6 +175,7 @@ function TimelineToolCallItem({
             </span>
           ) : null}
           <span className="timeline-tool__label">{compactLabel}</span>
+          {inlineDetail ? <span className="timeline-tool__detail">{inlineDetail}</span> : null}
           {diffStats ? (
             <span className="timeline-tool__diff-stats">
               <span className="timeline-tool__stat-add">+{diffStats.added}</span>

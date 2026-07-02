@@ -1,6 +1,7 @@
 import { type ClipboardEvent, type Dispatch, type DragEvent, type KeyboardEvent, type RefObject, type SetStateAction } from "react";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type { ComposerAttachment, QueuedComposerMessage, SessionRecord } from "./desktop-state";
+import type { MentionOption } from "./hooks/use-mention-menu";
 import { ArrowUpIcon, PlusIcon, StopSquareIcon } from "./icons";
 import type {
   ComposerSlashCommand,
@@ -55,9 +56,10 @@ interface ComposerPanelProps {
   readonly onOpenModelSettings: (section: ModelOnboardingSettingsSection) => void;
   readonly onSubmit: () => void;
   readonly showMentionMenu: boolean;
-  readonly mentionOptions: readonly string[];
+  readonly mentionOptions: readonly MentionOption[];
   readonly selectedMentionIndex: number;
-  readonly onSelectMention: (filePath: string) => void;
+  readonly onSelectMention: (option: MentionOption) => void;
+  readonly onEnableMentionExtension: (option: Extract<MentionOption, { kind: "extension" }>) => void;
   readonly extensionDock?: ExtensionDockModel;
   readonly extensionDockExpanded: boolean;
   readonly onToggleExtensionDock: () => void;
@@ -107,6 +109,7 @@ export function ComposerPanel({
   mentionOptions,
   selectedMentionIndex,
   onSelectMention,
+  onEnableMentionExtension,
   extensionDock,
   extensionDockExpanded,
   onToggleExtensionDock,
@@ -152,6 +155,7 @@ export function ComposerPanel({
           mentionOptions={mentionOptions}
           selectedMentionIndex={selectedMentionIndex}
           onSelectMention={onSelectMention}
+          onEnableMentionExtension={onEnableMentionExtension}
           textareaLabel="Composer"
           textareaTestId="composer"
           textareaPlaceholder="Ask pi to inspect the repo, run a fix, or continue the current thread..."

@@ -46,7 +46,7 @@ test("clears mixed attachment chips on submit after paste and file attach", asyn
   }
 });
 
-test("persists transcript storage separately from ui state and restores the current draft", async () => {
+test("persists attachments separately from ui state and restores the current draft", async () => {
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("persistence-workspace");
@@ -81,6 +81,18 @@ test("persists transcript storage separately from ui state and restores the curr
       })
       .toBeGreaterThan(0);
 
+    // The renderer syncs drafts on a debounce; wait until it lands on disk
+    // before quitting so the restart assertion is deterministic.
+    await expect
+      .poll(async () => {
+        try {
+          return await readFile(join(userDataDir, "ui-state.json"), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .toContain("draft survives restart");
+
     const state = await getDesktopState(window);
     const workspaceId = state.selectedWorkspaceId;
     const sessionId = state.selectedSessionId;
@@ -92,17 +104,7 @@ test("persists transcript storage separately from ui state and restores the curr
     expect(uiState.transcripts).toBeUndefined();
     expect(uiState.composerAttachmentsBySession).toBeUndefined();
 
-    const transcriptPath = join(userDataDir, "transcripts", encodeURIComponent(`${workspaceId}:${sessionId}`) + ".json");
     const attachmentPath = join(userDataDir, "attachments", encodeURIComponent(`${workspaceId}:${sessionId}`) + ".json");
-    await expect
-      .poll(async () => {
-        try {
-          return await readFile(transcriptPath, "utf8");
-        } catch {
-          return "";
-        }
-      })
-      .toContain("\"kind\": \"activity\"");
     await expect
       .poll(async () => {
         try {
@@ -146,7 +148,7 @@ test("persists transcript storage separately from ui state and restores the curr
   }
 });
 
-test("migrates legacy inline transcript and attachment persistence into file-backed stores", async () => {
+test("migrates legacy inline attachment persistence and drops legacy inline transcripts", async () => {
   test.setTimeout(90_000);
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("legacy-persistence-workspace");
@@ -170,23 +172,23 @@ test("migrates legacy inline transcript and attachment persistence into file-bac
 
     await composer.fill("legacy draft");
     await expect(composer).toHaveValue("legacy draft");
-
-    const state = await getDesktopState(window);
-    workspaceId = state.selectedWorkspaceId;
-    sessionId = state.selectedSessionId;
-    const { transcriptPath, attachmentPath } = persistedSessionDataPaths(userDataDir, {
-      workspaceId,
-      sessionId,
-    });
     await expect
       .poll(async () => {
         try {
-          return await readFile(transcriptPath, "utf8");
+          return await readFile(join(userDataDir, "ui-state.json"), "utf8");
         } catch {
           return "";
         }
       })
-      .toContain("\"kind\": \"activity\"");
+      .toContain("legacy draft");
+
+    const state = await getDesktopState(window);
+    workspaceId = state.selectedWorkspaceId;
+    sessionId = state.selectedSessionId;
+    const { attachmentPath } = persistedSessionDataPaths(userDataDir, {
+      workspaceId,
+      sessionId,
+    });
     await expect
       .poll(async () => {
         try {
@@ -200,31 +202,26 @@ test("migrates legacy inline transcript and attachment persistence into file-bac
     await firstRun.close();
   }
 
-  const { rawSessionKey, transcriptPath, attachmentPath } = persistedSessionDataPaths(userDataDir, {
+  const { rawSessionKey, attachmentPath } = persistedSessionDataPaths(userDataDir, {
     workspaceId,
     sessionId,
   });
-  const [transcriptRaw, attachmentRaw, uiStateRaw] = await Promise.all([
-    readFile(transcriptPath, "utf8"),
+  const [attachmentRaw, uiStateRaw] = await Promise.all([
     readFile(attachmentPath, "utf8"),
     readFile(join(userDataDir, "ui-state.json"), "utf8"),
   ]);
 
-  const parsedTranscript = JSON.parse(transcriptRaw) as { transcript?: unknown } | unknown[];
-  const legacyTranscript = Array.isArray(parsedTranscript)
-    ? parsedTranscript
-    : Array.isArray(parsedTranscript?.transcript)
-      ? parsedTranscript.transcript
-      : [];
   const uiState = JSON.parse(uiStateRaw) as Record<string, unknown>;
-  await Promise.all([unlink(transcriptPath), unlink(attachmentPath)]);
+  await unlink(attachmentPath);
   await writeFile(
     join(userDataDir, "ui-state.json"),
     `${JSON.stringify(
       {
         ...uiState,
         transcripts: {
-          [rawSessionKey]: legacyTranscript,
+          [rawSessionKey]: [
+            { kind: "message", id: "legacy-1", role: "user", text: "legacy text", createdAt: new Date().toISOString() },
+          ],
         },
         composerAttachmentsBySession: {
           [rawSessionKey]: JSON.parse(attachmentRaw),
@@ -243,27 +240,10 @@ test("migrates legacy inline transcript and attachment persistence into file-bac
     await expect(window.locator(".session-row--active")).toContainText("Legacy persistence session");
     await expect(window.getByTestId("composer")).toHaveValue("legacy draft", { timeout: 15_000 });
     await expect(window.locator(".composer-attachment")).toHaveCount(1);
-    await expect(window.getByTestId("transcript")).toContainText(/Model |No session overrides set/);
-
-    await expect
-      .poll(async () => {
-        const transcript = await getSelectedTranscript(window);
-        return transcript?.transcript.length ?? 0;
-      })
-      .toBeGreaterThan(0);
 
     const rewrittenUiState = JSON.parse(await readFile(join(userDataDir, "ui-state.json"), "utf8")) as Record<string, unknown>;
     expect(rewrittenUiState.transcripts).toBeUndefined();
     expect(rewrittenUiState.composerAttachmentsBySession).toBeUndefined();
-    await expect
-      .poll(async () => {
-        try {
-          return await readFile(transcriptPath, "utf8");
-        } catch {
-          return "";
-        }
-      })
-      .toContain("\"kind\": \"activity\"");
     await expect
       .poll(async () => {
         try {

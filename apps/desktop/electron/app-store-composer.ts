@@ -41,7 +41,7 @@ export async function updateComposerDraft(
     ...store.state,
     composerDraft,
     composerDraftSyncSource: "persist",
-    composerDraftSyncNonce: store.state.composerDraftSyncNonce + 1,
+    composerDraftSyncNonce: store.allocateComposerDraftSyncNonce(),
     lastError: undefined,
     revision: store.state.revision + 1,
   };
@@ -240,7 +240,6 @@ export async function steerQueuedComposerMessage(
   if (optimisticSteerMessage) {
     appendQueuedUserMessage(store.sessionState.transcriptCache, sessionRef, optimisticSteerMessage);
     store.publishSelectedTranscriptFor(sessionRef);
-    store.persistTranscriptCacheForSession(sessionRef);
   }
 
   try {
@@ -253,7 +252,7 @@ export async function steerQueuedComposerMessage(
     if (optimisticSteerMessage) {
       removeOptimisticQueuedUserMessage(store, sessionRef, optimisticSteerMessage.id);
     }
-    return store.withError(error);
+    return store.withSessionError(sessionRef, error);
   }
 }
 
@@ -262,6 +261,7 @@ export async function submitComposer(
   textInput: string,
   options: {
     readonly deliverAs?: "steer" | "followUp";
+    readonly allowCommands?: boolean;
   } = {},
 ): Promise<DesktopAppState> {
   await store.initialize();
@@ -277,21 +277,36 @@ export async function submitComposer(
     return store.withError("Create or select a session before sending a message.");
   }
 
+  return submitComposerToSession(store, sessionRef, textInput, attachments, options);
+}
+
+export async function submitComposerToSession(
+  store: AppStoreInternals,
+  sessionRef: SessionRef,
+  textInput: string,
+  attachments: readonly ComposerAttachment[],
+  options: {
+    readonly deliverAs?: "steer" | "followUp";
+    readonly allowCommands?: boolean;
+  } = {},
+): Promise<DesktopAppState> {
+  const text = textInput.trim();
+  const key = sessionKey(sessionRef);
   const runtime = store.runtimeByWorkspace.get(sessionRef.workspaceId);
   const sessionCommands = store.sessionState.sessionCommandsBySession.get(sessionKey(sessionRef)) ?? [];
-  const runtimeSlashCommand = hasRuntimeSlashCommand(text, runtime, sessionCommands);
+  const allowCommands = options.allowCommands ?? true;
+  const runtimeSlashCommand = allowCommands && hasRuntimeSlashCommand(text, runtime, sessionCommands);
   const resolvedRuntimeSlashCommand = runtimeSlashCommand
     ? resolveRuntimeSlashCommand(text, runtime, sessionCommands)
     : undefined;
 
-  if (text.startsWith("/") && !runtimeSlashCommand) {
+  if (allowCommands && text.startsWith("/") && !runtimeSlashCommand) {
     const handled = await runComposerCommand(store, sessionRef, text);
     if (handled) {
       return handled;
     }
   }
 
-  const key = sessionKey(sessionRef);
   const selectedSession = store.sessionFromState(sessionRef);
   const isRunning = selectedSession?.status === "running";
   const editingState = store.getQueuedComposerEditState(sessionRef);
@@ -309,7 +324,7 @@ export async function submitComposer(
           ...store.state,
           composerDraft: textInput,
           composerDraftSyncSource: "command",
-          composerDraftSyncNonce: store.state.composerDraftSyncNonce + 1,
+          composerDraftSyncNonce: store.allocateComposerDraftSyncNonce(),
           composerAttachments: cloneComposerAttachments(attachments),
           revision: store.state.revision + 1,
         };
@@ -351,7 +366,6 @@ export async function submitComposer(
       if (optimisticSteerMessage) {
         appendQueuedUserMessage(store.sessionState.transcriptCache, sessionRef, optimisticSteerMessage);
         store.publishSelectedTranscriptFor(sessionRef);
-        store.persistTranscriptCacheForSession(sessionRef);
       }
       await store.driver.replaceQueuedMessages(sessionRef, nextSessionQueuedMessages);
       return store.refreshState({
@@ -388,7 +402,7 @@ export async function submitComposer(
     if (optimisticSteerMessage) {
       removeOptimisticQueuedUserMessage(store, sessionRef, optimisticSteerMessage.id);
     }
-    return store.withError(error);
+    return store.withSessionError(sessionRef, error);
   }
 }
 
@@ -470,7 +484,6 @@ export async function sendMessageToSession(
     toTranscriptAttachments(attachments),
   );
   store.publishSelectedTranscriptFor(sessionRef);
-  store.persistTranscriptCacheForSession(sessionRef);
   clearActiveAssistantMessage(store.sessionState.activeAssistantMessageBySession, sessionRef);
   store.sessionState.sessionErrorsBySession.delete(key);
   store.sessionState.composerDraftsBySession.delete(key);
@@ -486,7 +499,6 @@ export async function sendMessageToSession(
       const transcript = store.sessionState.transcriptCache.get(key) ?? [];
       store.sessionState.transcriptCache.set(key, transcript.slice(0, -1));
       store.publishSelectedTranscriptFor(sessionRef);
-      store.persistTranscriptCacheForSession(sessionRef);
     }
     throw error;
   }
@@ -529,7 +541,6 @@ function removeOptimisticQueuedUserMessage(
     transcript.filter((message) => message.id !== messageId),
   );
   store.publishSelectedTranscriptFor(sessionRef);
-  store.persistTranscriptCacheForSession(sessionRef);
 }
 
 /** Eagerly merge config fields so finishComposerCommand sees them before the async sessionUpdated event arrives. */
@@ -617,7 +628,6 @@ function appendLocalActivity(store: AppStoreInternals, sessionRef: SessionRef, l
   const transcript = [...(store.sessionState.transcriptCache.get(key) ?? [])];
   transcript.push(makeActivityItem(label));
   store.sessionState.transcriptCache.set(key, transcript);
-  store.persistTranscriptCacheForSession(sessionRef);
 }
 
 function finishComposerCommand(
@@ -651,7 +661,7 @@ function finishComposerCommand(
     ),
     composerDraft: "",
     composerDraftSyncSource: "command",
-    composerDraftSyncNonce: store.state.composerDraftSyncNonce + 1,
+    composerDraftSyncNonce: store.allocateComposerDraftSyncNonce(),
     composerAttachments: [],
     lastError: undefined,
     revision: store.state.revision + 1,

@@ -443,6 +443,31 @@
   padding-left: 16px;
 }
 
+.pinned-thread-group {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(210, 215, 226, 0.72);
+}
+
+.pinned-thread-group__head {
+  height: 24px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-subtle);
+  font-size: 11px;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pinned-thread-group__head svg {
+  width: 14px;
+  height: 14px;
+}
+
 .session-row {
   padding: 7px 9px;
   border-radius: 10px;
@@ -450,6 +475,25 @@
   grid-template-columns: minmax(0, 1fr) auto;
   position: relative;
   overflow: visible;
+}
+
+.session-list--pinned .session-row {
+  cursor: grab;
+}
+
+.session-list--pinned .session-row:active {
+  cursor: grabbing;
+}
+
+.session-row--dragging {
+  box-shadow: 0 8px 20px rgba(20, 27, 45, 0.12);
+}
+
+.session-row--overlay {
+  min-width: 260px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 32px rgba(20, 27, 45, 0.16);
 }
 
 .session-row--active {
@@ -533,18 +577,26 @@
   white-space: nowrap;
 }
 
+.session-row__context {
+  font-size: 11px;
+  color: var(--muted-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-row__trailing {
-  min-width: 60px;
+  min-width: 92px;
   height: 28px;
   position: relative;
-  display: grid;
-  justify-items: end;
+  display: flex;
+  justify-content: flex-end;
+  gap: 1px;
   align-items: center;
 }
 
 .session-row__time,
 .session-row__action {
-  grid-area: 1 / 1;
   transition:
     opacity 140ms ease,
     transform 140ms ease;
@@ -554,12 +606,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  width: 100%;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .session-row__workspace-icon {
-  grid-area: 1 / 1;
-  justify-self: start;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
   width: 14px;
   height: 14px;
   display: grid;
@@ -616,6 +673,18 @@
   visibility: visible;
   pointer-events: auto;
   transform: scale(1);
+}
+
+.session-row--pinned .session-row__time {
+  opacity: 0;
+}
+
+.session-row--pinned .session-row__pin-action {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: scale(1);
+  color: var(--text-strong);
 }
 
 .archived-thread-group {

@@ -6,17 +6,33 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   shell,
+  type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
 } from "electron";
+import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
 import { randomUUID } from "node:crypto";
+import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { DesktopAppStore } from "./app-store";
+import { DesktopAppStore, type DesktopAppViewState } from "./app-store";
+import { configureComputerUseRuntime, runComputerUseLockedUseSelfTest } from "./computer-use-runtime";
+import {
+  createOrchestrationRuntimeExtension,
+  createOrchestrationRuntimeTools,
+  type OrchestrationRuntimeBridge,
+} from "./orchestration-runtime";
+import * as orchestrationTools from "./app-store-orchestration";
+import {
+  getComputerUseStatus,
+  openComputerUsePrivacySettings,
+  setLockedComputerUseEnabled,
+} from "./computer-use-status";
 import { getChangedFiles, getFileDiff, stageFile } from "./app-store-diff";
-import { listWorkspaceFiles } from "./app-store-files";
+import { listWorkspaceFiles, readWorkspaceFile } from "./app-store-files";
 import { MAIN_DEV_RELOAD_MARKER } from "./dev-reload-main-probe";
 import { NotificationManager } from "./notification-manager";
 import {
@@ -25,8 +41,14 @@ import {
 import { checkForUpdate, initUpdateChecker } from "./update-checker";
 import { ThemeManager } from "./theme-manager";
 import { TerminalService } from "./terminal-service";
-import type { DesktopAppState, ThemeMode } from "../src/desktop-state";
-import { desktopIpc, getDesktopCommandFromShortcut } from "../src/ipc";
+import type { AppView, DesktopAppState, ThemeMode } from "../src/desktop-state";
+import {
+  desktopIpc,
+  getDesktopCommandFromShortcut,
+  type CustomProviderConfig,
+  type CustomProviderProbeInput,
+  type CustomProviderProbeResult,
+} from "../src/ipc";
 import { SUPPORTED_COMPOSER_IMAGE_TYPES } from "../src/composer-attachments";
 import type {
   ComposerAttachment,
@@ -36,12 +58,14 @@ import type {
   CreateWorktreeInput,
   ForkThreadInput,
   RemoveWorktreeInput,
+  SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   StartThreadInput,
   WorkspaceSessionTarget,
 } from "../src/desktop-state";
 import type { SessionDriverEvent } from "@pi-gui/session-driver";
 import type { GenerateThreadTitleOptions } from "@pi-gui/pi-sdk-driver";
-import type { WorkspaceRef } from "@pi-gui/session-driver";
+import type { SessionRef, WorkspaceRef } from "@pi-gui/session-driver";
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
 const windowTestMode = resolveWindowTestMode();
@@ -53,18 +77,123 @@ let notificationManager: NotificationManager | undefined;
 let notificationPermissionService: NotificationPermissionService | undefined;
 let terminalService: TerminalService | undefined;
 let integratedTerminalShell = "";
-let stopPublishingState: (() => void) | undefined;
-let stopPublishingSelectedTranscript: (() => void) | undefined;
-let stopTrackingWindowActivation: (() => void) | undefined;
+
+interface WindowViewState {
+  readonly selectedWorkspaceId: string;
+  readonly selectedSessionId: string;
+  readonly activeView: AppView;
+  readonly sidebarCollapsed: boolean;
+}
+
+interface OrchestrationRuntimeToolTestInput {
+  readonly toolName: string;
+  readonly toolCallId?: string;
+  readonly sessionRef: SessionRef;
+  readonly params: unknown;
+}
+
+const appWindows = new Set<BrowserWindow>();
+const windowViews = new Map<number, WindowViewState>();
+const stopPublishingStateByWebContentsId = new Map<number, () => void>();
+const stopPublishingSelectedTranscriptByWebContentsId = new Map<number, () => void>();
+const stopTrackingWindowActivationByWebContentsId = new Map<number, () => void>();
 let stopNotifications: (() => void) | undefined;
 let stopUpdateChecker: (() => void) | undefined;
 let stopPruningTerminals: (() => void) | undefined;
 let retainedTerminalWorkspacePathSignature = "";
 const terminalFocusedWebContentsIds = new Set<number>();
 let quittingAfterStoreFlush = false;
+let windowScopedActionQueue: Promise<void> = Promise.resolve();
+let currentComposerDraftPersistOriginWebContentsId: number | undefined;
+let currentWindowScopedWebContentsId: number | undefined;
+let deferredActivationWebContentsId: number | undefined;
 
 const SUPPORTED_IMAGE_TYPES = SUPPORTED_COMPOSER_IMAGE_TYPES;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_IMAGE_TYPES.map((type) => type.mimeType));
+const NEW_WINDOW_MENU_ITEM_ID = "file.new-window";
+
+function createStoreBackedOrchestrationRuntimeBridge(): OrchestrationRuntimeBridge {
+  return {
+    createChildThread: async (ctx, input) => {
+      await store.initialize();
+      return orchestrationTools.createChildThreadToolResult(store, sessionRefFromExtensionContext(ctx), input);
+    },
+    listThreads: async (ctx) => {
+      await store.initialize();
+      return orchestrationTools.listThreadsToolResult(store, sessionRefFromExtensionContext(ctx));
+    },
+    readThread: async (ctx, threadId) => {
+      await store.initialize();
+      return orchestrationTools.readThreadToolResult(store, sessionRefFromExtensionContext(ctx), threadId);
+    },
+    sendMessageToThread: async (ctx, input) => {
+      await store.initialize();
+      return orchestrationTools.sendMessageToThreadToolResult(store, sessionRefFromExtensionContext(ctx), input);
+    },
+  };
+}
+
+function sessionRefFromExtensionContext(ctx: ExtensionContext): SessionRef {
+  const sessionId = ctx.sessionManager.getSessionId();
+  const cwd = path.resolve(ctx.sessionManager.getCwd?.() ?? ctx.cwd);
+  const workspace = store.state.workspaces.find(
+    (entry) => path.resolve(entry.path) === cwd && entry.sessions.some((session) => session.id === sessionId),
+  );
+  if (!workspace) {
+    throw new Error(`Unable to resolve orchestration session for ${cwd}:${sessionId}`);
+  }
+  return {
+    workspaceId: workspace.id,
+    sessionId,
+  };
+}
+
+async function runOrchestrationRuntimeToolForTest(
+  bridge: OrchestrationRuntimeBridge,
+  input: OrchestrationRuntimeToolTestInput,
+): Promise<AgentToolResult<unknown>> {
+  await store.initialize();
+  const tool = createOrchestrationRuntimeTools(bridge).find((entry) => entry.name === input.toolName);
+  if (!tool) {
+    throw new Error(`Unknown orchestration runtime tool: ${input.toolName}`);
+  }
+  return tool.execute(
+    input.toolCallId ?? `test-${input.toolName}`,
+    input.params,
+    undefined,
+    undefined,
+    createTestExtensionContext(input.sessionRef),
+  );
+}
+
+function createTestExtensionContext(sessionRef: SessionRef): ExtensionContext {
+  const workspace = store.state.workspaces.find(
+    (entry) => entry.id === sessionRef.workspaceId && entry.sessions.some((session) => session.id === sessionRef.sessionId),
+  );
+  if (!workspace) {
+    throw new Error(`Unknown test session: ${sessionRef.workspaceId}:${sessionRef.sessionId}`);
+  }
+
+  return {
+    hasUI: false,
+    cwd: workspace.path,
+    sessionManager: {
+      getSessionId: () => sessionRef.sessionId,
+      getCwd: () => workspace.path,
+    } as ExtensionContext["sessionManager"],
+    ui: {} as ExtensionContext["ui"],
+    modelRegistry: {} as ExtensionContext["modelRegistry"],
+    model: undefined,
+    signal: undefined,
+    isIdle: () => true,
+    abort: () => undefined,
+    hasPendingMessages: () => false,
+    shutdown: () => undefined,
+    getContextUsage: () => undefined,
+    compact: () => undefined,
+    getSystemPrompt: () => "",
+  };
+}
 const OPEN_FOLDER_MENU_ITEM_ID = "file.open-folder";
 const CHECK_FOR_UPDATES_MENU_ITEM_ID = "app.check-for-updates";
 const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -91,6 +220,44 @@ const appIconPath = app.isPackaged
   ? path.join(process.resourcesPath, "icon.png")
   : path.join(__dirname, "..", "..", "resources", "icon.png");
 const appIcon = nativeImage.createFromPath(appIconPath);
+
+function parseExternalWebUrl(url: string): URL | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function appRendererUrl(): string {
+  if (isDev && process.env.ELECTRON_RENDERER_URL) {
+    return process.env.ELECTRON_RENDERER_URL;
+  }
+  const indexPath = path.join(__dirname, "..", "renderer", "index.html");
+  return pathToFileURL(indexPath).toString();
+}
+
+function isInAppNavigationUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const appUrl = new URL(appRendererUrl());
+    return parsed.href === appUrl.href || (isDev && parsed.origin === appUrl.origin);
+  } catch {
+    return false;
+  }
+}
+
+function openExternalWebUrl(url: string): boolean {
+  const parsed = parseExternalWebUrl(url);
+  if (!parsed) {
+    return false;
+  }
+  void shell.openExternal(parsed.toString()).catch((error) => {
+    console.error(`Failed to open external URL: ${parsed.toString()}`, error);
+  });
+  return true;
+}
 
 function readClipboardImageAttachment(): ComposerImageAttachment | null {
   const image = clipboard.readImage();
@@ -142,6 +309,20 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isInAppNavigationUrl(url)) {
+      openExternalWebUrl(url);
+    }
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, url) => {
+    if (isInAppNavigationUrl(url)) {
+      return;
+    }
+    event.preventDefault();
+    openExternalWebUrl(url);
+  });
+
   window.once("ready-to-show", () => {
     if (!backgroundTestMode) {
       window.show();
@@ -158,9 +339,15 @@ function createWindow(): BrowserWindow {
     if (terminalFocused) {
       return;
     }
+    if (platformModifier && !input.shift && lowerKey === "n") {
+      event.preventDefault();
+      createAppWindow(viewForWebContents(window.webContents.id));
+      return;
+    }
+
     if (platformModifier && !input.shift && lowerKey === "o") {
       event.preventDefault();
-      void pickWorkspaceViaDialog();
+      void pickWorkspaceViaDialog(window);
       return;
     }
 
@@ -191,55 +378,395 @@ function createWindow(): BrowserWindow {
       window.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    const indexPath = path.join(__dirname, "..", "renderer", "index.html");
-    void window.loadURL(pathToFileURL(indexPath).toString());
+    void window.loadURL(appRendererUrl());
   }
+
+  return window;
+}
+
+function viewFromState(state: DesktopAppState): WindowViewState {
+  return {
+    selectedWorkspaceId: state.selectedWorkspaceId,
+    selectedSessionId: state.selectedSessionId,
+    activeView: state.activeView,
+    sidebarCollapsed: state.sidebarCollapsed,
+  };
+}
+
+function resolveWindowView(sourceView?: DesktopAppViewState): WindowViewState {
+  return viewFromState(store.projectStateForView({ ...viewFromState(store.state), ...sourceView }, store.state));
+}
+
+function viewForWebContents(webContentsId: number): WindowViewState {
+  return windowViews.get(webContentsId) ?? viewFromState(store.state);
+}
+
+function rememberWindowView(webContentsId: number, state: DesktopAppState): void {
+  windowViews.set(webContentsId, viewFromState(state));
+}
+
+function applyWindowViewToStore(webContentsId: number): void {
+  store.state = store.projectStateForView(viewForWebContents(webContentsId), store.state);
+}
+
+function projectStateForWindow(
+  webContentsId: number,
+  state: DesktopAppState = store.state,
+  view: WindowViewState = viewForWebContents(webContentsId),
+  previousView: WindowViewState | undefined = windowViews.get(webContentsId),
+): DesktopAppState {
+  const projected = store.projectStateForView(view, state, previousView);
+  if (
+    projected.composerDraftSyncSource === "persist" &&
+    currentComposerDraftPersistOriginWebContentsId !== undefined &&
+    webContentsId !== currentComposerDraftPersistOriginWebContentsId
+  ) {
+    return {
+      ...projected,
+      composerDraftSyncSource: "remote-persist",
+    };
+  }
+  return projected;
+}
+
+function publishStateToWindow(window: BrowserWindow, state: DesktopAppState = store.state): void {
+  if (!canPublishToWindow(window)) {
+    return;
+  }
+  const webContentsId = window.webContents.id;
+  const view = webContentsId === currentWindowScopedWebContentsId ? viewFromState(state) : viewForWebContents(webContentsId);
+  const projected = projectStateForWindow(webContentsId, state, view);
+  rememberWindowView(webContentsId, projected);
+  window.webContents.send(desktopIpc.stateChanged, projected);
+}
+
+async function publishSelectedTranscriptToWindow(window: BrowserWindow): Promise<void> {
+  if (!canPublishToWindow(window)) {
+    return;
+  }
+  const webContentsId = window.webContents.id;
+  const payload = await store.getSelectedTranscriptForView(viewForWebContents(webContentsId));
+  if (canPublishToWindow(window)) {
+    const projected = projectStateForWindow(webContentsId);
+    if (payload) {
+      if (projected.selectedWorkspaceId !== payload.workspaceId || projected.selectedSessionId !== payload.sessionId) {
+        return;
+      }
+    } else if (projected.selectedSessionId) {
+      return;
+    }
+    window.webContents.send(desktopIpc.selectedTranscriptChanged, payload);
+  }
+}
+
+function setActiveWindow(window: BrowserWindow): void {
+  if (window.isDestroyed()) {
+    return;
+  }
+  mainWindow = window;
+  notificationManager?.trackWindow(window);
+  notificationPermissionService?.trackWindow(window);
+}
+
+function windowForWebContentsId(webContentsId: number): BrowserWindow | undefined {
+  return [...appWindows].find((window) => !window.isDestroyed() && window.webContents.id === webContentsId);
+}
+
+function applyWindowActivation(window: BrowserWindow): void {
+  const webContentsId = window.webContents.id;
+  setActiveWindow(window);
+  applyWindowViewToStore(webContentsId);
+  store.handleWindowActivation();
+  rememberWindowView(webContentsId, store.state);
+}
+
+function applyDeferredWindowActivation(): boolean {
+  const webContentsId = deferredActivationWebContentsId;
+  deferredActivationWebContentsId = undefined;
+  if (webContentsId === undefined) {
+    return false;
+  }
+  const window = windowForWebContentsId(webContentsId);
+  if (!window || !canPublishToWindow(window)) {
+    return false;
+  }
+  applyWindowActivation(window);
+  return true;
+}
+
+function getForegroundAppWindow(): BrowserWindow | null {
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  if (focusedWindow && windowViews.has(focusedWindow.webContents.id) && canPublishToWindow(focusedWindow)) {
+    return focusedWindow;
+  }
+  if (mainWindow && canPublishToWindow(mainWindow)) {
+    return mainWindow;
+  }
+  return [...appWindows].find((window) => canPublishToWindow(window)) ?? null;
+}
+
+function getForegroundAppView(): DesktopAppViewState | undefined {
+  const window = getForegroundAppWindow();
+  return window ? viewForWebContents(window.webContents.id) : undefined;
+}
+
+function restoreStoreToView(view: DesktopAppViewState | undefined): void {
+  if (!view) {
+    return;
+  }
+  store.state = store.projectStateForView(view, store.state);
+}
+
+function restoreStoreToViewAndEmit(view: DesktopAppViewState | undefined): void {
+  restoreStoreToView(view);
+  store.emit();
+}
+
+function restoreStoreToForegroundUnlessSender(senderWebContentsId: number | undefined): void {
+  const foregroundWindow = getForegroundAppWindow();
+  if (!foregroundWindow) {
+    return;
+  }
+  if (senderWebContentsId !== undefined && foregroundWindow.webContents.id === senderWebContentsId) {
+    return;
+  }
+  restoreStoreToViewAndEmit(viewForWebContents(foregroundWindow.webContents.id));
+}
+
+function isSessionVisibleInAnotherWindow(sessionRef: SessionRef): boolean {
+  for (const window of appWindows) {
+    if (!canPublishToWindow(window) || window.isMinimized() || !window.isVisible()) {
+      continue;
+    }
+    const webContentsId = window.webContents.id;
+    if (webContentsId === currentWindowScopedWebContentsId) {
+      continue;
+    }
+    const view = windowViews.get(webContentsId);
+    if (
+      view?.activeView === "threads" &&
+      view.selectedWorkspaceId === sessionRef.workspaceId &&
+      view.selectedSessionId === sessionRef.sessionId
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function enqueueWindowScopedAction<T>(action: () => Promise<T>): Promise<T> {
+  const run = windowScopedActionQueue.then(action, action);
+  windowScopedActionQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+interface WindowScopedActionOptions {
+  readonly forceActiveWindow?: boolean;
+}
+
+async function runWindowScopedForWindow(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<DesktopAppState>,
+  options: WindowScopedActionOptions = {},
+): Promise<DesktopAppState> {
+  return enqueueWindowScopedAction(async () => {
+    const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
+    const foregroundWindow = getForegroundAppWindow();
+    const senderIsForeground =
+      Boolean(window && foregroundWindow && window.webContents.id === foregroundWindow.webContents.id);
+    const windowIsFocused =
+      Boolean(window && !window.isDestroyed() && window.isFocused()) ||
+      senderIsForeground ||
+      options.forceActiveWindow === true;
+    if (window && webContentsId !== undefined) {
+      if (windowIsFocused) {
+        setActiveWindow(window);
+      }
+      applyWindowViewToStore(webContentsId);
+    }
+
+    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
+    currentWindowScopedWebContentsId = webContentsId;
+    try {
+      const state = await action();
+      if (!window || webContentsId === undefined) {
+        return state;
+      }
+
+      const previousView = windowViews.get(webContentsId);
+      const projected = projectStateForWindow(webContentsId, state, viewFromState(state), previousView);
+      rememberWindowView(webContentsId, projected);
+      publishStateToWindow(window, projected);
+      void publishSelectedTranscriptToWindow(window);
+      return projected;
+    } finally {
+      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
+      if (!applyDeferredWindowActivation()) {
+        restoreStoreToForegroundUnlessSender(webContentsId);
+      }
+    }
+  });
+}
+
+function runWindowScopedForEvent(
+  event: IpcMainInvokeEvent,
+  action: () => Promise<DesktopAppState>,
+): Promise<DesktopAppState> {
+  return runWindowScopedForWindow(BrowserWindow.fromWebContents(event.sender), action);
+}
+
+async function runUnscopedStateResultForWindow(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<DesktopAppState>,
+): Promise<DesktopAppState> {
+  const state = await action();
+  if (!window || !canPublishToWindow(window)) {
+    return state;
+  }
+  const webContentsId = window.webContents.id;
+  const projected = projectStateForWindow(webContentsId, state);
+  rememberWindowView(webContentsId, projected);
+  return projected;
+}
+
+async function runImmediateStateResultForWindow(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<DesktopAppState>,
+): Promise<DesktopAppState> {
+  const state = await action();
+  if (!window || !canPublishToWindow(window)) {
+    return state;
+  }
+
+  const webContentsId = window.webContents.id;
+  const projected = projectStateForWindow(webContentsId, state);
+  rememberWindowView(webContentsId, projected);
+  window.webContents.send(desktopIpc.stateChanged, projected);
+  void publishSelectedTranscriptToWindow(window);
+  return projected;
+}
+
+async function runWindowScopedStateResult<T extends { readonly state: DesktopAppState }>(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<T>,
+  options: WindowScopedActionOptions = {},
+): Promise<T> {
+  return enqueueWindowScopedAction(async () => {
+    const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
+    const foregroundWindow = getForegroundAppWindow();
+    const senderIsForeground =
+      Boolean(window && foregroundWindow && window.webContents.id === foregroundWindow.webContents.id);
+    const windowIsFocused =
+      Boolean(window && !window.isDestroyed() && window.isFocused()) ||
+      senderIsForeground ||
+      options.forceActiveWindow === true;
+    if (window && webContentsId !== undefined) {
+      if (windowIsFocused) {
+        setActiveWindow(window);
+      }
+      applyWindowViewToStore(webContentsId);
+    }
+
+    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
+    currentWindowScopedWebContentsId = webContentsId;
+    try {
+      const result = await action();
+      if (!window || webContentsId === undefined) {
+        return result;
+      }
+
+      const previousView = windowViews.get(webContentsId);
+      const projected = projectStateForWindow(webContentsId, result.state, viewFromState(result.state), previousView);
+      rememberWindowView(webContentsId, projected);
+      publishStateToWindow(window, projected);
+      void publishSelectedTranscriptToWindow(window);
+      return { ...result, state: projected };
+    } finally {
+      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
+      if (!applyDeferredWindowActivation()) {
+        restoreStoreToForegroundUnlessSender(webContentsId);
+      }
+    }
+  });
+}
+
+function createAppWindow(sourceView?: DesktopAppViewState): BrowserWindow {
+  const window = createWindow();
+  const webContentsId = window.webContents.id;
+  appWindows.add(window);
+  windowViews.set(webContentsId, resolveWindowView(sourceView));
+  setActiveWindow(window);
+  themeManager.trackWindow(window);
+  attachStatePublisher(window);
+  attachViewedSessionTracking(window);
+
+  window.once("closed", () => {
+    appWindows.delete(window);
+    windowViews.delete(webContentsId);
+    terminalFocusedWebContentsIds.delete(webContentsId);
+    terminalService?.disposeWebContents(webContentsId);
+    void store.cancelPendingDialogsWithoutVisibleWindow((sessionRef) => isSessionVisibleInAnotherWindow(sessionRef));
+    if (mainWindow === window) {
+      mainWindow = [...appWindows].find((candidate) => !candidate.isDestroyed()) ?? null;
+      if (mainWindow) {
+        setActiveWindow(mainWindow);
+        applyWindowViewToStore(mainWindow.webContents.id);
+      }
+    }
+    if (appWindows.size === 0) {
+      terminalService?.dispose();
+      terminalService = undefined;
+    }
+  });
 
   return window;
 }
 
 function attachStatePublisher(window: BrowserWindow): void {
   const webContentsId = window.webContents.id;
-  stopPublishingState?.();
-  stopPublishingSelectedTranscript?.();
-  stopPublishingState = store.subscribe((state) => {
-    if (canPublishToWindow(window)) {
-      window.webContents.send(desktopIpc.stateChanged, state);
+  stopPublishingStateByWebContentsId.get(webContentsId)?.();
+  stopPublishingSelectedTranscriptByWebContentsId.get(webContentsId)?.();
+  const stopPublishingState = store.subscribe((state) => {
+    publishStateToWindow(window, state);
+    void publishSelectedTranscriptToWindow(window);
+  });
+  const stopPublishingSelectedTranscript = store.subscribeToSelectedTranscript(() => {
+    void publishSelectedTranscriptToWindow(window);
+  });
+  stopPublishingStateByWebContentsId.set(webContentsId, stopPublishingState);
+  stopPublishingSelectedTranscriptByWebContentsId.set(webContentsId, stopPublishingSelectedTranscript);
+  let disposed = false;
+  const clearPublishing = () => {
+    if (disposed) {
+      return;
     }
-  });
-  stopPublishingSelectedTranscript = store.subscribeToSelectedTranscript((payload) => {
-    if (canPublishToWindow(window)) {
-      window.webContents.send(desktopIpc.selectedTranscriptChanged, payload);
-    }
-  });
-  window.webContents.once("render-process-gone", () => {
-    stopPublishingState?.();
-    stopPublishingState = undefined;
-    stopPublishingSelectedTranscript?.();
-    stopPublishingSelectedTranscript = undefined;
-  });
-  window.once("closed", () => {
-    stopPublishingState?.();
-    stopPublishingState = undefined;
-    stopPublishingSelectedTranscript?.();
-    stopPublishingSelectedTranscript = undefined;
-    if (mainWindow === window) {
-      mainWindow = null;
-    }
-    terminalFocusedWebContentsIds.delete(webContentsId);
-    terminalService?.dispose();
-  });
+    disposed = true;
+    stopPublishingStateByWebContentsId.get(webContentsId)?.();
+    stopPublishingStateByWebContentsId.delete(webContentsId);
+    stopPublishingSelectedTranscriptByWebContentsId.get(webContentsId)?.();
+    stopPublishingSelectedTranscriptByWebContentsId.delete(webContentsId);
+  };
+  window.webContents.once("render-process-gone", clearPublishing);
+  window.once("closed", clearPublishing);
 }
 
 function attachViewedSessionTracking(window: BrowserWindow): void {
-  stopTrackingWindowActivation?.();
+  const webContentsId = window.webContents.id;
+  stopTrackingWindowActivationByWebContentsId.get(webContentsId)?.();
 
   const handleActivation = () => {
-    store.handleWindowActivation();
+    if (currentWindowScopedWebContentsId !== undefined) {
+      deferredActivationWebContentsId = webContentsId;
+      return;
+    }
+    applyWindowActivation(window);
   };
   const clearTracking = () => {
-    stopTrackingWindowActivation?.();
-    stopTrackingWindowActivation = undefined;
+    stopTrackingWindowActivationByWebContentsId.get(webContentsId)?.();
+    stopTrackingWindowActivationByWebContentsId.delete(webContentsId);
   };
 
   window.on("focus", handleActivation);
@@ -247,12 +774,12 @@ function attachViewedSessionTracking(window: BrowserWindow): void {
   window.on("restore", handleActivation);
   window.once("closed", clearTracking);
 
-  stopTrackingWindowActivation = () => {
+  stopTrackingWindowActivationByWebContentsId.set(webContentsId, () => {
     window.off("focus", handleActivation);
     window.off("show", handleActivation);
     window.off("restore", handleActivation);
     window.off("closed", clearTracking);
-  };
+  });
 }
 
 function canPublishToWindow(window: BrowserWindow): boolean {
@@ -263,8 +790,25 @@ function resolveWindowTestMode(): "foreground" | "background" {
   return process.env.PI_APP_TEST_MODE?.trim().toLowerCase() === "background" ? "background" : "foreground";
 }
 
-async function pickWorkspaceViaDialog(): Promise<DesktopAppState> {
-  const window = mainWindow && canPublishToWindow(mainWindow) ? mainWindow : undefined;
+function resolveDialogWindow(parentWindow?: BrowserWindow | null): BrowserWindow | undefined {
+  if (parentWindow && canPublishToWindow(parentWindow)) {
+    return parentWindow;
+  }
+  if (mainWindow && canPublishToWindow(mainWindow)) {
+    return mainWindow;
+  }
+  return undefined;
+}
+
+async function stateForWindow(window?: BrowserWindow | null): Promise<DesktopAppState> {
+  if (window && canPublishToWindow(window)) {
+    return store.getStateForView(viewForWebContents(window.webContents.id));
+  }
+  return store.getState();
+}
+
+async function pickWorkspacePathViaDialog(parentWindow?: BrowserWindow | null): Promise<string | undefined> {
+  const window = resolveDialogWindow(parentWindow);
   const result = window
     ? await dialog.showOpenDialog(window, {
         properties: ["openDirectory"],
@@ -275,9 +819,13 @@ async function pickWorkspaceViaDialog(): Promise<DesktopAppState> {
         title: "Open workspace folder",
       });
   if (result.canceled || result.filePaths.length === 0) {
-    return store.getState();
+    return undefined;
   }
-  const nextState = await store.addWorkspace(result.filePaths[0] as string);
+  return result.filePaths[0] as string;
+}
+
+async function addPickedWorkspace(window: BrowserWindow | null | undefined, workspacePath: string): Promise<DesktopAppState> {
+  const nextState = await store.addWorkspace(workspacePath);
   if (!nextState.selectedWorkspaceId) {
     return nextState;
   }
@@ -287,6 +835,15 @@ async function pickWorkspaceViaDialog(): Promise<DesktopAppState> {
     window.webContents.send(desktopIpc.workspacePicked, nextState.selectedWorkspaceId);
   }
   return newThreadState;
+}
+
+async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Promise<DesktopAppState> {
+  const window = resolveDialogWindow(parentWindow);
+  const workspacePath = await pickWorkspacePathViaDialog(window);
+  if (!workspacePath) {
+    return stateForWindow(window);
+  }
+  return runWindowScopedForWindow(window, () => addPickedWorkspace(window, workspacePath));
 }
 
 async function runManualUpdateCheck(): Promise<void> {
@@ -358,11 +915,20 @@ function installApplicationMenu(): void {
       label: "File",
       submenu: [
         {
+          id: NEW_WINDOW_MENU_ITEM_ID,
+          label: "New Window",
+          accelerator: "CommandOrControl+N",
+          click: () => {
+            createAppWindow(getForegroundAppView());
+          },
+        },
+        { type: "separator" },
+        {
           id: OPEN_FOLDER_MENU_ITEM_ID,
           label: "Open Folder…",
           accelerator: "Command+O",
           click: () => {
-            void pickWorkspaceViaDialog();
+            void pickWorkspaceViaDialog(mainWindow);
           },
         },
         { type: "separator" },
@@ -377,6 +943,19 @@ function installApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Ensure npm (and other Homebrew/npm-global binaries) are available
+// even when pi-gui is launched via Finder/Dock (which has a minimal PATH).
+const extraBinPaths = [
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  `${process.env.HOME}/.npm-global/bin`,
+].filter((p) => p);
+const currentPath = process.env.PATH ?? "";
+const missingPaths = extraBinPaths.filter((p) => !currentPath.split(":").includes(p));
+if (missingPaths.length > 0) {
+  process.env.PATH = [...missingPaths, currentPath].join(":");
+}
+
 app.setName("pi");
 
 const configuredUserDataDir = process.env.PI_APP_USER_DATA_DIR?.trim() || app.getPath("userData");
@@ -387,15 +966,16 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
-app.on("second-instance", async () => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+app.on("second-instance", () => {
+  const window = getForegroundAppWindow();
+  if (!window) {
     return;
   }
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore();
+  if (window.isMinimized()) {
+    window.restore();
   }
-  mainWindow.show();
-  mainWindow.focus();
+  window.show();
+  window.focus();
 });
 
 app.whenReady().then(async () => {
@@ -419,10 +999,31 @@ app.whenReady().then(async () => {
         reject: (error: Error) => void;
       }
     | undefined;
+  const computerUseRuntimeDriverOptions = await configureComputerUseRuntime({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    execPath: process.execPath,
+  });
+  const orchestrationRuntimeBridge = createStoreBackedOrchestrationRuntimeBridge();
+  const driverOptions = {
+    extensionFactories: [
+      createOrchestrationRuntimeExtension(orchestrationRuntimeBridge),
+      ...(computerUseRuntimeDriverOptions?.extensionFactories ?? []),
+    ],
+    inlineExtensionMetadata: [
+      {
+        displayName: "Thread orchestration",
+        description: "Start child pi-gui threads from transcript tool calls",
+      },
+      ...(computerUseRuntimeDriverOptions?.inlineExtensionMetadata ?? []),
+    ],
+  };
   store = new DesktopAppStore({
     userDataDir: configuredUserDataDir,
     initialWorkspacePaths: resolveInitialWorkspacePaths(),
     getWindow: () => mainWindow,
+    shouldKeepSessionDialogs: (sessionRef) => isSessionVisibleInAnotherWindow(sessionRef),
+    driverOptions,
     generateThreadTitleOverride: async (workspace, options) => generateThreadTitleOverride?.(workspace, options),
   });
   await store.initialize();
@@ -441,6 +1042,9 @@ app.whenReady().then(async () => {
     Object.assign(globalThis, {
       __PI_APP_TEST_HOOKS: {
         emitSessionEvent: (event: SessionDriverEvent) => store.emitTestSessionEvent(event),
+        runOrchestrationRuntimeTool: (input: OrchestrationRuntimeToolTestInput) =>
+          runOrchestrationRuntimeToolForTest(orchestrationRuntimeBridge, input),
+        runComputerUseLockedUseSelfTest: () => runComputerUseLockedUseSelfTest(),
         setDeferredThreadTitleMode: () => {
           generateThreadTitleOverride = () =>
             new Promise<string | null>((resolve, reject) => {
@@ -469,11 +1073,21 @@ app.whenReady().then(async () => {
   }
   notificationPermissionService = new NotificationPermissionService(() => mainWindow);
   notificationPermissionService.subscribe((status) => {
-    if (mainWindow && canPublishToWindow(mainWindow)) {
-      mainWindow.webContents.send(desktopIpc.notificationPermissionStatusChanged, status);
+    for (const window of appWindows) {
+      if (canPublishToWindow(window)) {
+        window.webContents.send(desktopIpc.notificationPermissionStatusChanged, status);
+      }
     }
   });
-  notificationManager = new NotificationManager(store, () => mainWindow, notificationPermissionService);
+  notificationManager = new NotificationManager(
+    store,
+    () => mainWindow,
+    notificationPermissionService,
+    async (sessionRef) => {
+      const window = getForegroundAppWindow();
+      await runWindowScopedForWindow(window, () => store.selectSession(sessionRef), { forceActiveWindow: true });
+    },
+  );
   stopNotifications = notificationManager.start();
   if (!isDev) {
     stopUpdateChecker = initUpdateChecker();
@@ -489,22 +1103,37 @@ app.whenReady().then(async () => {
     return mode;
   });
   ipcMain.handle(desktopIpc.openExternal, (_event, url: string) => {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
+    const parsed = parseExternalWebUrl(url);
+    if (!parsed) {
       throw new Error(`Refusing to open unsupported URL: ${url}`);
     }
-    return shell.openExternal(url);
+    return shell.openExternal(parsed.toString());
   });
-  ipcMain.handle(desktopIpc.stateRequest, () => store.getState());
-  ipcMain.handle(desktopIpc.selectedTranscriptRequest, () => store.getSelectedTranscript());
-  ipcMain.handle(desktopIpc.addWorkspacePath, (_event, workspacePath: string) => store.addWorkspace(workspacePath));
-  ipcMain.handle(desktopIpc.pickWorkspace, () => pickWorkspaceViaDialog());
-  ipcMain.handle(desktopIpc.selectWorkspace, (_event, workspaceId: string) => store.selectWorkspace(workspaceId));
-  ipcMain.handle(desktopIpc.renameWorkspace, (_event, workspaceId: string, displayName: string) =>
-    store.renameWorkspace(workspaceId, displayName),
+  ipcMain.handle(desktopIpc.stateRequest, (event) => store.getStateForView(viewForWebContents(event.sender.id)));
+  ipcMain.handle(desktopIpc.selectedTranscriptRequest, (event) =>
+    store.getSelectedTranscriptForView(viewForWebContents(event.sender.id)),
   );
-  ipcMain.handle(desktopIpc.removeWorkspace, (_event, workspaceId: string) => store.removeWorkspace(workspaceId));
-  ipcMain.handle(desktopIpc.reorderWorkspaces, (_event, order: readonly string[]) => store.reorderWorkspaces(order));
+  ipcMain.handle(desktopIpc.addWorkspacePath, (event, workspacePath: string) =>
+    runWindowScopedForEvent(event, () => store.addWorkspace(workspacePath)),
+  );
+  ipcMain.handle(desktopIpc.pickWorkspace, (event) =>
+    pickWorkspaceViaDialog(BrowserWindow.fromWebContents(event.sender)),
+  );
+  ipcMain.handle(desktopIpc.selectWorkspace, (event, workspaceId: string) =>
+    runWindowScopedForEvent(event, () => store.selectWorkspace(workspaceId)),
+  );
+  ipcMain.handle(desktopIpc.renameWorkspace, (event, workspaceId: string, displayName: string) =>
+    runWindowScopedForEvent(event, () => store.renameWorkspace(workspaceId, displayName)),
+  );
+  ipcMain.handle(desktopIpc.removeWorkspace, (event, workspaceId: string) =>
+    runWindowScopedForEvent(event, () => store.removeWorkspace(workspaceId)),
+  );
+  ipcMain.handle(desktopIpc.reorderWorkspaces, (event, order: readonly string[]) =>
+    runWindowScopedForEvent(event, () => store.reorderWorkspaces(order)),
+  );
+  ipcMain.handle(desktopIpc.reorderPinnedSessions, (event, order: readonly string[]) =>
+    runWindowScopedForEvent(event, () => store.reorderPinnedSessions(order)),
+  );
   ipcMain.handle(desktopIpc.openWorkspaceInFinder, async (_event, workspaceId: string) => {
     const workspacePath = store.getWorkspacePath(workspaceId);
     if (!workspacePath) {
@@ -512,72 +1141,100 @@ app.whenReady().then(async () => {
     }
     await shell.openPath(workspacePath);
   });
-  ipcMain.handle(desktopIpc.createWorktree, (_event, input: CreateWorktreeInput) =>
-    store.createWorktree(input),
+  ipcMain.handle(desktopIpc.createWorktree, (event, input: CreateWorktreeInput) =>
+    runWindowScopedForEvent(event, () => store.createWorktree(input)),
   );
-  ipcMain.handle(desktopIpc.removeWorktree, (_event, input: RemoveWorktreeInput) =>
-    store.removeWorktree(input),
+  ipcMain.handle(desktopIpc.removeWorktree, (event, input: RemoveWorktreeInput) =>
+    runWindowScopedForEvent(event, () => store.removeWorktree(input)),
   );
-  ipcMain.handle(desktopIpc.syncCurrentWorkspace, () => store.syncCurrentWorkspace());
-  ipcMain.handle(desktopIpc.selectSession, (_event, target: WorkspaceSessionTarget) =>
-    store.selectSession(target),
+  ipcMain.handle(desktopIpc.syncCurrentWorkspace, (event) =>
+    runWindowScopedForEvent(event, () => store.syncCurrentWorkspace()),
   );
-  ipcMain.handle(desktopIpc.archiveSession, (_event, target: WorkspaceSessionTarget) =>
-    store.archiveSession(target),
+  ipcMain.handle(desktopIpc.selectSession, (event, target: WorkspaceSessionTarget) =>
+    runWindowScopedForEvent(event, () => store.selectSession(target)),
   );
-  ipcMain.handle(desktopIpc.unarchiveSession, (_event, target: WorkspaceSessionTarget) =>
-    store.unarchiveSession(target),
+  ipcMain.handle(desktopIpc.archiveSession, (event, target: WorkspaceSessionTarget) =>
+    runWindowScopedForEvent(event, () => store.archiveSession(target)),
   );
-  ipcMain.handle(desktopIpc.setActiveView, (_event, activeView) => store.setActiveView(activeView));
-  ipcMain.handle(desktopIpc.setSidebarCollapsed, (_event, collapsed: boolean) =>
-    store.setSidebarCollapsed(collapsed),
+  ipcMain.handle(desktopIpc.unarchiveSession, (event, target: WorkspaceSessionTarget) =>
+    runWindowScopedForEvent(event, () => store.unarchiveSession(target)),
   );
-  ipcMain.handle(desktopIpc.refreshRuntime, (_event, workspaceId?: string) => store.refreshRuntime(workspaceId));
-  ipcMain.handle(desktopIpc.setModelSettingsScopeMode, (_event, mode) => store.setModelSettingsScopeMode(mode));
-  ipcMain.handle(desktopIpc.setSessionModel, (_event, workspaceId: string, sessionId: string, provider: string, modelId: string) =>
-    store.setSessionModel({ workspaceId, sessionId }, provider, modelId),
+  ipcMain.handle(desktopIpc.setSessionPinned, (event, target: WorkspaceSessionTarget, pinned: boolean) =>
+    runWindowScopedForEvent(event, () => store.setSessionPinned(target, pinned)),
   );
-  ipcMain.handle(desktopIpc.setDefaultModel, (_event, workspaceId: string, provider: string, modelId: string) =>
-    store.setDefaultModel(workspaceId, provider, modelId),
+  ipcMain.handle(desktopIpc.setActiveView, (event, activeView) =>
+    runWindowScopedForEvent(event, () => store.setActiveView(activeView)),
+  );
+  ipcMain.handle(desktopIpc.setSidebarCollapsed, (event, collapsed: boolean) =>
+    runWindowScopedForEvent(event, () => store.setSidebarCollapsed(collapsed)),
+  );
+  ipcMain.handle(desktopIpc.refreshRuntime, (event, workspaceId?: string) =>
+    runWindowScopedForEvent(event, () => store.refreshRuntime(workspaceId)),
+  );
+  ipcMain.handle(desktopIpc.setModelSettingsScopeMode, (event, mode) =>
+    runWindowScopedForEvent(event, () => store.setModelSettingsScopeMode(mode)),
+  );
+  ipcMain.handle(desktopIpc.setSessionModel, (event, workspaceId: string, sessionId: string, provider: string, modelId: string) =>
+    runWindowScopedForEvent(event, () => store.setSessionModel({ workspaceId, sessionId }, provider, modelId)),
+  );
+  ipcMain.handle(desktopIpc.setDefaultModel, (event, workspaceId: string, provider: string, modelId: string) =>
+    runWindowScopedForEvent(event, () => store.setDefaultModel(workspaceId, provider, modelId)),
   );
   ipcMain.handle(
     desktopIpc.setDefaultThinkingLevel,
-    (_event, workspaceId: string, thinkingLevel) => store.setDefaultThinkingLevel(workspaceId, thinkingLevel),
+    (event, workspaceId: string, thinkingLevel) =>
+      runWindowScopedForEvent(event, () => store.setDefaultThinkingLevel(workspaceId, thinkingLevel)),
   );
   ipcMain.handle(
     desktopIpc.setSessionThinkingLevel,
-    (_event, workspaceId: string, sessionId: string, thinkingLevel) =>
-      store.setSessionThinkingLevel({ workspaceId, sessionId }, thinkingLevel),
+    (event, workspaceId: string, sessionId: string, thinkingLevel) =>
+      runWindowScopedForEvent(event, () => store.setSessionThinkingLevel({ workspaceId, sessionId }, thinkingLevel)),
   );
-  ipcMain.handle(desktopIpc.loginProvider, (_event, workspaceId: string, providerId: string) =>
-    store.loginProvider(workspaceId, providerId, createRuntimeLoginCallbacks()),
+  ipcMain.handle(desktopIpc.loginProvider, (event, workspaceId: string, providerId: string) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return runUnscopedStateResultForWindow(window, () =>
+      store.loginProvider(workspaceId, providerId, createRuntimeLoginCallbacks(window)),
+    );
+  });
+  ipcMain.handle(desktopIpc.logoutProvider, (event, workspaceId: string, providerId: string) =>
+    runWindowScopedForEvent(event, () => store.logoutProvider(workspaceId, providerId)),
   );
-  ipcMain.handle(desktopIpc.logoutProvider, (_event, workspaceId: string, providerId: string) =>
-    store.logoutProvider(workspaceId, providerId),
+  ipcMain.handle(desktopIpc.setProviderApiKey, (event, workspaceId: string, providerId: string, apiKey: string) =>
+    runWindowScopedForEvent(event, () => store.setProviderApiKey(workspaceId, providerId, apiKey)),
   );
-  ipcMain.handle(desktopIpc.setProviderApiKey, (_event, workspaceId: string, providerId: string, apiKey: string) =>
-    store.setProviderApiKey(workspaceId, providerId, apiKey),
+  ipcMain.handle(desktopIpc.setEnableSkillCommands, (event, workspaceId: string, enabled: boolean) =>
+    runWindowScopedForEvent(event, () => store.setEnableSkillCommands(workspaceId, enabled)),
   );
-  ipcMain.handle(desktopIpc.setEnableSkillCommands, (_event, workspaceId: string, enabled: boolean) =>
-    store.setEnableSkillCommands(workspaceId, enabled),
+  ipcMain.handle(desktopIpc.listCustomProviders, () => store.listCustomProviders());
+  ipcMain.handle(desktopIpc.setCustomProvider, (event, workspaceId: string, config: CustomProviderConfig) =>
+    runWindowScopedForEvent(event, () => store.setCustomProvider(workspaceId, config)),
   );
-  ipcMain.handle(desktopIpc.setScopedModelPatterns, (_event, workspaceId: string, patterns: readonly string[]) =>
-    store.setScopedModelPatterns(workspaceId, patterns),
+  ipcMain.handle(desktopIpc.deleteCustomProvider, (event, workspaceId: string, providerId: string) =>
+    runWindowScopedForEvent(event, () => store.deleteCustomProvider(workspaceId, providerId)),
   );
-  ipcMain.handle(desktopIpc.setSkillEnabled, (_event, workspaceId: string, filePath: string, enabled: boolean) =>
-    store.setSkillEnabled(workspaceId, filePath, enabled),
+  ipcMain.handle(desktopIpc.probeCustomProviderModels, (_event, input: CustomProviderProbeInput) =>
+    probeCustomProviderModels(input),
   );
-  ipcMain.handle(desktopIpc.setExtensionEnabled, (_event, workspaceId: string, filePath: string, enabled: boolean) =>
-    store.setExtensionEnabled(workspaceId, filePath, enabled),
+  ipcMain.handle(desktopIpc.setScopedModelPatterns, (event, workspaceId: string, patterns: readonly string[]) =>
+    runWindowScopedForEvent(event, () => store.setScopedModelPatterns(workspaceId, patterns)),
   );
-  ipcMain.handle(desktopIpc.respondToHostUiRequest, (_event, workspaceId: string, sessionId: string, response) =>
-    store.respondToHostUiRequest({ workspaceId, sessionId }, response),
+  ipcMain.handle(desktopIpc.setSkillEnabled, (event, workspaceId: string, filePath: string, enabled: boolean) =>
+    runWindowScopedForEvent(event, () => store.setSkillEnabled(workspaceId, filePath, enabled)),
   );
-  ipcMain.handle(desktopIpc.setNotificationPreferences, (_event, preferences) =>
-    store.setNotificationPreferences(preferences),
+  ipcMain.handle(desktopIpc.setExtensionEnabled, (event, workspaceId: string, filePath: string, enabled: boolean) =>
+    runWindowScopedForEvent(event, () => store.setExtensionEnabled(workspaceId, filePath, enabled)),
   );
-  ipcMain.handle(desktopIpc.setIntegratedTerminalShell, (_event, shellPath: string) =>
-    store.setIntegratedTerminalShell(shellPath),
+  ipcMain.handle(desktopIpc.respondToHostUiRequest, (event, workspaceId: string, sessionId: string, response) =>
+    runImmediateStateResultForWindow(
+      BrowserWindow.fromWebContents(event.sender),
+      () => store.respondToHostUiRequest({ workspaceId, sessionId }, response),
+    ),
+  );
+  ipcMain.handle(desktopIpc.setNotificationPreferences, (event, preferences) =>
+    runWindowScopedForEvent(event, () => store.setNotificationPreferences(preferences)),
+  );
+  ipcMain.handle(desktopIpc.setIntegratedTerminalShell, (event, shellPath: string) =>
+    runWindowScopedForEvent(event, () => store.setIntegratedTerminalShell(shellPath)),
   );
   ipcMain.handle(desktopIpc.setEnableTransparency, async (_event, enabled: boolean) => {
     const nextState = await store.setEnableTransparency(enabled);
@@ -628,11 +1285,28 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.openSystemNotificationSettings, () =>
     notificationPermissionService?.openSystemSettings() ?? Promise.resolve(),
   );
-  ipcMain.handle(desktopIpc.createSession, (_event, input: CreateSessionInput) =>
-    store.createSession(input),
+  ipcMain.handle(desktopIpc.getComputerUseStatus, () => getComputerUseStatus());
+  ipcMain.handle(desktopIpc.setLockedComputerUseEnabled, (_event, enabled: boolean) =>
+    setLockedComputerUseEnabled(enabled),
   );
-  ipcMain.handle(desktopIpc.startThread, (_event, input: StartThreadInput) => store.startThread(input));
-  ipcMain.handle(desktopIpc.forkThread, (_event, input: ForkThreadInput) => store.forkThread(input));
+  ipcMain.handle(desktopIpc.openComputerUsePrivacySettings, (_event, pane) =>
+    openComputerUsePrivacySettings(pane),
+  );
+  ipcMain.handle(desktopIpc.createSession, (event, input: CreateSessionInput) =>
+    runWindowScopedForEvent(event, () => store.createSession(input)),
+  );
+  ipcMain.handle(desktopIpc.startThread, (event, input: StartThreadInput) =>
+    runWindowScopedForEvent(event, () => store.startThread(input)),
+  );
+  ipcMain.handle(desktopIpc.forkThread, (event, input: ForkThreadInput) =>
+    runWindowScopedForEvent(event, () => store.forkThread(input)),
+  );
+  ipcMain.handle(desktopIpc.sendChildThreadFollowUp, (event, input: SendChildThreadFollowUpInput) =>
+    runWindowScopedForEvent(event, () => store.sendChildThreadFollowUp(input)),
+  );
+  ipcMain.handle(desktopIpc.setChildSupervisionLoop, (event, input: SetChildSupervisionLoopInput) =>
+    runWindowScopedForEvent(event, () => store.setChildSupervisionLoop(input)),
+  );
   ipcMain.handle(desktopIpc.openSkillInFinder, async (_event, workspaceId: string, filePath: string) => {
     const resolved = store.getSkillFilePath(workspaceId, filePath);
     if (!resolved) {
@@ -647,61 +1321,87 @@ app.whenReady().then(async () => {
     }
     await shell.openPath(path.dirname(resolved));
   });
-  ipcMain.handle(desktopIpc.cancelCurrentRun, () => store.cancelCurrentRun());
-  ipcMain.handle(desktopIpc.pickComposerAttachments, async () => {
-    const result = await dialog.showOpenDialog({
-      properties: ["openFile", "multiSelections"],
-      title: "Attach files",
-    });
+  ipcMain.handle(desktopIpc.cancelCurrentRun, (event) =>
+    runWindowScopedForEvent(event, () => store.cancelCurrentRun()),
+  );
+  ipcMain.handle(desktopIpc.pickComposerAttachments, async (event) => {
+    const window = resolveDialogWindow(BrowserWindow.fromWebContents(event.sender));
+    const result =
+      window
+        ? await dialog.showOpenDialog(window, {
+            properties: ["openFile", "multiSelections"],
+            title: "Attach files",
+          })
+        : await dialog.showOpenDialog({
+            properties: ["openFile", "multiSelections"],
+            title: "Attach files",
+          });
     if (result.canceled || result.filePaths.length === 0) {
-      return store.getState();
+      return stateForWindow(window);
     }
     const attachments = await Promise.all(result.filePaths.map(readComposerAttachment));
-    return store.addComposerAttachments(attachments);
+    return runWindowScopedForWindow(window, () => store.addComposerAttachments(attachments));
   });
   ipcMain.on(desktopIpc.readClipboardImage, (event) => {
     event.returnValue = readClipboardImageAttachment();
   });
-  ipcMain.handle(desktopIpc.addComposerAttachments, (_event, attachments: readonly ComposerAttachment[]) => {
+  ipcMain.handle(desktopIpc.addComposerAttachments, (event, attachments: readonly ComposerAttachment[]) => {
     const validated = attachments.flatMap(validateComposerAttachmentPayload);
-    return store.addComposerAttachments(validated);
+    return runWindowScopedForEvent(event, () => store.addComposerAttachments(validated));
   });
-  ipcMain.handle(desktopIpc.removeComposerAttachment, (_event, attachmentId: string) =>
-    store.removeComposerAttachment(attachmentId),
+  ipcMain.handle(desktopIpc.removeComposerAttachment, (event, attachmentId: string) =>
+    runWindowScopedForEvent(event, () => store.removeComposerAttachment(attachmentId)),
   );
-  ipcMain.handle(desktopIpc.editQueuedComposerMessage, (_event, messageId: string, currentDraft?: string) =>
-    store.editQueuedComposerMessage(messageId, currentDraft),
+  ipcMain.handle(desktopIpc.editQueuedComposerMessage, (event, messageId: string, currentDraft?: string) =>
+    runWindowScopedForEvent(event, () => store.editQueuedComposerMessage(messageId, currentDraft)),
   );
-  ipcMain.handle(desktopIpc.cancelQueuedComposerEdit, () =>
-    store.cancelQueuedComposerEdit(),
+  ipcMain.handle(desktopIpc.cancelQueuedComposerEdit, (event) =>
+    runWindowScopedForEvent(event, () => store.cancelQueuedComposerEdit()),
   );
-  ipcMain.handle(desktopIpc.removeQueuedComposerMessage, (_event, messageId: string) =>
-    store.removeQueuedComposerMessage(messageId),
+  ipcMain.handle(desktopIpc.removeQueuedComposerMessage, (event, messageId: string) =>
+    runWindowScopedForEvent(event, () => store.removeQueuedComposerMessage(messageId)),
   );
-  ipcMain.handle(desktopIpc.steerQueuedComposerMessage, (_event, messageId: string) =>
-    store.steerQueuedComposerMessage(messageId),
+  ipcMain.handle(desktopIpc.steerQueuedComposerMessage, (event, messageId: string) =>
+    runWindowScopedForEvent(event, () => store.steerQueuedComposerMessage(messageId)),
   );
-  ipcMain.handle(desktopIpc.updateComposerDraft, (_event, composerDraft: string) =>
-    store.updateComposerDraft(composerDraft),
+  ipcMain.handle(desktopIpc.updateComposerDraft, (event, composerDraft: string) =>
+    runWindowScopedForEvent(event, async () => {
+      currentComposerDraftPersistOriginWebContentsId = event.sender.id;
+      try {
+        return await store.updateComposerDraft(composerDraft);
+      } finally {
+        currentComposerDraftPersistOriginWebContentsId = undefined;
+      }
+    }),
   );
   ipcMain.handle(
     desktopIpc.submitComposer,
-    (_event, text: string, options?: { readonly deliverAs?: "steer" | "followUp" }) => store.submitComposer(text, options),
+    (event, text: string, options?: { readonly deliverAs?: "steer" | "followUp" }) =>
+      runWindowScopedForEvent(event, () => store.submitComposer(text, options)),
   );
   ipcMain.handle(desktopIpc.getSessionTree, (_event, target: WorkspaceSessionTarget) =>
     store.getSessionTree(target),
   );
   ipcMain.handle(
     desktopIpc.navigateSessionTree,
-    (_event, target: WorkspaceSessionTarget, targetId: string, options) =>
-      store.navigateSessionTree(target, targetId, options),
+    (event, target: WorkspaceSessionTarget, targetId: string, options) =>
+      runWindowScopedStateResult(BrowserWindow.fromWebContents(event.sender), () =>
+        store.navigateSessionTree(target, targetId, options),
+      ),
   );
-  ipcMain.handle(desktopIpc.listWorkspaceFiles, async (_event, workspaceId: string) => {
+  ipcMain.handle(desktopIpc.listWorkspaceFiles, async (_event, workspaceId: string, options?: { readonly force?: boolean }) => {
     const workspacePath = store.getWorkspacePath(workspaceId);
     if (!workspacePath) {
       return [];
     }
-    return listWorkspaceFiles(workspacePath);
+    return listWorkspaceFiles(workspacePath, options);
+  });
+  ipcMain.handle(desktopIpc.readWorkspaceFile, async (_event, workspaceId: string, filePath: string) => {
+    const workspacePath = store.getWorkspacePath(workspaceId);
+    if (!workspacePath) {
+      throw new Error(`Unknown workspace: ${workspaceId}`);
+    }
+    return readWorkspaceFile(workspacePath, filePath);
   });
   ipcMain.handle(desktopIpc.getChangedFiles, async (_event, workspaceId: string) => {
     const workspacePath = store.getWorkspacePath(workspaceId);
@@ -738,22 +1438,12 @@ app.whenReady().then(async () => {
     window.maximize();
   });
 
-  mainWindow = createWindow();
-  notificationManager.trackWindow(mainWindow);
-  notificationPermissionService.trackWindow(mainWindow);
-  themeManager.setWindow(mainWindow);
-  attachStatePublisher(mainWindow);
-  attachViewedSessionTracking(mainWindow);
+  createAppWindow();
   void notificationPermissionService.getCurrentStatus();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createWindow();
-      notificationManager?.trackWindow(mainWindow);
-      notificationPermissionService?.trackWindow(mainWindow);
-      themeManager.setWindow(mainWindow);
-      attachStatePublisher(mainWindow);
-      attachViewedSessionTracking(mainWindow);
+      createAppWindow();
       void notificationPermissionService?.getCurrentStatus();
     }
   });
@@ -885,19 +1575,19 @@ function validateComposerAttachmentPayload(attachment: ComposerAttachment): Comp
   return [normalized];
 }
 
-function createRuntimeLoginCallbacks() {
+function createRuntimeLoginCallbacks(window?: BrowserWindow | null) {
   return {
     onAuth: async ({ url, instructions: _instructions }: { readonly url: string; readonly instructions?: string }) => {
       await shell.openExternal(url);
     },
     onPrompt: async ({ message, placeholder }: { readonly message: string; readonly placeholder?: string }) =>
-      promptForText(message, placeholder),
+      promptForText(window, message, placeholder),
   };
 }
 
-async function promptForText(message: string, placeholder = ""): Promise<string> {
-  const window = mainWindow;
-  if (!window || window.isDestroyed()) {
+async function promptForText(parentWindow: BrowserWindow | null | undefined, message: string, placeholder = ""): Promise<string> {
+  const window = resolveDialogWindow(parentWindow);
+  if (!window) {
     throw new Error("Main window is not available for login.");
   }
   window.show();
@@ -910,4 +1600,49 @@ async function promptForText(message: string, placeholder = ""): Promise<string>
     throw new Error("Login cancelled.");
   }
   return result.trim();
+}
+
+async function probeCustomProviderModels(input: CustomProviderProbeInput): Promise<CustomProviderProbeResult> {
+  const baseUrl = input.baseUrl?.trim();
+  if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
+    return { ok: false, error: "Base URL must start with http:// or https://" };
+  }
+  const target = `${baseUrl.replace(/\/+$/, "")}/models`;
+  const apiKey = input.apiKey?.trim();
+  try {
+    const response = await net.fetch(target, {
+      method: "GET",
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      return { ok: false, error: `${response.status} ${response.statusText} from ${target}` };
+    }
+    const payload = (await response.json()) as unknown;
+    const data = (payload as { data?: unknown }).data;
+    if (!Array.isArray(data)) {
+      return { ok: false, error: `Response from ${target} is missing a "data" array` };
+    }
+    const models = data
+      .map((entry) => {
+        if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+          return (entry as { id: string }).id;
+        }
+        return undefined;
+      })
+      .filter((id): id is string => Boolean(id && id.length > 0));
+    return { ok: true, models };
+  } catch (error) {
+    return { ok: false, error: describeProbeError(error, target) };
+  }
+}
+
+function describeProbeError(error: unknown, target: string): string {
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return `Timed out after 5s contacting ${target}`;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }

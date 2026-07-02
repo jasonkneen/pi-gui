@@ -2,7 +2,13 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { PRELOAD_DEV_RELOAD_MARKER } from "./dev-reload-preload-probe";
 import {
   desktopIpc,
+  type CustomProviderConfig,
+  type CustomProviderProbeInput,
+  type CustomProviderProbeResult,
+  type DesktopComputerUsePrivacyPane,
+  type DesktopComputerUseStatus,
   type DesktopNotificationPermissionStatus,
+  type WorkspaceFilePreview,
   type PiDesktopCommand,
   type TerminalDataEvent,
   type TerminalErrorEvent,
@@ -29,6 +35,8 @@ import type {
   ForkThreadInput,
   NotificationPreferences,
   RemoveWorktreeInput,
+  SendChildThreadFollowUpInput,
+  SetChildSupervisionLoopInput,
   SelectedTranscriptRecord,
   StartThreadInput,
   WorkspaceSessionTarget,
@@ -124,6 +132,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.removeWorkspace, workspaceId) as Promise<DesktopAppState>,
   reorderWorkspaces: (workspaceOrder: readonly string[]) =>
     ipcRenderer.invoke(desktopIpc.reorderWorkspaces, workspaceOrder) as Promise<DesktopAppState>,
+  reorderPinnedSessions: (pinnedSessionOrder: readonly string[]) =>
+    ipcRenderer.invoke(desktopIpc.reorderPinnedSessions, pinnedSessionOrder) as Promise<DesktopAppState>,
   openWorkspaceInFinder: (workspaceId: string) =>
     ipcRenderer.invoke(desktopIpc.openWorkspaceInFinder, workspaceId) as Promise<void>,
   createWorktree: (input: CreateWorktreeInput) =>
@@ -142,12 +152,18 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.archiveSession, target) as Promise<DesktopAppState>,
   unarchiveSession: (target: WorkspaceSessionTarget) =>
     ipcRenderer.invoke(desktopIpc.unarchiveSession, target) as Promise<DesktopAppState>,
+  setSessionPinned: (target: WorkspaceSessionTarget, pinned: boolean) =>
+    ipcRenderer.invoke(desktopIpc.setSessionPinned, target, pinned) as Promise<DesktopAppState>,
   createSession: (input: CreateSessionInput) =>
     ipcRenderer.invoke(desktopIpc.createSession, input) as Promise<DesktopAppState>,
   startThread: (input: StartThreadInput) =>
     ipcRenderer.invoke(desktopIpc.startThread, input) as Promise<DesktopAppState>,
   forkThread: (input: ForkThreadInput) =>
     ipcRenderer.invoke(desktopIpc.forkThread, input) as Promise<DesktopAppState>,
+  sendChildThreadFollowUp: (input: SendChildThreadFollowUpInput) =>
+    ipcRenderer.invoke(desktopIpc.sendChildThreadFollowUp, input) as Promise<DesktopAppState>,
+  setChildSupervisionLoop: (input: SetChildSupervisionLoopInput) =>
+    ipcRenderer.invoke(desktopIpc.setChildSupervisionLoop, input) as Promise<DesktopAppState>,
   cancelCurrentRun: () => ipcRenderer.invoke(desktopIpc.cancelCurrentRun) as Promise<DesktopAppState>,
   setActiveView: (view: AppView) =>
     ipcRenderer.invoke(desktopIpc.setActiveView, view) as Promise<DesktopAppState>,
@@ -171,6 +187,14 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.logoutProvider, workspaceId, providerId) as Promise<DesktopAppState>,
   setProviderApiKey: (workspaceId: string, providerId: string, apiKey: string) =>
     ipcRenderer.invoke(desktopIpc.setProviderApiKey, workspaceId, providerId, apiKey) as Promise<DesktopAppState>,
+  listCustomProviders: () =>
+    ipcRenderer.invoke(desktopIpc.listCustomProviders) as Promise<readonly CustomProviderConfig[]>,
+  setCustomProvider: (workspaceId: string, config: CustomProviderConfig) =>
+    ipcRenderer.invoke(desktopIpc.setCustomProvider, workspaceId, config) as Promise<DesktopAppState>,
+  deleteCustomProvider: (workspaceId: string, providerId: string) =>
+    ipcRenderer.invoke(desktopIpc.deleteCustomProvider, workspaceId, providerId) as Promise<DesktopAppState>,
+  probeCustomProviderModels: (input: CustomProviderProbeInput) =>
+    ipcRenderer.invoke(desktopIpc.probeCustomProviderModels, input) as Promise<CustomProviderProbeResult>,
   setEnableSkillCommands: (workspaceId: string, enabled: boolean) =>
     ipcRenderer.invoke(desktopIpc.setEnableSkillCommands, workspaceId, enabled) as Promise<DesktopAppState>,
   setScopedModelPatterns: (workspaceId: string, patterns: readonly string[]) =>
@@ -219,6 +243,12 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.requestNotificationPermission) as Promise<DesktopNotificationPermissionStatus>,
   openSystemNotificationSettings: () =>
     ipcRenderer.invoke(desktopIpc.openSystemNotificationSettings) as Promise<void>,
+  getComputerUseStatus: () =>
+    ipcRenderer.invoke(desktopIpc.getComputerUseStatus) as Promise<DesktopComputerUseStatus>,
+  setLockedComputerUseEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke(desktopIpc.setLockedComputerUseEnabled, enabled) as Promise<DesktopComputerUseStatus>,
+  openComputerUsePrivacySettings: (pane: DesktopComputerUsePrivacyPane) =>
+    ipcRenderer.invoke(desktopIpc.openComputerUsePrivacySettings, pane) as Promise<void>,
   onNotificationPermissionStatusChanged: (callback: (status: DesktopNotificationPermissionStatus) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: DesktopNotificationPermissionStatus) => callback(status);
     ipcRenderer.on(desktopIpc.notificationPermissionStatusChanged, handler);
@@ -251,8 +281,10 @@ contextBridge.exposeInMainWorld("piApp", {
       readonly state: DesktopAppState;
       readonly result: NavigateSessionTreeResult;
     }>,
-  listWorkspaceFiles: (workspaceId: string) =>
-    ipcRenderer.invoke(desktopIpc.listWorkspaceFiles, workspaceId) as Promise<string[]>,
+  listWorkspaceFiles: (workspaceId: string, options?: { readonly force?: boolean }) =>
+    ipcRenderer.invoke(desktopIpc.listWorkspaceFiles, workspaceId, options) as Promise<string[]>,
+  readWorkspaceFile: (workspaceId: string, filePath: string) =>
+    ipcRenderer.invoke(desktopIpc.readWorkspaceFile, workspaceId, filePath) as Promise<WorkspaceFilePreview>,
   getChangedFiles: (workspaceId: string) =>
     ipcRenderer.invoke(desktopIpc.getChangedFiles, workspaceId) as Promise<{ path: string; status: "added" | "modified" | "deleted" | "untracked"; staged: boolean }[]>,
   getFileDiff: (workspaceId: string, filePath: string) =>

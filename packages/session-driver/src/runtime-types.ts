@@ -55,6 +55,7 @@ export interface RuntimeExtensionDiagnostic {
 export interface RuntimeExtensionRecord {
   readonly path: string;
   readonly displayName: string;
+  readonly description?: string;
   readonly enabled: boolean;
   readonly sourceInfo: RuntimeSourceInfo;
   readonly commands: readonly string[];
