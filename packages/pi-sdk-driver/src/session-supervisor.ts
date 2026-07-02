@@ -1826,6 +1826,12 @@ function findBranchEntryForRenderedMessageIndex(
   );
   let branchStartIndex = 0;
   for (const [renderedIndex, renderedMessage] of renderedMessages.entries()) {
+    if (renderedMessage.role !== "user" && renderedMessage.role !== "assistant") {
+      if (renderedIndex === targetRenderedIndex) {
+        return undefined;
+      }
+      continue;
+    }
     const branchIndex = branchMessages.findIndex((entry, index) => {
       if (index < branchStartIndex) {
         return false;
