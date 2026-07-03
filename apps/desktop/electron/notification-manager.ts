@@ -9,6 +9,8 @@ import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
 import { getSelectedSession } from "../src/desktop-state";
 import { isSessionActivelyViewed } from "./session-visibility";
 
+const MAX_COMPLETED_RUN_KEYS = 500;
+
 export class NotificationManager {
   private readonly completedRunKeys = new Set<string>();
   private readonly activeBySession = new Map<string, Electron.Notification>();
@@ -122,6 +124,15 @@ export class NotificationManager {
         return;
       }
       this.completedRunKeys.add(dedupeKey);
+      // Bound the dedupe set so a long-lived process can't leak it unboundedly;
+      // evict oldest (insertion-ordered) entries past the cap.
+      while (this.completedRunKeys.size > MAX_COMPLETED_RUN_KEYS) {
+        const oldest = this.completedRunKeys.values().next().value;
+        if (oldest === undefined) {
+          break;
+        }
+        this.completedRunKeys.delete(oldest);
+      }
       await this.showNotification(event.sessionRef, event.snapshot.title, "Agent finished responding");
       return;
     }
