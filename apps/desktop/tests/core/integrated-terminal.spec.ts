@@ -157,6 +157,55 @@ test("pastes clipboard text into the integrated terminal once", async () => {
   }
 });
 
+test("writes an oversized terminal paste in chunks instead of dropping it", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("terminal-paste-large");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await waitForWorkspaceByPath(window, workspacePath);
+    await createNamedThread(window, "Terminal large paste thread");
+
+    await window.getByLabel("Toggle terminal").click();
+    const terminal = window.getByTestId("integrated-terminal");
+    await expect(terminal).toBeVisible();
+    await terminal.locator(".xterm").click();
+    await expect(terminal.locator(".xterm-rows")).toContainText(
+      new RegExp(`${escapeRegExp(basename(workspacePath))}|[#$%]\\s*$`),
+      { timeout: 15_000 },
+    );
+
+    // Payload exceeds MAX_WRITE_LENGTH (128 KiB) so the old code path dropped the
+    // whole write. 3000 lines of 63 chars + newline = 192000 bytes, then a unique
+    // end marker so we can wait for the full paste to land before sending EOF.
+    const lineCount = 3000;
+    const payload = `${`${"X".repeat(63)}\n`.repeat(lineCount)}ENDMARKER\n`;
+    expect(payload.length).toBeGreaterThan(128 * 1024);
+
+    await window.keyboard.type("cat > payload.txt");
+    await window.keyboard.press("Enter");
+    await harness.electronApp.evaluate(({ clipboard }, text) => {
+      clipboard.writeText(text);
+    }, payload);
+    await window.keyboard.press(desktopShortcut("V"));
+    await expect(terminal.locator(".xterm-rows")).toContainText("ENDMARKER", { timeout: 30_000 });
+
+    await window.keyboard.press("Control+D");
+    await window.keyboard.type("wc -l payload.txt");
+    await window.keyboard.press("Enter");
+    await expect(terminal.locator(".xterm-rows")).toContainText(`${lineCount + 1} payload.txt`, {
+      timeout: 15_000,
+    });
+  } finally {
+    await harness.close();
+  }
+});
+
 function countOccurrences(value: string, needle: string): number {
   let count = 0;
   let index = value.indexOf(needle);

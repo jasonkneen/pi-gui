@@ -116,10 +116,27 @@ export class TerminalService {
 
   write(webContents: WebContents, terminalId: string, data: string): void {
     const session = this.requireOwnedSession(webContents, terminalId);
-    if (typeof data !== "string" || data.length === 0 || data.length > MAX_WRITE_LENGTH) {
+    if (typeof data !== "string" || data.length === 0) {
       return;
     }
-    session.pty?.write(data);
+    const pty = session.pty;
+    if (!pty) {
+      return;
+    }
+    // Chunk large input (e.g. a big paste) instead of dropping it, so no data is
+    // silently lost. Split on code-unit boundaries but never inside a UTF-16
+    // surrogate pair.
+    for (let offset = 0; offset < data.length; ) {
+      let end = Math.min(offset + MAX_WRITE_LENGTH, data.length);
+      if (end < data.length) {
+        const code = data.charCodeAt(end - 1);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          end -= 1;
+        }
+      }
+      pty.write(data.slice(offset, end));
+      offset = end;
+    }
   }
 
   resize(webContents: WebContents, terminalId: string, size: TerminalSize): void {
@@ -297,6 +314,14 @@ export class TerminalService {
       session.status = "exited";
       session.exitCode = exitCode;
       session.signal = signal;
+      // The PTY has exited on its own; drop the handle and listeners so a later
+      // Restart can't signal a recycled PID's process group and stale onData
+      // callbacks can't fire.
+      session.dataSubscription?.dispose();
+      session.exitSubscription?.dispose();
+      session.dataSubscription = undefined;
+      session.exitSubscription = undefined;
+      session.pty = undefined;
       this.sendToOwner(webContents, session, desktopIpc.terminalExit, {
         terminalId: session.id,
         exitCode,
