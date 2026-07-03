@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { writeFileAtomic } from "./atomic-write.js";
+import { writeJsonFileAtomic } from "./atomic-write.js";
 import type {
   CatalogStorage,
   SessionCatalogEntry,
@@ -255,8 +255,7 @@ export class JsonCatalogStore implements SessionFileCatalogStorage {
 
   private async persistState(state: CatalogFileState): Promise<void> {
     const operation = this.writeQueue.then(async () => {
-      const payload = `${JSON.stringify(state, null, 2)}\n`;
-      await writeFileAtomic(this.filePath, payload);
+      await writeJsonFileAtomic(this.filePath, state);
     });
 
     this.writeQueue = operation.then(

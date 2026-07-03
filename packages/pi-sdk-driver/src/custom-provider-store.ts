@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { writeFileAtomic } from "./atomic-write.js";
+import { writeJsonFileAtomic } from "./atomic-write.js";
 import {
   BUILT_IN_PROVIDER_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
@@ -219,6 +219,5 @@ async function readModelsJson(path: string): Promise<Record<string, unknown>> {
 }
 
 async function atomicWriteJson(path: string, data: Record<string, unknown>): Promise<void> {
-  const payload = `${JSON.stringify(data, null, 2)}\n`;
-  await writeFileAtomic(path, payload);
+  await writeJsonFileAtomic(path, data);
 }

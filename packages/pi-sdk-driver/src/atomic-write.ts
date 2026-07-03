@@ -44,6 +44,11 @@ export async function writeFileAtomic(filePath: string, data: string | Uint8Arra
   await syncDirectory(dir);
 }
 
+/** Serialize `value` as pretty JSON with a trailing newline and write it atomically. */
+export async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<void> {
+  await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 async function syncDirectory(dir: string): Promise<void> {
   let handle;
   try {
