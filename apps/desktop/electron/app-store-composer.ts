@@ -477,7 +477,7 @@ export async function sendMessageToSession(
   if (store.sessionFromState(sessionRef)?.archivedAt) {
     await store.driver.unarchiveSession(sessionRef);
   }
-  appendUserMessage(
+  const optimisticMessageId = appendUserMessage(
     store.sessionState.transcriptCache,
     sessionRef,
     text,
@@ -497,7 +497,10 @@ export async function sendMessageToSession(
   } catch (error) {
     if (rollbackOptimisticMessageOnError) {
       const transcript = store.sessionState.transcriptCache.get(key) ?? [];
-      store.sessionState.transcriptCache.set(key, transcript.slice(0, -1));
+      store.sessionState.transcriptCache.set(
+        key,
+        transcript.filter((message) => message.id !== optimisticMessageId),
+      );
       store.publishSelectedTranscriptFor(sessionRef);
     }
     throw error;

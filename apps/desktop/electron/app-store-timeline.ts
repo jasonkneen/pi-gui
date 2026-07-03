@@ -53,14 +53,14 @@ export function appendUserMessage(
   sessionRef: SessionRef,
   text: string,
   attachments: NonNullable<Extract<TranscriptMessage, { kind: "message" }>["attachments"]> = [],
-): TranscriptMessage[] {
+): string {
   const key = sessionKey(sessionRef);
   const transcript = [...(transcriptCache.get(key) ?? [])];
-  transcript.push(
-    attachments.length > 0 ? makeTranscriptMessageWithAttachments("user", text, attachments) : makeTranscriptMessage("user", text),
-  );
+  const message =
+    attachments.length > 0 ? makeTranscriptMessageWithAttachments("user", text, attachments) : makeTranscriptMessage("user", text);
+  transcript.push(message);
   transcriptCache.set(key, transcript);
-  return transcript;
+  return message.id;
 }
 
 export function appendQueuedUserMessage(
