@@ -551,6 +551,10 @@ export class DesktopAppStore implements AppStoreInternals {
   }
 
   async cancelCurrentRun(): Promise<DesktopAppState> {
+    const ref = this.selectedSessionRef();
+    if (ref) {
+      await orchestration.cancelChildRunsForParent(this, ref);
+    }
     return composer.cancelCurrentRun(this);
   }
 
@@ -1130,6 +1134,9 @@ export class DesktopAppStore implements AppStoreInternals {
         hydrateSelectedSession: false,
         markSelectedSessionViewed: false,
       });
+      // Startup GC of leaked pi/* worktrees and branches; self-contained and
+      // error-swallowing, so fire-and-forget without blocking initialization.
+      void worktree.reconcileWorktrees(this);
       const restoredSessionRef = this.selectedSessionRef();
       if (restoredSessionRef && persisted.selectedWorkspaceId && persisted.selectedSessionId) {
         this.restoredSelectedSessionKeysAwaitingSelection.add(sessionKey(restoredSessionRef));

@@ -381,7 +381,9 @@ function toOrchestrationStatus(value: unknown): OrchestrationChildThread["status
 }
 
 function toOptionalOrchestrationStatus(value: unknown): OrchestrationChildThread["status"] | undefined {
-  return value === "waiting" || value === "complete" || value === "failed" || value === "running" ? value : undefined;
+  return value === "queued" || value === "waiting" || value === "complete" || value === "failed" || value === "running"
+    ? value
+    : undefined;
 }
 
 function toPersistedModelSettingsSnapshot(value: unknown): ModelSettingsSnapshot | undefined {
