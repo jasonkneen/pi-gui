@@ -1,5 +1,5 @@
 import type { BrowserWindow } from "electron";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   applyHostUiRequestToExtensionUiState,
@@ -136,6 +136,7 @@ export class DesktopAppStore implements AppStoreInternals {
   private readonly listeners = new Set<StateListener>();
   private readonly selectedTranscriptListeners = new Set<SelectedTranscriptListener>();
   private readonly sessionEventListeners = new Set<SessionEventListener>();
+  private readonly sessionEventQueues = new Map<string, Promise<void>>();
   readonly driver: PiSdkDriver;
   readonly catalogStore: JsonCatalogStore;
   readonly worktreeManager: GitWorktreeManager;
@@ -784,11 +785,8 @@ export class DesktopAppStore implements AppStoreInternals {
       return this.withError(`Unknown workspace: ${targetWorkspaceId}`);
     }
     return this.withErrorHandling(async () => {
-      await updateProjectModelSettingsFile(ws.path, (settings) => ({
-        ...settings,
-        defaultProvider: provider,
-        defaultModel: modelId,
-      }));
+      const snapshot = await this.driver.runtimeSupervisor.setProjectDefaultModel(ws, { provider, modelId });
+      this.runtimeByWorkspace.set(ws.workspaceId, snapshot);
       return this.refreshState({ clearLastError: true });
     });
   }
@@ -809,10 +807,8 @@ export class DesktopAppStore implements AppStoreInternals {
       return this.withError(`Unknown workspace: ${targetWorkspaceId}`);
     }
     return this.withErrorHandling(async () => {
-      await updateProjectModelSettingsFile(ws.path, (settings) => ({
-        ...settings,
-        ...(thinkingLevel ? { defaultThinkingLevel: thinkingLevel } : {}),
-      }));
+      const snapshot = await this.driver.runtimeSupervisor.setProjectDefaultThinkingLevel(ws, thinkingLevel);
+      this.runtimeByWorkspace.set(ws.workspaceId, snapshot);
       return this.refreshState({ clearLastError: true });
     });
   }
@@ -909,10 +905,8 @@ export class DesktopAppStore implements AppStoreInternals {
       return this.withError(`Unknown workspace: ${targetWorkspaceId}`);
     }
     return this.withErrorHandling(async () => {
-      await updateProjectModelSettingsFile(ws.path, (settings) => ({
-        ...settings,
-        enabledModels: patterns.length > 0 ? [...patterns] : undefined,
-      }));
+      const snapshot = await this.driver.runtimeSupervisor.setProjectScopedModelPatterns(ws, patterns);
+      this.runtimeByWorkspace.set(ws.workspaceId, snapshot);
       return this.refreshState({ clearLastError: true });
     });
   }
@@ -955,10 +949,8 @@ export class DesktopAppStore implements AppStoreInternals {
     if (!ownerWorkspace) {
       return;
     }
-    await updateProjectModelSettingsFile(ownerWorkspace.path, (settings) => ({
-      ...settings,
-      enabledModels: nextPatterns,
-    }));
+    const updatedSnapshot = await this.driver.runtimeSupervisor.setProjectScopedModelPatterns(ownerWorkspace, nextPatterns);
+    this.runtimeByWorkspace.set(workspaceId, updatedSnapshot);
   }
 
   async setSkillEnabled(workspaceId: string, filePath: string, enabled: boolean): Promise<DesktopAppState> {
@@ -1439,9 +1431,33 @@ export class DesktopAppStore implements AppStoreInternals {
     }
 
     const unsubscribe = this.driver.subscribe(sessionRef, (event) => {
-      void this.handleSessionEvent(event, key);
+      this.enqueueSessionEvent(event, key);
     });
     this.sessionState.sessionSubscriptions.set(key, unsubscribe);
+  }
+
+  /**
+   * Serialize event handling per subscription key. The driver delivers events
+   * synchronously but `handleSessionEvent` is async (it awaits refreshes,
+   * persistence, listeners); firing each one with `void` let them interleave and
+   * race the shared session state. A per-key FIFO queue runs them one at a time.
+   * The chained promise is error-recovering — mirroring the driver's
+   * `chainRecoveringEventQueue` shape — so a rejection is logged and swallowed
+   * rather than leaving the tail rejected and freezing the queue for that session.
+   */
+  private enqueueSessionEvent(event: SessionDriverEvent, subscriptionKey: string): void {
+    const previous = this.sessionEventQueues.get(subscriptionKey) ?? Promise.resolve();
+    const next = previous
+      .then(() => this.handleSessionEvent(event, subscriptionKey))
+      .catch((error) => {
+        console.error(`[app-store] session event queue error for ${subscriptionKey}`, error);
+      });
+    this.sessionEventQueues.set(subscriptionKey, next);
+    void next.finally(() => {
+      if (this.sessionEventQueues.get(subscriptionKey) === next) {
+        this.sessionEventQueues.delete(subscriptionKey);
+      }
+    });
   }
 
   private migrateSessionSubscriptionKey(sourceKey: string, targetKey: string): void {
@@ -1790,130 +1806,139 @@ export class DesktopAppStore implements AppStoreInternals {
     if (subscriptionKey !== key) {
       this.migrateSessionSubscriptionKey(subscriptionKey, key);
     }
-    const knownSession = this.sessionFromState(event.sessionRef);
-    const shouldFollowSessionMutation = subscriptionKey !== key && this.currentSelectedSessionKey() === subscriptionKey;
-    let refreshedFollowedSession = false;
-    if (
-      !knownSession &&
-      (event.type === "sessionOpened" ||
-        event.type === "sessionUpdated" ||
-        event.type === "runCompleted" ||
-        event.type === "hostUiRequest")
-    ) {
-      if (this.refreshStateDepth === 0) {
-        await this.refreshState({
-          selectedWorkspaceId:
-            this.state.selectedWorkspaceId === event.sessionRef.workspaceId
-              ? event.sessionRef.workspaceId
-              : this.state.selectedWorkspaceId,
-          selectedSessionId: shouldFollowSessionMutation ? event.sessionRef.sessionId : this.state.selectedSessionId,
-          clearLastError: true,
-        });
-        refreshedFollowedSession = shouldFollowSessionMutation;
-      }
-    }
-
-    switch (event.type) {
-      case "assistantDelta":
-        appendAssistantDelta(this.sessionState.transcriptCache, this.sessionState.activeAssistantMessageBySession, event.sessionRef, event.text);
-        break;
-      case "sessionOpened":
-      case "runCompleted":
-        this.updateSessionConfig(event.sessionRef, event.snapshot.config);
-        this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
-        await this.refreshSessionCommands(event.sessionRef);
-        break;
-      case "sessionUpdated":
-        this.updateSessionConfig(event.sessionRef, event.snapshot.config);
-        this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
-        if (event.snapshot.status !== "running") {
-          await this.refreshSessionCommands(event.sessionRef);
+    // Any transient failure while applying the event (a rejected refresh,
+    // persistUiState, or listener) must never skip the final emit — otherwise the
+    // UI is left stuck showing "running" forever. Apply-then-emit is wrapped so
+    // the finally always publishes the latest state we managed to compute.
+    try {
+      const knownSession = this.sessionFromState(event.sessionRef);
+      const shouldFollowSessionMutation = subscriptionKey !== key && this.currentSelectedSessionKey() === subscriptionKey;
+      let refreshedFollowedSession = false;
+      if (
+        !knownSession &&
+        (event.type === "sessionOpened" ||
+          event.type === "sessionUpdated" ||
+          event.type === "runCompleted" ||
+          event.type === "hostUiRequest")
+      ) {
+        if (this.refreshStateDepth === 0) {
+          await this.refreshState({
+            selectedWorkspaceId:
+              this.state.selectedWorkspaceId === event.sessionRef.workspaceId
+                ? event.sessionRef.workspaceId
+                : this.state.selectedWorkspaceId,
+            selectedSessionId: shouldFollowSessionMutation ? event.sessionRef.sessionId : this.state.selectedSessionId,
+            clearLastError: true,
+          });
+          refreshedFollowedSession = shouldFollowSessionMutation;
         }
-        break;
-      case "runFailed":
+      }
+
+      switch (event.type) {
+        case "assistantDelta":
+          appendAssistantDelta(this.sessionState.transcriptCache, this.sessionState.activeAssistantMessageBySession, event.sessionRef, event.text);
+          break;
+        case "sessionOpened":
+        case "runCompleted":
+          this.updateSessionConfig(event.sessionRef, event.snapshot.config);
+          this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
+          await this.refreshSessionCommands(event.sessionRef);
+          break;
+        case "sessionUpdated":
+          this.updateSessionConfig(event.sessionRef, event.snapshot.config);
+          this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
+          if (event.snapshot.status !== "running") {
+            await this.refreshSessionCommands(event.sessionRef);
+          }
+          break;
+        case "runFailed":
+          this.state = {
+            ...this.state,
+            lastError: event.error.message,
+          };
+          await this.refreshSessionCommands(event.sessionRef);
+          break;
+        case "extensionCompatibilityIssue":
+          this.reportExtensionCompatibilityIssue(event.sessionRef, event.issue, event.timestamp);
+          break;
+        case "sessionClosed":
+          this.clearExtensionDialogTimeoutsForSession(event.sessionRef);
+          this.sessionState.extensionUiBySession.delete(key);
+          this.sessionState.sessionCommandsBySession.delete(key);
+          this.sessionState.queuedComposerMessagesBySession.delete(key);
+          this.sessionState.queuedComposerEditsBySession.delete(key);
+          this.clearPendingAutoTitle(event.sessionRef);
+          this.pendingRuntimeCommandsBySession.delete(key);
+          this.reportedCompatibilityIssuesBySession.delete(key);
+          break;
+        case "toolStarted":
+        case "toolUpdated":
+        case "toolFinished":
+          break;
+        case "hostUiRequest":
+          this.applyHostUiRequest(event);
+          break;
+        default:
+          break;
+      }
+
+      if (event.type === "sessionClosed") {
+        this.sessionState.sessionSubscriptions.get(key)?.();
+        this.sessionState.sessionSubscriptions.delete(key);
+      }
+
+      if (event.type === "runFailed") {
+        this.sessionState.sessionErrorsBySession.set(key, event.error.message);
+      } else if (event.type === "runCompleted" || event.type === "sessionClosed") {
+        this.sessionState.sessionErrorsBySession.delete(key);
+      }
+
+      applyTimelineEvent(this.sessionState.transcriptCache, event, {
+        runMetricsBySession: this.sessionState.runMetricsBySession,
+        runningSinceBySession: this.sessionState.runningSinceBySession,
+        activeAssistantMessageBySession: this.sessionState.activeAssistantMessageBySession,
+        activeWorkingActivityBySession: this.sessionState.activeWorkingActivityBySession,
+      });
+      this.state = applySessionEventState(
+        this.state,
+        event,
+        this.sessionState.transcriptCache,
+        this.sessionState.runningSinceBySession,
+        this.sessionState.lastViewedAtBySession,
+      );
+      if (event.type === "toolFinished") {
+        await orchestration.handleOrchestrationThreadToolResult(this, event);
+      }
+      this.markSessionViewedIfActivelyViewed(event.sessionRef);
+      this.state = this.syncDerivedSessionState(this.state, event.sessionRef);
+      if (
+        orchestration.hasOrchestrationChildSession(this.state.orchestrationChildren, event.sessionRef) ||
+        orchestration.hasOrchestrationParentSession(this.state.orchestrationChildren, event.sessionRef)
+      ) {
         this.state = {
           ...this.state,
-          lastError: event.error.message,
+          orchestrationChildren: orchestration.projectOrchestrationChildrenForSession(this, event.sessionRef),
         };
-        await this.refreshSessionCommands(event.sessionRef);
-        break;
-      case "extensionCompatibilityIssue":
-        this.reportExtensionCompatibilityIssue(event.sessionRef, event.issue, event.timestamp);
-        break;
-      case "sessionClosed":
-        this.clearExtensionDialogTimeoutsForSession(event.sessionRef);
-        this.sessionState.extensionUiBySession.delete(key);
-        this.sessionState.sessionCommandsBySession.delete(key);
-        this.sessionState.queuedComposerMessagesBySession.delete(key);
-        this.sessionState.queuedComposerEditsBySession.delete(key);
-        this.clearPendingAutoTitle(event.sessionRef);
-        this.pendingRuntimeCommandsBySession.delete(key);
-        this.reportedCompatibilityIssuesBySession.delete(key);
-        break;
-      case "toolStarted":
-      case "toolUpdated":
-      case "toolFinished":
-        break;
-      case "hostUiRequest":
-        this.applyHostUiRequest(event);
-        break;
-      default:
-        break;
-    }
-
-    if (event.type === "sessionClosed") {
-      this.sessionState.sessionSubscriptions.get(key)?.();
-      this.sessionState.sessionSubscriptions.delete(key);
-    }
-
-    if (event.type === "runFailed") {
-      this.sessionState.sessionErrorsBySession.set(key, event.error.message);
-    } else if (event.type === "runCompleted" || event.type === "sessionClosed") {
-      this.sessionState.sessionErrorsBySession.delete(key);
-    }
-
-    applyTimelineEvent(this.sessionState.transcriptCache, event, {
-      runMetricsBySession: this.sessionState.runMetricsBySession,
-      runningSinceBySession: this.sessionState.runningSinceBySession,
-      activeAssistantMessageBySession: this.sessionState.activeAssistantMessageBySession,
-      activeWorkingActivityBySession: this.sessionState.activeWorkingActivityBySession,
-    });
-    this.state = applySessionEventState(
-      this.state,
-      event,
-      this.sessionState.transcriptCache,
-      this.sessionState.runningSinceBySession,
-      this.sessionState.lastViewedAtBySession,
-    );
-    if (event.type === "toolFinished") {
-      await orchestration.handleOrchestrationThreadToolResult(this, event);
-    }
-    this.markSessionViewedIfActivelyViewed(event.sessionRef);
-    this.state = this.syncDerivedSessionState(this.state, event.sessionRef);
-    if (
-      orchestration.hasOrchestrationChildSession(this.state.orchestrationChildren, event.sessionRef) ||
-      orchestration.hasOrchestrationParentSession(this.state.orchestrationChildren, event.sessionRef)
-    ) {
-      this.state = {
-        ...this.state,
-        orchestrationChildren: orchestration.projectOrchestrationChildrenForSession(this, event.sessionRef),
-      };
-      this.scheduleOrchestrationSupervision();
-    }
-    if (shouldFollowSessionMutation && event.type !== "sessionClosed") {
-      this.applyFastSessionSelection(event.sessionRef);
-      if (!refreshedFollowedSession) {
-        this.startSelectedSessionHydration(event.sessionRef);
+        this.scheduleOrchestrationSupervision();
       }
+      if (shouldFollowSessionMutation && event.type !== "sessionClosed") {
+        this.applyFastSessionSelection(event.sessionRef);
+        if (!refreshedFollowedSession) {
+          this.startSelectedSessionHydration(event.sessionRef);
+        }
+      }
+      if (event.type === "runCompleted" || event.type === "runFailed" || event.type === "sessionClosed") {
+        await this.persistUiState();
+      } else if (event.type !== "hostUiRequest") {
+        this.schedulePersistUiState();
+      }
+    } catch (error) {
+      console.error(`[app-store] failed to apply session event ${event.type} for ${key}`, error);
+    } finally {
+      const snapshot = this.emit();
+      this.publishSelectedTranscriptFor(event.sessionRef);
+      await this.emitSessionEvent(event, snapshot);
     }
-    if (event.type === "runCompleted" || event.type === "runFailed" || event.type === "sessionClosed") {
-      await this.persistUiState();
-    } else if (event.type !== "hostUiRequest") {
-      this.schedulePersistUiState();
-    }
-    const snapshot = this.emit();
-    this.publishSelectedTranscriptFor(event.sessionRef);
-    await this.emitSessionEvent(event, snapshot);
   }
 
   workspaceRefFromState(workspaceId: string): WorkspaceRef | undefined {
@@ -2305,7 +2330,12 @@ export class DesktopAppStore implements AppStoreInternals {
 
   private async emitSessionEvent(event: SessionDriverEvent, snapshot: DesktopAppState): Promise<void> {
     for (const listener of this.sessionEventListeners) {
-      await listener(event, snapshot);
+      try {
+        await listener(event, snapshot);
+      } catch (error) {
+        // Isolate listeners: one rejection must not skip the remaining ones.
+        console.error("[app-store] session event listener failed", error);
+      }
     }
   }
 
@@ -2798,17 +2828,6 @@ async function readProjectModelSettingsFile(workspacePath: string): Promise<Reco
   } catch {
     return {};
   }
-}
-
-async function updateProjectModelSettingsFile(
-  workspacePath: string,
-  updater: (settings: Record<string, unknown>) => Record<string, unknown>,
-): Promise<void> {
-  const current = await readProjectModelSettingsFile(workspacePath);
-  const next = updater({ ...current });
-  const configDir = join(workspacePath, ".pi");
-  await mkdir(configDir, { recursive: true });
-  await writeFile(join(configDir, "settings.json"), `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
 function mergeModelSettingsSnapshot(
