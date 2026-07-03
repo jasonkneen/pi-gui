@@ -1,4 +1,4 @@
-import { access, realpath, unlink } from "node:fs/promises";
+import { access, realpath, stat, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   ModelRegistry,
@@ -44,6 +44,19 @@ import type {
 import type { RuntimeCommandRecord } from "@pi-gui/session-driver/runtime-types";
 import { isMissingFileError, JsonCatalogStore, type SessionFileCatalogStorage } from "./json-catalog-store.js";
 import {
+  buildOwnLease,
+  currentLeaseIdentity,
+  defaultIsPidAlive,
+  DEFAULT_LEASE_TTL_MS,
+  type LeaseIdentity,
+  leaseBlocksBinding,
+  readLeaseSnapshot,
+  removeLeaseFile,
+  sessionLeasePath,
+  SessionLeasedError,
+  writeLeaseFile,
+} from "./session-lease.js";
+import {
   applyHostUiRequestToExtensionUiState,
   createEmptyExtensionUiState,
   type ExtensionUiState,
@@ -67,6 +80,7 @@ import {
   nowIso,
   previewFromSessionInfo,
   sessionKey,
+  shouldTailFromDisk,
   singleFlight,
   titleFromSessionInfo,
   toSessionErrorInfo,
@@ -124,6 +138,10 @@ interface ManagedSessionRecord {
   extensionUiState: ExtensionUiState;
   bindingExtensions: boolean;
   sessionCommands: RuntimeCommandRecord[];
+  /** Path of the advisory lease file this record currently holds, if any. */
+  leasePath: string | undefined;
+  /** mtime (epoch ms) of the JSONL last reconciled into the served transcript. */
+  transcriptDiskMtimeMs: number | undefined;
 }
 
 interface RegisteredCommandAdapter {
@@ -157,6 +175,9 @@ export class SessionSupervisor {
   private readonly modelRegistry: ModelRegistry | undefined;
   private readonly records = new Map<string, ManagedSessionRecord>();
   private readonly ensureRecordInFlight = new Map<string, Promise<ManagedSessionRecord>>();
+  private readonly leaseIdentity: LeaseIdentity = currentLeaseIdentity();
+  private readonly leaseTtlMs = DEFAULT_LEASE_TTL_MS;
+  private readonly isPidAlive = defaultIsPidAlive;
 
   constructor(options: PiSdkDriverOptions = {}) {
     this.catalogs = options.catalogFilePath
@@ -307,6 +328,16 @@ export class SessionSupervisor {
   async getTranscript(sessionRef: SessionRef): Promise<SessionTranscriptItem[]> {
     const record = this.records.get(sessionKey(sessionRef));
     if (record && record.session && !record.closed) {
+      const diskMtimeMs = record.session.isStreaming ? undefined : await this.statMtimeMs(record.sessionFile);
+      const tail = shouldTailFromDisk({
+        isStreaming: record.session.isStreaming,
+        diskMtimeMs,
+        baselineMtimeMs: record.transcriptDiskMtimeMs,
+      });
+      if (tail) {
+        record.transcriptDiskMtimeMs = diskMtimeMs;
+        return this.readTranscriptFromDisk(sessionRef);
+      }
       return transcriptFromMessages(record.session.messages ?? [], record.updatedAt);
     }
     return this.readTranscriptFromDisk(sessionRef);
@@ -903,6 +934,11 @@ export class SessionSupervisor {
       throw new Error(`Session ${key} cannot be reopened because no session file is tracked.`);
     }
 
+    // Advisory single-writer check: if another live writer already holds this
+    // file, refuse to bind so the app can warn instead of blind-forking the
+    // conversation. Absent/dead/own leases never block (fully advisory).
+    await this.assertSessionNotForeignLeased(sessionFile);
+
     const runtime = await this.createAgentSessionRuntimeImpl({
       cwd: workspace.path,
       sessionManager: SessionManager.open(sessionFile),
@@ -956,6 +992,8 @@ export class SessionSupervisor {
       extensionUiState: createEmptyExtensionUiState(),
       bindingExtensions: false,
       sessionCommands: [],
+      leasePath: undefined,
+      transcriptDiskMtimeMs: undefined,
     };
     return record;
   }
@@ -988,6 +1026,9 @@ export class SessionSupervisor {
     record.runtime = undefined;
     record.session = undefined;
     record.sessionCommands = [];
+    // Release the advisory lease before disposing so another writer can take
+    // over promptly. Runs on every teardown path (close/remove/sync/rebind).
+    await this.releaseSessionLease(record);
     if (runtime) {
       await runtime.dispose();
       return;
@@ -1005,6 +1046,68 @@ export class SessionSupervisor {
       await this.disposeRecordRuntime(record);
     } catch (error) {
       console.warn(`[pi-sdk-driver] failed to dispose runtime for ${sessionKey(record.ref)}:`, error);
+    }
+  }
+
+  /**
+   * Throw {@link SessionLeasedError} if a live foreign writer already holds this
+   * session file. Absent, corrupt, dead, or our own leases never block — the
+   * lease is purely advisory, so any read/stat failure is swallowed.
+   */
+  private async assertSessionNotForeignLeased(sessionFile: string): Promise<void> {
+    const leasePath = sessionLeasePath(sessionFile);
+    let snapshot;
+    try {
+      snapshot = await readLeaseSnapshot(leasePath);
+    } catch {
+      return;
+    }
+    if (!snapshot) {
+      return;
+    }
+    const blocks = leaseBlocksBinding(snapshot, {
+      now: Date.now(),
+      ttlMs: this.leaseTtlMs,
+      self: this.leaseIdentity,
+      isPidAlive: this.isPidAlive,
+    });
+    if (blocks) {
+      throw new SessionLeasedError(sessionFile, snapshot.info);
+    }
+  }
+
+  /**
+   * Claim (or refresh) the advisory lease for the record's current session file,
+   * moving it if the file changed under a rebind. Best-effort: a write failure
+   * must not stop the runtime from binding.
+   */
+  private async acquireSessionLease(record: ManagedSessionRecord): Promise<void> {
+    const sessionFile = record.sessionFile;
+    if (!sessionFile) {
+      return;
+    }
+    const nextLeasePath = sessionLeasePath(sessionFile);
+    if (record.leasePath && record.leasePath !== nextLeasePath) {
+      await this.releaseSessionLease(record);
+    }
+    try {
+      await writeLeaseFile(nextLeasePath, buildOwnLease(this.leaseIdentity, Date.now()));
+      record.leasePath = nextLeasePath;
+    } catch (error) {
+      console.warn(`[pi-sdk-driver] failed to write session lease for ${sessionKey(record.ref)}:`, error);
+    }
+  }
+
+  private async releaseSessionLease(record: ManagedSessionRecord): Promise<void> {
+    const leasePath = record.leasePath;
+    if (!leasePath) {
+      return;
+    }
+    record.leasePath = undefined;
+    try {
+      await removeLeaseFile(leasePath);
+    } catch (error) {
+      console.warn(`[pi-sdk-driver] failed to remove session lease for ${sessionKey(record.ref)}:`, error);
     }
   }
 
@@ -1068,8 +1171,32 @@ export class SessionSupervisor {
       this.clearExtensionUiState(record);
       this.cancelPendingHostUiRequests(record);
       await this.rebindRuntimeSession(record, session);
+      // A rebind (fork/newSession/switch) can point at a different JSONL, so
+      // move the lease and reset the disk-tail baseline to the new file.
+      await this.refreshLeaseAndTranscriptBaseline(record);
     });
     await this.rebindRuntimeSession(record, runtime.session);
+    await this.refreshLeaseAndTranscriptBaseline(record);
+  }
+
+  /** Claim the lease and capture the disk-tail baseline for the record's current file. */
+  private async refreshLeaseAndTranscriptBaseline(record: ManagedSessionRecord): Promise<void> {
+    const [, mtimeMs] = await Promise.all([
+      this.acquireSessionLease(record),
+      this.statMtimeMs(record.sessionFile),
+    ]);
+    record.transcriptDiskMtimeMs = mtimeMs;
+  }
+
+  private async statMtimeMs(filePath: string | undefined): Promise<number | undefined> {
+    if (!filePath) {
+      return undefined;
+    }
+    try {
+      return (await stat(filePath)).mtimeMs;
+    } catch {
+      return undefined;
+    }
   }
 
   private createCommandContextActions(record: ManagedSessionRecord): ExtensionCommandContextActions {
@@ -1091,6 +1218,10 @@ export class SessionSupervisor {
         return { cancelled: result.cancelled };
       },
       switchSession: async (sessionPath, options) => {
+        // switchSession adopts an arbitrary existing JSONL. Refuse before the
+        // runtime opens it if a live foreign writer holds it, mirroring the
+        // reopen path so this seam can't silently fork a leased session.
+        await this.assertSessionNotForeignLeased(sessionPath);
         const { cancelled } = await this.requireRuntime(record).switchSession(sessionPath, options);
         await this.syncRecordAfterSessionMutation(record, { emitUpdate: true });
         return { cancelled };

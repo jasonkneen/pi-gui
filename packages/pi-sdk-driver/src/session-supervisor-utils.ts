@@ -479,6 +479,30 @@ export function chainRecoveringEventQueue(
 }
 
 /**
+ * Decide whether getTranscript should re-read the JSONL from disk instead of
+ * serving the in-memory runtime view. We tail from disk only when the session
+ * is idle (never mid-stream — the live runtime is authoritative while
+ * generating) and the file has grown since we last reconciled it, which means
+ * an external writer (e.g. `pi --continue`) appended turns the runtime never
+ * saw. For a persisting idle session the file is a superset of memory, so the
+ * disk read is safe. A missing baseline (first serve) does not trigger a tail:
+ * the baseline is captured at bind time, matching the freshly-opened file.
+ */
+export function shouldTailFromDisk(input: {
+  readonly isStreaming: boolean;
+  readonly diskMtimeMs: number | undefined;
+  readonly baselineMtimeMs: number | undefined;
+}): boolean {
+  // `diskMtimeMs` is undefined when there is no session file or the stat failed,
+  // so it also covers the "no file" case; the caller passes undefined while
+  // streaming too, but we guard isStreaming here to keep the rule explicit.
+  if (input.isStreaming || input.diskMtimeMs === undefined || input.baselineMtimeMs === undefined) {
+    return false;
+  }
+  return input.diskMtimeMs > input.baselineMtimeMs;
+}
+
+/**
  * Deduplicate concurrent async work by `key`. While a call for `key` is in
  * flight, later callers receive the same promise instead of starting a second
  * `factory` run, so exactly one result is produced. The entry is removed once
