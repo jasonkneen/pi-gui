@@ -462,3 +462,43 @@ function parseSerializedFileAttachments(payload: string): SessionTranscriptAttac
     return [];
   }
 }
+
+/**
+ * Chain `work` after the current tail of a per-session serial event queue,
+ * returning the new tail. Crucially the returned promise is *error-recovering*:
+ * if `work` rejects it is reported via `onError` and swallowed, so the tail
+ * resolves and later events still run. Chaining onto a rejected promise would
+ * otherwise skip every future `.then`, freezing the session's event stream.
+ */
+export function chainRecoveringEventQueue(
+  queue: Promise<void>,
+  work: () => Promise<void>,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  return queue.then(work).catch(onError);
+}
+
+/**
+ * Deduplicate concurrent async work by `key`. While a call for `key` is in
+ * flight, later callers receive the same promise instead of starting a second
+ * `factory` run, so exactly one result is produced. The entry is removed once
+ * settled so the next call starts fresh.
+ */
+export function singleFlight<T>(
+  inFlight: Map<string, Promise<T>>,
+  key: string,
+  factory: () => Promise<T>,
+): Promise<T> {
+  const existing = inFlight.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const promise = (async () => factory())().finally(() => {
+    if (inFlight.get(key) === promise) {
+      inFlight.delete(key);
+    }
+  });
+  inFlight.set(key, promise);
+  return promise;
+}

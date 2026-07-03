@@ -55,6 +55,7 @@ import {
 import { normalizeRuntimeCommandName, skillCommandName } from "./runtime-command-utils.js";
 import {
   buildSnapshot,
+  chainRecoveringEventQueue,
   createWorkspaceRef,
   deriveSessionConfig,
   deriveWorkspaceTitle,
@@ -66,6 +67,7 @@ import {
   nowIso,
   previewFromSessionInfo,
   sessionKey,
+  singleFlight,
   titleFromSessionInfo,
   toSessionErrorInfo,
   transcriptFromMessages,
@@ -154,6 +156,7 @@ export class SessionSupervisor {
   private readonly createAgentSessionRuntimeImpl: (options?: CreateAgentSessionOptions) => Promise<AgentSessionRuntime>;
   private readonly modelRegistry: ModelRegistry | undefined;
   private readonly records = new Map<string, ManagedSessionRecord>();
+  private readonly ensureRecordInFlight = new Map<string, Promise<ManagedSessionRecord>>();
 
   constructor(options: PiSdkDriverOptions = {}) {
     this.catalogs = options.catalogFilePath
@@ -256,7 +259,7 @@ export class SessionSupervisor {
       record.unsubscribeAgent?.();
       record.unsubscribeAgent = undefined;
       record.listeners.clear();
-      await this.disposeRecordRuntime(record);
+      await this.disposeRecordRuntimeSafely(record);
       this.records.delete(key);
     }
 
@@ -296,7 +299,7 @@ export class SessionSupervisor {
       record.unsubscribeAgent?.();
       record.unsubscribeAgent = undefined;
       record.listeners.clear();
-      await this.disposeRecordRuntime(record);
+      await this.disposeRecordRuntimeSafely(record);
       this.records.delete(key);
     }
   }
@@ -607,6 +610,16 @@ export class SessionSupervisor {
       );
       const promptText = injectFileAttachmentPreamble(input.text, input.attachments);
       if (isQueuedMessage) {
+        // The queued-vs-prompt decision was made before the persistSnapshot/emit
+        // awaits above; the agent may have finished its turn in that window. A
+        // steer/follow-up now would attach to nothing and be silently dropped,
+        // so re-check the live streaming state and surface a retryable error
+        // instead. The catch below rolls back the optimistic queued entry.
+        if (!session.isStreaming) {
+          throw new Error(
+            "Session finished streaming before the queued message could be delivered. Retry to send it as a new turn.",
+          );
+        }
         await this.queuePrompt(session, promptText, input.deliverAs!, images);
       } else {
         await session.prompt(promptText, {
@@ -672,7 +685,20 @@ export class SessionSupervisor {
       return;
     }
 
-    await record.session.abort();
+    try {
+      await record.session.abort();
+    } catch (error) {
+      // Abort is best-effort. Even if the runtime reports a failure we still
+      // reset local run state below so the UI does not stay stuck on "running".
+      console.warn(`[pi-sdk-driver] abort failed for ${sessionKey(record.ref)}:`, error);
+    }
+
+    // Aborting ends the current turn, so any steer/follow-up messages queued
+    // against it can never be delivered. Clear both the SDK queue and our
+    // mirror so the composer stops showing orphaned pending messages — matching
+    // the SDK's own "clear the queue when the user aborts" convention.
+    record.session?.clearQueue();
+    record.queuedMessages = [];
     record.runningRunId = undefined;
     record.status = "idle";
     await this.persistSnapshot(record);
@@ -828,7 +854,9 @@ export class SessionSupervisor {
       }
       record.unsubscribeAgent?.();
       record.unsubscribeAgent = undefined;
-      await this.disposeRecordRuntime(record);
+      // Guard dispose so a failure still lets us persist and emit sessionClosed
+      // below — otherwise the UI never learns the session closed.
+      await this.disposeRecordRuntimeSafely(record);
     }
 
     await this.persistSnapshot(record);
@@ -842,6 +870,18 @@ export class SessionSupervisor {
 
   private async ensureRecord(sessionRef: SessionRef): Promise<ManagedSessionRecord> {
     const key = sessionKey(sessionRef);
+    const existing = this.records.get(key);
+    if (existing && existing.session && !existing.closed) {
+      return existing;
+    }
+
+    // Dedupe concurrent reopen/create for the same session. Without this, two
+    // callers both pass the guard above, both build a runtime across the awaits
+    // below, and the second overwrites (and leaks) the first.
+    return singleFlight(this.ensureRecordInFlight, key, () => this.createOrReopenRecord(sessionRef, key));
+  }
+
+  private async createOrReopenRecord(sessionRef: SessionRef, key: string): Promise<ManagedSessionRecord> {
     const existing = this.records.get(key);
     if (existing && existing.session && !existing.closed) {
       return existing;
@@ -953,6 +993,19 @@ export class SessionSupervisor {
       return;
     }
     session?.dispose();
+  }
+
+  /**
+   * Dispose without letting a failure abort the caller. Used by bulk teardown
+   * loops (workspace removal/sync) and closeSession, where one runtime failing
+   * to dispose must not skip disposing the rest or skip the sessionClosed emit.
+   */
+  private async disposeRecordRuntimeSafely(record: ManagedSessionRecord): Promise<void> {
+    try {
+      await this.disposeRecordRuntime(record);
+    } catch (error) {
+      console.warn(`[pi-sdk-driver] failed to dispose runtime for ${sessionKey(record.ref)}:`, error);
+    }
   }
 
   private async rebindRuntimeSession(record: ManagedSessionRecord, session: AgentSession): Promise<void> {
@@ -1483,15 +1536,22 @@ export class SessionSupervisor {
       return;
     }
 
-    record.eventQueue = record.eventQueue.then(async () => {
-      if (options?.persistSnapshot !== false) {
-        await this.persistSnapshot(record);
-      }
-      for (const event of events) {
-        await this.emit(record, event);
-      }
-    });
-    record.eventQueue.catch(() => {});
+    record.eventQueue = chainRecoveringEventQueue(
+      record.eventQueue,
+      async () => {
+        if (options?.persistSnapshot !== false) {
+          await this.persistSnapshot(record);
+        }
+        for (const event of events) {
+          await this.emit(record, event);
+        }
+      },
+      (error) => {
+        // Contain the failure so the queue keeps flowing. A rethrow here would
+        // leave record.eventQueue rejected and freeze the session forever.
+        console.warn(`[pi-sdk-driver] event queue work failed for ${sessionKey(record.ref)}:`, error);
+      },
+    );
   }
 
   private async handleAgentEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
@@ -1613,7 +1673,13 @@ export class SessionSupervisor {
 
   private async emit(record: ManagedSessionRecord, event: SessionDriverEvent): Promise<void> {
     for (const listener of [...record.listeners]) {
-      await listener(event);
+      try {
+        await listener(event);
+      } catch (error) {
+        // Isolate listeners: one throwing must not skip the remaining ones or
+        // reject the caller (which would poison the event queue).
+        console.warn(`[pi-sdk-driver] session listener failed for ${sessionKey(record.ref)}:`, error);
+      }
     }
   }
 
