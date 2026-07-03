@@ -148,6 +148,14 @@ export class PiSdkDriver implements SessionDriver {
     return this.supervisor.syncWorkspace(path, displayName);
   }
 
+  reconcileWorkspace(workspaceId: WorkspaceId): Promise<SyncWorkspaceResult | undefined> {
+    return this.supervisor.reconcileWorkspace(workspaceId);
+  }
+
+  resolveWorkspaceSessionDir(workspaceId: WorkspaceId): Promise<string | undefined> {
+    return this.supervisor.resolveWorkspaceSessionDir(workspaceId);
+  }
+
   renameWorkspace(workspaceId: WorkspaceId, displayName: string) {
     return this.supervisor.renameWorkspace(workspaceId, displayName);
   }
@@ -158,6 +166,10 @@ export class PiSdkDriver implements SessionDriver {
 
   getTranscript(sessionRef: SessionRef) {
     return this.supervisor.getTranscript(sessionRef);
+  }
+
+  getSessionSchemaInfo(sessionRef: SessionRef) {
+    return this.supervisor.getSessionSchemaInfo(sessionRef);
   }
 
   generateThreadTitle(workspace: WorkspaceRef, options: GenerateThreadTitleOptions): Promise<string | null> {
