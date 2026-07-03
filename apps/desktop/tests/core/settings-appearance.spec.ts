@@ -266,6 +266,7 @@ test("light theme presets apply coordinated workbench palettes", async () => {
 
     await selectThemePreset(window, "Gruvbox");
     await window.getByRole("button", { name: "Back to app" }).click();
+    await expect(window.locator(".main")).toBeVisible();
     await expectThemedAppSurface(window);
   } finally {
     await harness.close();
