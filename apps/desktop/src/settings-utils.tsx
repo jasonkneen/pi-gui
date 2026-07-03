@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { RuntimeSettingsSnapshot, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 
-export type SettingsSection = "appearance" | "general" | "providers" | "models" | "computer-use" | "notifications";
+export type SettingsSection = "appearance" | "general" | "providers" | "models" | "notifications";
 
 export const THINKING_LEVELS: NonNullable<RuntimeSettingsSnapshot["defaultThinkingLevel"]>[] = [
   "low",
@@ -29,8 +29,6 @@ export function sectionTitle(section: SettingsSection): string {
       return "Providers";
     case "models":
       return "Models";
-    case "computer-use":
-      return "Computer Use";
     case "notifications":
       return "Notifications";
     default:
@@ -46,8 +44,6 @@ export function sectionDescription(section: SettingsSection, workspaceName: stri
       return `Connect providers and manage auth for ${workspaceName}.`;
     case "models":
       return "Choose the default model and which models appear in pickers.";
-    case "computer-use":
-      return "Check local Mac control readiness and permission state.";
     case "notifications":
       return "Manage both macOS notification access and which background events should alert you.";
     default:

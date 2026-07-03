@@ -30,35 +30,6 @@ export type DesktopNotificationPermissionStatus =
   | "unsupported"
   | "unknown";
 
-export type DesktopComputerUseStatusValue = "granted" | "denied" | "unknown";
-export type DesktopComputerUseDesktopState = "locked" | "unlocked" | "unknown";
-export type DesktopComputerUseCursorState = "enabled" | "disabled" | "unknown";
-export type DesktopComputerUseCursorActivity = "active" | "inactive" | "unknown";
-export type DesktopComputerUseLockedState = "enabled" | "not_enabled" | "unknown";
-export type DesktopComputerUseLockedInstallerState =
-  | "installed"
-  | "not-installed"
-  | "not-configured"
-  | "partial"
-  | "unknown";
-export type DesktopComputerUsePrivacyPane = "accessibility" | "screen-recording";
-
-export interface DesktopComputerUseStatus {
-  readonly helperAvailable: boolean;
-  readonly helperPath?: string;
-  readonly desktop: DesktopComputerUseDesktopState;
-  readonly frontmostApp?: string;
-  readonly cursor: DesktopComputerUseCursorState;
-  readonly cursorActive?: DesktopComputerUseCursorActivity;
-  readonly cursorDurationMs?: number;
-  readonly cursorGlideMs?: number;
-  readonly accessibility: DesktopComputerUseStatusValue;
-  readonly screenRecording: DesktopComputerUseStatusValue;
-  readonly lockedUse: DesktopComputerUseLockedState;
-  readonly lockedUseInstaller?: DesktopComputerUseLockedInstallerState;
-  readonly lockedUseInstallerPath?: string;
-  readonly message?: string;
-}
 
 export interface CustomProviderModelConfig {
   readonly id: string;
@@ -150,9 +121,6 @@ export const desktopIpc = {
   getNotificationPermissionStatus: "pi-gui:get-notification-permission-status",
   requestNotificationPermission: "pi-gui:request-notification-permission",
   openSystemNotificationSettings: "pi-gui:open-system-notification-settings",
-  getComputerUseStatus: "pi-gui:get-computer-use-status",
-  setLockedComputerUseEnabled: "pi-gui:set-locked-computer-use-enabled",
-  openComputerUsePrivacySettings: "pi-gui:open-computer-use-privacy-settings",
   notificationPermissionStatusChanged: "pi-gui:notification-permission-status-changed",
   pickComposerAttachments: "pi-gui:pick-composer-attachments",
   readClipboardImage: "pi-gui:read-clipboard-image",
@@ -395,9 +363,6 @@ export interface PiDesktopApi {
   getNotificationPermissionStatus(): Promise<DesktopNotificationPermissionStatus>;
   requestNotificationPermission(): Promise<DesktopNotificationPermissionStatus>;
   openSystemNotificationSettings(): Promise<void>;
-  getComputerUseStatus(): Promise<DesktopComputerUseStatus>;
-  setLockedComputerUseEnabled(enabled: boolean): Promise<DesktopComputerUseStatus>;
-  openComputerUsePrivacySettings(pane: DesktopComputerUsePrivacyPane): Promise<void>;
   onNotificationPermissionStatusChanged(
     callback: (status: DesktopNotificationPermissionStatus) => void,
   ): () => void;

@@ -25,8 +25,6 @@ import {
   getDesktopCommandFromShortcut,
   getDesktopShortcutLabel,
   type CustomProviderConfig,
-  type DesktopComputerUsePrivacyPane,
-  type DesktopComputerUseStatus,
   type DesktopNotificationPermissionStatus,
   type PiDesktopCommand,
 } from "./ipc";
@@ -184,8 +182,6 @@ export default function App() {
   const [notificationPermissionStatus, setNotificationPermissionStatus] =
     useState<DesktopNotificationPermissionStatus>("unknown");
   const [notificationPermissionPending, setNotificationPermissionPending] = useState(false);
-  const [computerUseStatus, setComputerUseStatus] = useState<DesktopComputerUseStatus | undefined>();
-  const [computerUseStatusPending, setComputerUseStatusPending] = useState(false);
   const [dockExpandedBySession, setDockExpandedBySession] = useState<Record<string, boolean>>({});
   const [treeModalState, setTreeModalState] = useState<{
     readonly open: boolean;
@@ -313,32 +309,6 @@ export default function App() {
     void refreshNotificationPermissionStatus();
     return undefined;
   }, [refreshNotificationPermissionStatus, settingsSection, snapshot?.activeView]);
-
-  const refreshComputerUseStatus = useCallback(() => {
-    if (!api?.getComputerUseStatus) {
-      return Promise.resolve(undefined);
-    }
-
-    setComputerUseStatusPending(true);
-    return api
-      .getComputerUseStatus()
-      .then((status) => {
-        setComputerUseStatus(status);
-        return status;
-      })
-      .finally(() => {
-        setComputerUseStatusPending(false);
-      });
-  }, [api]);
-
-  useEffect(() => {
-    if (snapshot?.activeView !== "settings" || settingsSection !== "computer-use") {
-      return undefined;
-    }
-
-    void refreshComputerUseStatus();
-    return undefined;
-  }, [refreshComputerUseStatus, settingsSection, snapshot?.activeView]);
 
   const {
     activeWorktrees,
@@ -2030,47 +2000,6 @@ export default function App() {
       });
   };
 
-  const handleOpenComputerUsePrivacySettings = (pane: DesktopComputerUsePrivacyPane) => {
-    if (!api?.openComputerUsePrivacySettings) {
-      return;
-    }
-    void api.openComputerUsePrivacySettings(pane);
-  };
-
-  const handleSetLockedComputerUseEnabled = (enabled: boolean) => {
-    if (!api?.setLockedComputerUseEnabled) {
-      return;
-    }
-    setComputerUseStatusPending(true);
-    void api
-      .setLockedComputerUseEnabled(enabled)
-      .then((status) => {
-        setComputerUseStatus(status);
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setComputerUseStatus((current) => ({
-          helperAvailable: current?.helperAvailable ?? false,
-          helperPath: current?.helperPath,
-          desktop: current?.desktop ?? "unknown",
-          frontmostApp: current?.frontmostApp,
-          cursor: current?.cursor ?? "unknown",
-          cursorActive: current?.cursorActive,
-          cursorDurationMs: current?.cursorDurationMs,
-          cursorGlideMs: current?.cursorGlideMs,
-          accessibility: current?.accessibility ?? "unknown",
-          screenRecording: current?.screenRecording ?? "unknown",
-          lockedUse: current?.lockedUse ?? "unknown",
-          lockedUseInstaller: current?.lockedUseInstaller,
-          lockedUseInstallerPath: current?.lockedUseInstallerPath,
-          message,
-        }));
-      })
-      .finally(() => {
-        setComputerUseStatusPending(false);
-      });
-  };
-
   const handleArchiveSession = (target: { workspaceId: string; sessionId: string }) => {
     void updateSnapshot(api, setSnapshot, () => api.archiveSession(target));
   };
@@ -2309,7 +2238,6 @@ export default function App() {
     { id: "general", label: "General" },
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models" },
-    { id: "computer-use", label: "Computer Use" },
     { id: "notifications", label: "Notifications" },
   ] as const;
 
@@ -2347,8 +2275,6 @@ export default function App() {
           notificationPreferences={snapshot.notificationPreferences}
           notificationPermissionStatus={notificationPermissionStatus}
           notificationPermissionPending={notificationPermissionPending}
-          computerUseStatus={computerUseStatus}
-          computerUseStatusPending={computerUseStatusPending}
           modelSettingsScopeMode={snapshot.modelSettingsScopeMode}
           integratedTerminalShell={snapshot.integratedTerminalShell}
           themeMode={snapshot.themeMode}
@@ -2366,9 +2292,6 @@ export default function App() {
           onSetIntegratedTerminalShell={handleSetIntegratedTerminalShell}
           onRequestNotificationPermission={handleRequestNotificationPermission}
           onOpenSystemNotificationSettings={handleOpenSystemNotificationSettings}
-          onRefreshComputerUseStatus={refreshComputerUseStatus}
-          onSetLockedComputerUseEnabled={handleSetLockedComputerUseEnabled}
-          onOpenComputerUsePrivacySettings={handleOpenComputerUsePrivacySettings}
           onSetScopedModelPatterns={handleSetScopedModelPatterns}
           onSetThemeMode={handleSetThemeMode}
           onSetThemePresetId={handleSetThemePresetId}
@@ -2446,7 +2369,6 @@ export default function App() {
           runtime={extensionsRuntime}
           commandCompatibility={extensionsCommandCompatibility}
           onOpenExtensionFolder={handleOpenExtensionFolder}
-          onOpenComputerUseSettings={() => openSettings(extensionsWorkspace?.id, "computer-use")}
           onRefresh={() => {
             if (!extensionsWorkspace) {
               return;
