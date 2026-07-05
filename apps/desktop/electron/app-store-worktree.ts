@@ -471,12 +471,22 @@ async function generateAndApplyAutoTitle(
       pendingAutoTitle.requestToken !== options.requestToken ||
       currentSession?.title !== NEW_THREAD_PLACEHOLDER_TITLE
     ) {
+      // Expected when the user renamed first; anything else here means a
+      // generated title was dropped — make the reason visible.
+      console.warn(
+        `[app-store] auto-title skipped for ${sessionRef.workspaceId}:${sessionRef.sessionId}: ` +
+          `pending=${Boolean(pendingAutoTitle)} tokenMatch=${pendingAutoTitle?.requestToken === options.requestToken} ` +
+          `title=${JSON.stringify(currentSession?.title)}`,
+      );
       return;
     }
 
     store.clearPendingAutoTitle(sessionRef);
     await store.driver.renameSession(sessionRef, generatedTitle);
-  } catch {
+  } catch (error) {
+    // Auto-title is best-effort, but a swallowed rename failure must at least
+    // be visible — the thread silently keeps its placeholder title otherwise.
+    console.warn(`[app-store] auto-title failed for ${sessionRef.workspaceId}:${sessionRef.sessionId}:`, error);
     clearMatchingPendingTitle();
   }
 }
