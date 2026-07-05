@@ -151,6 +151,47 @@ test("manual rename beats a delayed auto-title result", async () => {
   }
 });
 
+test("manual rename applies after the run is aborted via Stop", async () => {
+  const userDataDir = await makeUserDataDir("pi-app-user-data-");
+  const workspacePath = await makeWorkspace("auto-title-abort-rename-workspace");
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    await setDeferredThreadTitleMode(harness);
+
+    await startThreadViaIpc(window, {
+      prompt: "Build a deferred thread title test seam",
+    });
+
+    const composer = window.getByTestId("composer");
+    await expect(window.locator(".topbar__session")).toHaveText("New thread");
+
+    // Abort the run while it is still active. The regression this covers: the
+    // /name IPC response is built while abort-fallout events are still being
+    // applied, so the response snapshot is older than the pushed state that
+    // carries the rename — applying it unguarded rolled the title back.
+    const stopButton = window.getByRole("button", { name: "Stop run" });
+    try {
+      await stopButton.click({ timeout: 10_000 });
+    } catch {
+      // Run finished before Stop was clickable; the rename must still apply.
+    }
+    await expect(window.getByRole("button", { name: "Send message" })).toBeVisible({ timeout: 15_000 });
+
+    await composer.fill("/name Manual title wins");
+    await composer.press("Enter");
+
+    await expect(window.locator(".topbar__session")).toHaveText("Manual title wins", { timeout: 15_000 });
+    await expect(window.locator(".session-row__select", { hasText: "Manual title wins" }).first()).toBeVisible();
+  } finally {
+    await harness.close();
+  }
+});
+
 test("later sends do not retrigger auto-title generation", async () => {
   const userDataDir = await makeUserDataDir("pi-app-user-data-");
   const workspacePath = await makeWorkspace("auto-title-no-retrigger-workspace");

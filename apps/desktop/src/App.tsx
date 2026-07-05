@@ -80,7 +80,7 @@ function useDesktopAppState() {
     // The initial getState() can resolve after an early pushed state-changed event; never let a
     // snapshot with a lower revision overwrite a newer one already applied to state.
     const applyState = (incoming: DesktopAppState) => {
-      setSnapshot((current) => (current && incoming.revision < current.revision ? current : incoming));
+      applySnapshotIfNewer(setSnapshot, incoming);
     };
 
     void Promise.all([api.getState(), api.getSelectedTranscript()]).then(([state, transcript]) => {
@@ -117,13 +117,28 @@ function useDesktopAppState() {
   return [snapshot, setSnapshot, selectedTranscript] as const;
 }
 
+/**
+ * Never let a state snapshot with a lower revision overwrite a newer one. IPC
+ * responses race the pushed state-changed events: a response is built when the
+ * handler returns, but concurrent session events can bump the state (and get
+ * pushed) before the response crosses the IPC boundary. Applying the stale
+ * response unguarded would silently roll the UI back — e.g. a /name rename
+ * right after an aborted run lost its title this way.
+ */
+function applySnapshotIfNewer(
+  setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
+  incoming: DesktopAppState,
+): void {
+  setSnapshot((current) => (current && incoming.revision < current.revision ? current : incoming));
+}
+
 function updateSnapshot(
   api: NonNullable<typeof window.piApp>,
   setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
   action: () => Promise<DesktopAppState>,
 ) {
   return action().then((state) => {
-    setSnapshot(state);
+    applySnapshotIfNewer(setSnapshot, state);
     return state;
   });
 }
@@ -886,7 +901,7 @@ export default function App() {
           options,
         )
         .then(({ state, result }) => {
-          setSnapshot(state);
+          applySnapshotIfNewer(setSnapshot, state);
           setTreeModalState({
             open: false,
             loading: false,
@@ -956,7 +971,7 @@ export default function App() {
       void api
         .forkThread(input)
         .then((state) => {
-          setSnapshot(state);
+          applySnapshotIfNewer(setSnapshot, state);
           setForkModalState({
             open: false,
             submitting: false,
