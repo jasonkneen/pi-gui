@@ -142,6 +142,13 @@ export class DesktopAppStore implements AppStoreInternals {
   private readonly selectedTranscriptListeners = new Set<SelectedTranscriptListener>();
   private readonly sessionEventListeners = new Set<SessionEventListener>();
   private readonly sessionEventQueues = new Map<string, Promise<void>>();
+  /**
+   * Trailing-edge coalescers for per-session command refreshes, keyed by session
+   * key. A refresh request that arrives while one is already in flight marks it
+   * dirty instead of starting another driver round-trip; the runner then does one
+   * trailing refresh so the final state is never dropped.
+   */
+  private readonly sessionCommandRefreshers = new Map<string, { dirty: boolean }>();
   /** Per-workspace serial queue so focus reconciles never overlap or race. */
   private readonly externalChangeQueues = new Map<string, Promise<void>>();
   /**
@@ -1781,6 +1788,58 @@ export class DesktopAppStore implements AppStoreInternals {
     await this.refreshSessionCommands(sessionRef);
   }
 
+  /**
+   * Coalesce command refreshes for a single session. Status-change bursts
+   * (`sessionUpdated`) used to await one `getSessionCommands` round-trip per
+   * event on the serialized event queue, amplifying drain latency. Instead we run
+   * at most one refresh at a time per session: requests arriving mid-flight mark
+   * it dirty so exactly one trailing refresh runs afterward, keeping commands
+   * correct for the final event without a redundant call per event. Runs detached
+   * from the event queue and publishes the fresh commands itself once settled.
+   */
+  private refreshSessionCommandsCoalesced(sessionRef: SessionRef): void {
+    const key = sessionKey(sessionRef);
+    const existing = this.sessionCommandRefreshers.get(key);
+    if (existing) {
+      existing.dirty = true;
+      return;
+    }
+
+    const entry = { dirty: false };
+    this.sessionCommandRefreshers.set(key, entry);
+    void (async () => {
+      let refreshed = false;
+      try {
+        do {
+          entry.dirty = false;
+          if (!this.sessionState.sessionSubscriptions.has(key)) {
+            break;
+          }
+          try {
+            await this.refreshSessionCommands(sessionRef);
+            refreshed = true;
+          } catch (error) {
+            // A transient refresh failure must not drop the trailing refresh a
+            // later status-change event already requested: keep the dirty bit so
+            // the loop re-runs for it instead of aborting the burst.
+            console.error(`[app-store] coalesced session command refresh failed for ${key}`, error);
+          }
+        } while (entry.dirty);
+      } finally {
+        this.sessionCommandRefreshers.delete(key);
+        // The session can close (deleting its commands + unsubscribing) while a
+        // refresh is in flight; the resolved refresh would then resurrect a stale
+        // commands entry for a gone session, so drop it instead of publishing.
+        if (!this.sessionState.sessionSubscriptions.has(key)) {
+          this.sessionState.sessionCommandsBySession.delete(key);
+        } else if (refreshed) {
+          this.state = this.syncDerivedSessionState(this.state, sessionRef);
+          this.emit();
+        }
+      }
+    })();
+  }
+
   getLearnedRuntimeCommandCompatibility(
     workspaceId: string,
     command: RuntimeCommandRecord,
@@ -2070,7 +2129,7 @@ export class DesktopAppStore implements AppStoreInternals {
           this.updateSessionConfig(event.sessionRef, event.snapshot.config);
           this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
           if (event.snapshot.status !== "running") {
-            await this.refreshSessionCommands(event.sessionRef);
+            this.refreshSessionCommandsCoalesced(event.sessionRef);
           }
           break;
         case "runFailed":
