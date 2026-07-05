@@ -13,7 +13,7 @@ async function main() {
     readFile(path.join(repoRoot, "apps", "website", "app", "page.tsx"), "utf8"),
   ]);
 
-  assert.match(readme, /Download the latest `\.dmg`(?: or `\.AppImage`)? from \[Releases\]/);
+  assert.match(readme, /Download the latest `\.dmg` \(macOS\) or `\.AppImage` \(Linux\) from the\s+\[Releases page\]/);
   assert.match(readme, /brew install --cask pi-gui/);
   assert.match(readme, /brew upgrade --cask pi-gui/);
   assert.doesNotMatch(readme, /Homebrew installation will be published/);
