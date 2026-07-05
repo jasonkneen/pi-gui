@@ -187,6 +187,18 @@ test("writes an oversized terminal paste in chunks instead of dropping it", asyn
     const payload = `${`${"X".repeat(63)}\n`.repeat(lineCount)}ENDMARKER\n`;
     expect(payload.length).toBeGreaterThan(128 * 1024);
 
+    // zsh toggles bracketed-paste mode (DECSET 2004) off before running a command
+    // and back on at each prompt. Under load the renderer's xterm can still read
+    // the mode as "on" when the paste fires, so it wraps the paste in
+    // ESC[200~..ESC[201~; the trailing terminator leaves an unterminated partial
+    // line in cat's canonical input buffer and defeats the following Ctrl+D EOF.
+    // Disable zsh's bracketed paste for this shell so the oversized paste is
+    // delivered raw. The echoed READYMARKER (quotes strip on execution but stay in
+    // the typed command echo) confirms the disable was applied before we paste.
+    await window.keyboard.type('unset zle_bracketed_paste; echo READY""MARKER');
+    await window.keyboard.press("Enter");
+    await expect(terminal.locator(".xterm-rows")).toContainText("READYMARKER", { timeout: 15_000 });
+
     await window.keyboard.type("cat > payload.txt");
     await window.keyboard.press("Enter");
     await harness.electronApp.evaluate(({ clipboard }, text) => {
