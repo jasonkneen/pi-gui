@@ -123,6 +123,7 @@ test("renders tool results with compact previews in the tree modal", async () =>
 
     const composer = window.getByTestId("composer");
     await composer.fill("/tree");
+    await expect(window.getByTestId("slash-menu")).toContainText("Tree");
     await composer.press("Enter");
 
     const treeModal = window.getByTestId("tree-modal");
