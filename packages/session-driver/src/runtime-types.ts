@@ -91,7 +91,7 @@ export function skillSlashCommand(name: string): string {
 export interface RuntimeSettingsSnapshot {
   readonly defaultProvider?: string;
   readonly defaultModelId?: string;
-  readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly enableSkillCommands: boolean;
   readonly enabledModelPatterns: readonly string[];
 }
@@ -99,7 +99,7 @@ export interface RuntimeSettingsSnapshot {
 export interface ModelSettingsSnapshot {
   readonly defaultProvider?: string;
   readonly defaultModelId?: string;
-  readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly enabledModelPatterns: readonly string[];
 }
 

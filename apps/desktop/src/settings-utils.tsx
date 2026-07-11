@@ -8,6 +8,7 @@ export const THINKING_LEVELS: NonNullable<RuntimeSettingsSnapshot["defaultThinki
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
 
 export function settingsPill(active: boolean): string {

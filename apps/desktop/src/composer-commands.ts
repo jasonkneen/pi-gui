@@ -231,6 +231,11 @@ export const THINKING_OPTIONS: readonly ComposerSlashOption[] = [
     label: "Extra High",
     description: "Extra high reasoning depth for complex problems",
   },
+  {
+    value: "max",
+    label: "Max",
+    description: "Maximum reasoning depth for supported models",
+  },
 ] as const;
 
 export function buildSlashCommandSections(

@@ -1,8 +1,16 @@
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
-const codexModel = registry.getAll().find((model) => model.provider === "openai-codex" && model.id === "gpt-5.5");
-const issueModelChecks = [
+const models = registry.getAll();
+const modelChecks = [
+  ...["luna", "sol", "terra"].map((variant) => ({
+    provider: "openai-codex",
+    id: `gpt-5.6-${variant}`,
+    reason: "GPT 5.6 Codex support",
+    requireReasoning: true,
+    requireImageInput: true,
+    requireMaxThinking: true,
+  })),
   {
     provider: "anthropic",
     id: "claude-opus-4-7",
@@ -19,20 +27,8 @@ const issueModelChecks = [
   },
 ];
 
-if (!codexModel) {
-  throw new Error("Bundled Pi runtime does not expose openai-codex/gpt-5.5.");
-}
-
-if (!codexModel.reasoning) {
-  throw new Error("Bundled openai-codex/gpt-5.5 model is missing reasoning support.");
-}
-
-if (!codexModel.input.includes("image")) {
-  throw new Error("Bundled openai-codex/gpt-5.5 model is missing image input support.");
-}
-
-for (const check of issueModelChecks) {
-  const model = registry.getAll().find((entry) => entry.provider === check.provider && entry.id === check.id);
+for (const check of modelChecks) {
+  const model = models.find((entry) => entry.provider === check.provider && entry.id === check.id);
   const modelKey = `${check.provider}/${check.id}`;
   if (!model) {
     throw new Error(`Bundled Pi runtime does not expose ${modelKey} for ${check.reason}.`);
@@ -43,11 +39,9 @@ for (const check of issueModelChecks) {
   if (check.requireImageInput && !model.input.includes("image")) {
     throw new Error(`Bundled ${modelKey} is missing image input support for ${check.reason}.`);
   }
+  if (check.requireMaxThinking && model.thinkingLevelMap?.max !== "max") {
+    throw new Error(`Bundled ${modelKey} is missing max thinking support for ${check.reason}.`);
+  }
 }
 
-console.log(
-  [
-    "Verified bundled Pi runtime exposes openai-codex/gpt-5.5.",
-    ...issueModelChecks.map((check) => `Verified bundled Pi runtime exposes ${check.provider}/${check.id}.`),
-  ].join("\n"),
-);
+console.log(modelChecks.map((check) => `Verified bundled Pi runtime exposes ${check.provider}/${check.id}.`).join("\n"));

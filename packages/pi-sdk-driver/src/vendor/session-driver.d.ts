@@ -416,7 +416,7 @@ declare module "@pi-gui/session-driver/runtime-types" {
   export interface RuntimeSettingsSnapshot {
     readonly defaultProvider?: string;
     readonly defaultModelId?: string;
-    readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+    readonly defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     readonly enableSkillCommands: boolean;
     readonly enabledModelPatterns: readonly string[];
   }

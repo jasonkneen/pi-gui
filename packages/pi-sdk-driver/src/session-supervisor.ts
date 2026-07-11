@@ -2032,7 +2032,7 @@ function resolvedCatalogSessionTitle(existingTitle: string | undefined, infoTitl
 }
 
 const DEFAULT_SESSION_THINKING_LEVEL = "medium";
-const THINKING_LEVEL_ORDER = ["off", "low", "medium", "high", "xhigh"] as const;
+const THINKING_LEVEL_ORDER = ["off", "low", "medium", "high", "xhigh", "max"] as const;
 type SessionTreeNodeRecord = ReturnType<SessionManager["getTree"]>[number];
 type SessionBranchEntry = ReturnType<SessionManager["getBranch"]>[number];
 type SessionMessageBranchEntry = Extract<SessionBranchEntry, { type: "message" }>;

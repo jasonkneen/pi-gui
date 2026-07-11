@@ -94,12 +94,15 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await expect(optionsMenu).toBeVisible();
     await expect(optionsMenu).toContainText("Low");
     await expect(optionsMenu).toContainText("Extra High");
+    await expect(optionsMenu).toContainText("Max");
+    await composer.press("ArrowDown");
+    await composer.press("ArrowDown");
     await composer.press("ArrowDown");
     await composer.press("ArrowDown");
     await composer.press("Enter");
     await expect(optionsMenu).toHaveCount(0);
-    await expect(window.getByTestId("transcript")).toContainText("Thinking set to high");
-    await expect(window.locator(".composer__hint")).toContainText("high");
+    await expect(window.getByTestId("transcript")).toContainText("Thinking set to max");
+    await expect(window.locator(".composer__hint")).toContainText("max");
 
     await composer.fill("Keep the draft /thinking");
     await expect(optionsMenu).toBeVisible();

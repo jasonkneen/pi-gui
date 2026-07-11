@@ -91,8 +91,16 @@ const notificationHelperPath =
     : undefined;
 const pnpmBinary = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const piCodingAgentPackageName = "@earendil-works/pi-coding-agent";
-const requiredPiCodingAgentVersion = "0.80.3";
-const issueModelChecks = [
+const requiredPiCodingAgentVersion = "0.80.6";
+const modelChecks = [
+  ...["luna", "sol", "terra"].map((variant) => ({
+    provider: "openai-codex",
+    id: `gpt-5.6-${variant}`,
+    reason: "GPT 5.6 Codex support",
+    requireReasoning: true,
+    requireImageInput: true,
+    requireMaxThinking: true,
+  })),
   {
     provider: "anthropic",
     id: "claude-opus-4-7",
@@ -211,12 +219,9 @@ async function verifyPackagedPiRuntime(extractedDir) {
   const runtimeEntry = path.join(extractedDir, "node_modules", ...piCodingAgentPackageName.split("/"), "dist", "index.js");
   const { AuthStorage, ModelRegistry } = await import(pathToFileURL(runtimeEntry).href);
   const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
-  const codexModel = registry.getAll().find((model) => model.provider === "openai-codex" && model.id === "gpt-5.5");
-  if (!codexModel?.reasoning || !codexModel.input.includes("image")) {
-    throw new Error("Packaged Pi runtime does not expose openai-codex/gpt-5.5 with reasoning and image input.");
-  }
-  for (const check of issueModelChecks) {
-    const model = registry.getAll().find((entry) => entry.provider === check.provider && entry.id === check.id);
+  const models = registry.getAll();
+  for (const check of modelChecks) {
+    const model = models.find((entry) => entry.provider === check.provider && entry.id === check.id);
     const modelKey = `${check.provider}/${check.id}`;
     if (!model) {
       throw new Error(`Packaged Pi runtime does not expose ${modelKey} for ${check.reason}.`);
@@ -226,6 +231,9 @@ async function verifyPackagedPiRuntime(extractedDir) {
     }
     if (check.requireImageInput && !model.input.includes("image")) {
       throw new Error(`Packaged ${modelKey} is missing image input support for ${check.reason}.`);
+    }
+    if (check.requireMaxThinking && model.thinkingLevelMap?.max !== "max") {
+      throw new Error(`Packaged ${modelKey} is missing max thinking support for ${check.reason}.`);
     }
   }
 }
