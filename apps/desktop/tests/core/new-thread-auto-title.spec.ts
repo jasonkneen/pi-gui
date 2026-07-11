@@ -13,6 +13,7 @@ import {
   selectSession,
   setDeferredThreadTitleMode,
   startThreadViaIpc,
+  waitForDeferredThreadTitleRequest,
   waitForSessionByTitle,
   waitForWorkspaceByPath,
 } from "../helpers/electron-app";
@@ -99,6 +100,7 @@ test("switching away does not cancel a pending auto-title", async () => {
     });
 
     await expect(window.locator(".topbar__session")).toHaveText("New thread");
+    await waitForDeferredThreadTitleRequest(harness);
     await selectSession(window, "Existing thread");
     await expect.poll(async () => (await getDesktopState(window)).selectedWorkspaceId).toBe(workspace.id);
 

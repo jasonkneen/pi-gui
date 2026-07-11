@@ -1283,6 +1283,27 @@ export async function setDeferredThreadTitleMode(harness: DesktopHarness): Promi
   });
 }
 
+export async function waitForDeferredThreadTitleRequest(
+  harness: DesktopHarness,
+  timeout = 15_000,
+): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        harness.electronApp.evaluate(async () => {
+          const hooks = (globalThis as {
+            __PI_APP_TEST_HOOKS?: { hasDeferredThreadTitle?: () => boolean };
+          }).__PI_APP_TEST_HOOKS;
+          if (!hooks?.hasDeferredThreadTitle) {
+            throw new Error("Deferred thread-title hook is unavailable");
+          }
+          return hooks.hasDeferredThreadTitle();
+        }),
+      { timeout },
+    )
+    .toBe(true);
+}
+
 export async function resolveDeferredThreadTitleEventually(
   harness: DesktopHarness,
   title: string,
