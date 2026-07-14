@@ -726,6 +726,28 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.setSessionPinned(target, pinned));
   };
 
+  if (secondarySurfaceView) {
+    return (
+      <SecondarySurfaces
+        api={api}
+        snapshot={snapshot}
+        setSnapshot={setSnapshot}
+        activeView={secondarySurfaceView}
+        rootWorkspaceOptions={rootWorkspaceOptions}
+        settingsSection={settingsSection}
+        onSelectSettingsSection={setSettingsSection}
+        settingsWorkspaceId={settingsWorkspaceId}
+        onSelectSettingsWorkspace={setSettingsWorkspaceId}
+        skillsWorkspaceId={skillsWorkspaceId}
+        onSelectSkillsWorkspace={setSkillsWorkspaceId}
+        extensionsWorkspaceId={extensionsWorkspaceId}
+        onSelectExtensionsWorkspace={setExtensionsWorkspaceId}
+        onBack={() => setActiveView("threads")}
+        onTrySkill={handleTrySkill}
+      />
+    );
+  }
+
   const shellClassName = `shell${snapshot.sidebarCollapsed ? " shell--sidebar-collapsed" : ""}`;
 
   return (
@@ -762,25 +784,6 @@ export default function App() {
         />
       ) : null}
 
-      {secondarySurfaceView ? (
-        <SecondarySurfaces
-          api={api}
-          snapshot={snapshot}
-          setSnapshot={setSnapshot}
-          activeView={secondarySurfaceView}
-          rootWorkspaceOptions={rootWorkspaceOptions}
-          settingsSection={settingsSection}
-          onSelectSettingsSection={setSettingsSection}
-          settingsWorkspaceId={settingsWorkspaceId}
-          onSelectSettingsWorkspace={setSettingsWorkspaceId}
-          skillsWorkspaceId={skillsWorkspaceId}
-          onSelectSkillsWorkspace={setSkillsWorkspaceId}
-          extensionsWorkspaceId={extensionsWorkspaceId}
-          onSelectExtensionsWorkspace={setExtensionsWorkspaceId}
-          onBack={() => setActiveView("threads")}
-          onTrySkill={handleTrySkill}
-        />
-      ) : (
       <main className={mainClassName}>
         <Topbar
           activeView={snapshot.activeView}
@@ -1044,7 +1047,6 @@ export default function App() {
           />
         ) : null}
       </main>
-      )}
     </div>
   );
 }

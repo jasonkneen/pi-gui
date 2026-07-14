@@ -95,8 +95,26 @@ async function writeProofScreenshot(window: Page, name: string): Promise<void> {
   await window.screenshot({ path: join(proofDir, name), fullPage: false });
 }
 
+async function expectSecondaryTakeover(window: Page, testId: string): Promise<void> {
+  await expect(window.getByTestId(testId)).toBeVisible();
+  await expect(window.locator(".secondary-surface__sidebar")).toBeVisible();
+  await expect(window.locator(".shell, .sidebar, .main")).toHaveCount(0);
+  await expect(window.getByTestId("sidebar-toggle")).toHaveCount(0);
+}
+
+async function writeTakeoverProof(window: Page, name: string): Promise<void> {
+  const proofDir = process.env.PI_APP_TAKEOVER_PROOF_DIR;
+  if (proofDir) {
+    await window.screenshot({ path: join(proofDir, name), fullPage: false });
+  }
+}
+
 test("toggles and persists the primary sidebar from the button and keyboard shortcut", async () => {
   test.setTimeout(90_000);
+  const takeoverProofDir = process.env.PI_APP_TAKEOVER_PROOF_DIR;
+  if (takeoverProofDir) {
+    await mkdir(takeoverProofDir, { recursive: true });
+  }
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("sidebar-toggle-workspace");
   const firstRun = await launchDesktop(userDataDir, {
@@ -138,26 +156,44 @@ test("toggles and persists the primary sidebar from the button and keyboard shor
     await expectSidebarCollapsed(window, false);
 
     await window.keyboard.press(desktopShortcut(","));
-    await expect(window.getByTestId("settings-surface")).toBeVisible();
-    await expect(window.getByTestId("sidebar-toggle")).toHaveCount(0);
+    await expectSecondaryTakeover(window, "settings-surface");
+    await window.getByRole("button", { name: "Appearance", exact: true }).click();
+    await window.locator(".settings-row", { hasText: "Light" }).locator('input[type="radio"]').click();
+    await writeTakeoverProof(window, "settings-light.png");
     await window.keyboard.press(desktopShortcut("B"));
     await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
     await restoreSidebarIfNeeded(window);
     await window.getByRole("button", { name: "Skills", exact: true }).click();
-    await expect(window.getByTestId("skills-surface")).toBeVisible();
-    await expect(window.getByTestId("sidebar-toggle")).toHaveCount(0);
+    await expectSecondaryTakeover(window, "skills-surface");
+    await writeTakeoverProof(window, "skills-light.png");
     await window.keyboard.press(desktopShortcut("B"));
     await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
     await restoreSidebarIfNeeded(window);
     await window.getByRole("button", { name: "Extensions", exact: true }).click();
-    await expect(window.getByTestId("extensions-surface")).toBeVisible();
-    await expect(window.getByTestId("sidebar-toggle")).toHaveCount(0);
+    await expectSecondaryTakeover(window, "extensions-surface");
+    await writeTakeoverProof(window, "extensions-light.png");
     await window.keyboard.press(desktopShortcut("B"));
     await expect.poll(async () => (await getDesktopState(window)).sidebarCollapsed).toBe(false);
+    await window.getByRole("button", { name: "Back to app", exact: true }).click();
+
+    await window.keyboard.press(desktopShortcut(","));
+    await expectSecondaryTakeover(window, "settings-surface");
+    await window.locator(".settings-row", { hasText: "Dark" }).locator('input[type="radio"]').click();
+    await writeTakeoverProof(window, "settings-dark.png");
+    await window.getByRole("button", { name: "Back to app", exact: true }).click();
+
+    await window.getByRole("button", { name: "Skills", exact: true }).click();
+    await expectSecondaryTakeover(window, "skills-surface");
+    await writeTakeoverProof(window, "skills-dark.png");
+    await window.getByRole("button", { name: "Back to app", exact: true }).click();
+
+    await window.getByRole("button", { name: "Extensions", exact: true }).click();
+    await expectSecondaryTakeover(window, "extensions-surface");
+    await writeTakeoverProof(window, "extensions-dark.png");
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
 
     await restoreSidebarIfNeeded(window);
