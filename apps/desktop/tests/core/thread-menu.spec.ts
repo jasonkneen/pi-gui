@@ -1,6 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   createNamedThread,
   getDesktopState,
@@ -11,7 +11,13 @@ import {
 } from "../helpers/electron-app";
 import { appendMessagesToSessionFile, sessionFilePathFromCatalog } from "../helpers/session-file";
 
-const proofDir = "/Users/matthewlam/.codex/proofs/thread-menu-worker";
+const proofDir = process.env.PI_APP_THREAD_MENU_PROOF_DIR;
+
+async function captureProof(window: Page, filename: string): Promise<void> {
+  if (!proofDir) return;
+  await mkdir(proofDir, { recursive: true });
+  await window.screenshot({ path: join(proofDir, filename) });
+}
 
 test("thread menu supports rename, archive/restore, mark read, copy id, and right click", async () => {
   test.setTimeout(90_000);
@@ -67,7 +73,7 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await expect(menu.getByRole("button", { name: "Archive" })).toBeVisible();
     await expect(menu.getByRole("button", { name: "Mark as read" })).toBeVisible();
     await expect(menu.getByRole("button", { name: "Copy session id" })).toBeVisible();
-    await window.screenshot({ path: join(proofDir, "01-open-menu.png") });
+    await captureProof(window, "01-open-menu.png");
 
     await menu.getByRole("button", { name: "Copy session id" }).click();
     await expect.poll(() => window.evaluate(() => navigator.clipboard.readText())).toBe(target!.sessionId);
@@ -75,7 +81,7 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await row.click({ button: "right" });
     await row.getByRole("menu").getByRole("button", { name: "Mark as read" }).click();
     await expect(row).toHaveAttribute("data-sidebar-indicator", "none");
-    await window.screenshot({ path: join(proofDir, "02-marked-read.png") });
+    await captureProof(window, "02-marked-read.png");
 
     row = window.locator(".session-row", { hasText: "Thread menu target" }).first();
     await row.hover();
@@ -86,7 +92,7 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await window.getByRole("button", { name: "Save" }).click();
     row = window.locator(".session-row", { hasText: "Renamed from menu" }).first();
     await expect(row).toBeVisible();
-    await window.screenshot({ path: join(proofDir, "03-renamed.png") });
+    await captureProof(window, "03-renamed.png");
 
     await row.hover();
     await row.locator(".session-row__menu-button").click();
@@ -94,7 +100,7 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await expect(window.locator(".session-list > .session-row", { hasText: "Renamed from menu" })).toHaveCount(0);
     const archivedToggle = window.locator(".archived-thread-group__toggle");
     await expect(archivedToggle).toBeVisible();
-    await window.screenshot({ path: join(proofDir, "04-archived.png") });
+    await captureProof(window, "04-archived.png");
 
     await archivedToggle.click();
     const archivedRow = window.locator(".session-list--archived .session-row", { hasText: "Renamed from menu" });
