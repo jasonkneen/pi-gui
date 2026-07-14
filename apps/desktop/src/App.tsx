@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import {
   getSelectedSession,
   getSelectedWorkspace,
   type AppView,
-  type ComposerImageAttachment,
 } from "./desktop-state";
 import { updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
 import { buildFileWorkbenchContexts } from "./app/file-workbench-contexts";
@@ -16,7 +15,6 @@ import { ComposerPanel } from "./composer-panel";
 import { DiffPanel } from "./diff-panel";
 import type { DiffPanelFileRequest } from "./diff-panel-types";
 import { buildModelOptions } from "./composer-commands";
-import { parseTreeComposerCommand } from "./composer-commands";
 import {
   desktopCommands,
   getDesktopCommandFromShortcut,
@@ -46,12 +44,7 @@ import { applyThemePresetToRoot } from "./theme-presets";
 import { deriveWorkspaceContext } from "./workspace-context";
 import { useTreeForkModals } from "./hooks/use-tree-fork-modals";
 import { useComposerDraftSync } from "./hooks/use-composer-draft-sync";
-import {
-  extractImageFilesFromClipboardData,
-  extractFilesFromDataTransfer,
-  handleClipboardImageShortcut,
-  readComposerAttachmentsFromFiles,
-} from "./composer-attachments";
+import { useSessionComposer } from "./hooks/use-session-composer";
 
 export default function App() {
   const [snapshot, setSnapshot, selectedTranscript] = useDesktopAppState();
@@ -143,8 +136,6 @@ export default function App() {
     provider: resolvedSessionProvider,
     modelId: resolvedSessionModelId,
   });
-  const [attachmentsClearedOnSubmit, setAttachmentsClearedOnSubmit] = useState(false);
-  const composerAttachments = attachmentsClearedOnSubmit ? [] : (snapshot?.composerAttachments ?? []);
   const queuedComposerMessages = snapshot?.queuedComposerMessages ?? [];
   const editingQueuedMessageId = snapshot?.editingQueuedMessageId;
   const runningLabel = useRunningLabel(selectedSession?.status === "running" ? selectedSession.runningSince : undefined);
@@ -386,6 +377,36 @@ export default function App() {
     openSettings,
   });
 
+  const {
+    composerAttachments,
+    submitComposerDraft,
+    handlePickAttachments,
+    handleRemoveAttachment,
+    handleEditQueuedMessage,
+    handleCancelQueuedEdit,
+    handleRemoveQueuedMessage,
+    handleSteerQueuedMessage,
+    handleComposerPaste,
+    handleComposerDrop,
+    handlePastedClipboardImage,
+    handleComposerKeyDown,
+  } = useSessionComposer({
+    api,
+    snapshot,
+    setSnapshot,
+    selectedSession,
+    composerDraft,
+    setComposerDraft,
+    composerDraftRef,
+    composerRef,
+    requiresModelSelection: selectedSessionModelOnboarding.requiresModelSelection,
+    openTreeModal,
+    handleMentionKeyDown: mentionMenu.handleMentionKeyDown,
+    handleSlashKeyDown: slashMenu.handleSlashKeyDown,
+    newThreadComposerRef: newThread.composerRef,
+    appendNewThreadAttachment: newThread.appendAttachment,
+  });
+
   useEffect(() => {
     const sessionExtensionUiBySession = snapshot?.sessionExtensionUiBySession;
     if (!sessionExtensionUiBySession) {
@@ -616,146 +637,6 @@ export default function App() {
     setActiveView("extensions");
   };
 
-  const submitComposerDraft = (options: { readonly deliverAs?: "steer" | "followUp" } = {}) => {
-    if (!selectedSession) {
-      return;
-    }
-
-    const hasComposerInput = composerDraft.trim().length > 0 || composerAttachments.length > 0;
-    if (selectedSession.status === "running" && !hasComposerInput) {
-      void updateSnapshot(api, setSnapshot, () => api.cancelCurrentRun());
-      return;
-    }
-
-    if (!hasComposerInput) {
-      return;
-    }
-    if (selectedSessionModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    const treeCommand = parseTreeComposerCommand(composerDraft);
-    if (treeCommand?.type === "error") {
-      setSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              lastError: treeCommand.message,
-            }
-          : current,
-      );
-      return;
-    }
-    if (treeCommand?.type === "tree") {
-      openTreeModal();
-      return;
-    }
-
-    const previousDraft = composerDraft;
-    setComposerDraft("");
-    setAttachmentsClearedOnSubmit(true);
-    void (async () => {
-      const nextState = await updateSnapshot(api, setSnapshot, () =>
-        api.submitComposer(previousDraft, selectedSession.status === "running" ? { deliverAs: options.deliverAs ?? "followUp" } : undefined),
-      );
-      // Only apply the resolved draft if the user hasn't typed into the composer during the
-      // in-flight submit; otherwise their new input would be clobbered.
-      if (composerDraftRef.current === "") {
-        setComposerDraft(nextState.composerDraft);
-      }
-      setAttachmentsClearedOnSubmit(false);
-    })().catch(() => {
-      if (composerDraftRef.current === "") {
-        setComposerDraft(previousDraft);
-      }
-      setAttachmentsClearedOnSubmit(false);
-    });
-  };
-
-  const handlePickAttachments = () => {
-    void updateSnapshot(api, setSnapshot, () => api.pickComposerAttachments());
-  };
-
-  const handleRemoveAttachment = (attachmentId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.removeComposerAttachment(attachmentId));
-  };
-
-  const handleEditQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.editQueuedComposerMessage(messageId, composerDraft)).then(() => {
-      composerRef.current?.focus();
-    });
-  };
-
-  const handleCancelQueuedEdit = () => {
-    void updateSnapshot(api, setSnapshot, () => api.cancelQueuedComposerEdit()).then(() => {
-      composerRef.current?.focus();
-    });
-  };
-
-  const handleRemoveQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.removeQueuedComposerMessage(messageId));
-  };
-
-  const handleSteerQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.steerQueuedComposerMessage(messageId));
-  };
-
-  const handleImagePaste = (event: ClipboardEvent<HTMLDivElement>, onFiles: (files: File[]) => void) => {
-    const files = extractImageFilesFromClipboardData(event.clipboardData);
-    if (files.length === 0) {
-      return;
-    }
-    event.preventDefault();
-    onFiles(files);
-  };
-
-  const handleAttachmentDrop = (event: DragEvent<HTMLDivElement>, onFiles: (files: File[]) => void) => {
-    event.preventDefault();
-    const files = extractFilesFromDataTransfer(event.dataTransfer);
-    if (files.length === 0) {
-      return;
-    }
-    onFiles(files);
-  };
-
-  const handleComposerPaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    handleImagePaste(event, (files) => {
-      void addAttachmentsToSessionComposer(files);
-    });
-  };
-
-  const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
-    handleAttachmentDrop(event, (files) => {
-      void addAttachmentsToSessionComposer(files);
-    });
-  };
-
-  async function addAttachmentsToSessionComposer(files: File[]) {
-    if (!api) {
-      return;
-    }
-    const valid = await readComposerAttachmentsFromFiles(files);
-    if (valid.length === 0) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments(valid));
-  }
-
-  function handlePastedClipboardImage(clipboardImage: ComposerImageAttachment) {
-    const activeElement = document.activeElement;
-    if (activeElement === composerRef.current) {
-      if (!api) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments([clipboardImage]));
-      return;
-    }
-
-    if (activeElement === newThread.composerRef.current) {
-      newThread.appendAttachment(clipboardImage);
-    }
-  }
-
   const handleSetSessionModel = (provider: string, modelId: string) => {
     if (!selectedWorkspace || !selectedSession) {
       return;
@@ -833,42 +714,6 @@ export default function App() {
 
   const handleSetSessionPinned = (target: { workspaceId: string; sessionId: string }, pinned: boolean) => {
     void updateSnapshot(api, setSnapshot, () => api.setSessionPinned(target, pinned));
-  };
-
-  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (handleClipboardImageShortcut(event, api?.readClipboardImage, (clipboardImage) => {
-      void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments([clipboardImage]));
-    })) {
-      return;
-    }
-
-    if (mentionMenu.handleMentionKeyDown(event)) {
-      return;
-    }
-
-    if (slashMenu.handleSlashKeyDown(event)) {
-      return;
-    }
-
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && selectedSession?.status === "running") {
-      event.preventDefault();
-      submitComposerDraft({ deliverAs: (event.metaKey || event.ctrlKey) ? "steer" : "followUp" });
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-      return;
-    }
-
-    event.preventDefault();
-    if (!composerDraft.trim() && composerAttachments.length === 0) {
-      return;
-    }
-    if (selectedSessionModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    submitComposerDraft();
   };
 
   const shellClassName = `shell${snapshot.sidebarCollapsed ? " shell--sidebar-collapsed" : ""}`;
