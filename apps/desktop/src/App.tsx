@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type Dispatch, type DragEvent, type KeyboardEvent, type SetStateAction } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type SetStateAction } from "react";
 import type { SessionTreeSnapshot } from "@pi-gui/session-driver/types";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import {
@@ -12,9 +12,11 @@ import {
   type NewThreadEnvironment,
   type SelectedTranscriptRecord,
   type StartThreadInput,
-  type WorkspaceRecord,
-  type WorktreeRecord,
 } from "./desktop-state";
+import { applySnapshotIfNewer, updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
+import { buildFileWorkbenchContexts } from "./app/file-workbench-contexts";
+import { canTogglePrimarySidebar, isEventInsideTerminal } from "./app/app-shell-utils";
+import { useRunningLabel } from "./hooks/use-running-label";
 import { formatRelativeTime } from "./string-utils";
 import { ComposerPanel } from "./composer-panel";
 import { DiffPanel, type DiffPanelFileRequest, type FileWorkbenchContext } from "./diff-panel";
@@ -63,130 +65,6 @@ const TIMELINE_SCROLL_INTENT_WINDOW_MS = 750;
 interface TimelineOffBottomState {
   readonly scrollTop: number;
   readonly transcriptMarker: string;
-}
-
-function useDesktopAppState() {
-  const [snapshot, setSnapshot] = useState<DesktopAppState | null>(null);
-  const [selectedTranscript, setSelectedTranscript] = useState<SelectedTranscriptRecord | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    let receivedPushedTranscript = false;
-    const api = window.piApp;
-    if (!api) {
-      return undefined;
-    }
-
-    // The initial getState() can resolve after an early pushed state-changed event; never let a
-    // snapshot with a lower revision overwrite a newer one already applied to state.
-    const applyState = (incoming: DesktopAppState) => {
-      applySnapshotIfNewer(setSnapshot, incoming);
-    };
-
-    void Promise.all([api.getState(), api.getSelectedTranscript()]).then(([state, transcript]) => {
-      if (!active) {
-        return;
-      }
-      applyState(state);
-      // SelectedTranscriptRecord carries no revision marker, so the stale initial transcript is
-      // only applied when no pushed transcript has arrived yet.
-      if (!receivedPushedTranscript) {
-        setSelectedTranscript(transcript);
-      }
-    });
-
-    const unsubscribeState = api.onStateChanged((state) => {
-      if (active) {
-        applyState(state);
-      }
-    });
-    const unsubscribeTranscript = api.onSelectedTranscriptChanged((payload) => {
-      if (active) {
-        receivedPushedTranscript = true;
-        setSelectedTranscript(payload);
-      }
-    });
-
-    return () => {
-      active = false;
-      unsubscribeState();
-      unsubscribeTranscript();
-    };
-  }, []);
-
-  return [snapshot, setSnapshot, selectedTranscript] as const;
-}
-
-/**
- * Never let a state snapshot with a lower revision overwrite a newer one. IPC
- * responses race the pushed state-changed events: a response is built when the
- * handler returns, but concurrent session events can bump the state (and get
- * pushed) before the response crosses the IPC boundary. Applying the stale
- * response unguarded would silently roll the UI back — e.g. a /name rename
- * right after an aborted run lost its title this way.
- */
-function applySnapshotIfNewer(
-  setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-  incoming: DesktopAppState,
-): void {
-  setSnapshot((current) => (current && incoming.revision < current.revision ? current : incoming));
-}
-
-function updateSnapshot(
-  api: NonNullable<typeof window.piApp>,
-  setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-  action: () => Promise<DesktopAppState>,
-) {
-  return action().then((state) => {
-    applySnapshotIfNewer(setSnapshot, state);
-    return state;
-  });
-}
-
-function isEventInsideTerminal(event: globalThis.KeyboardEvent): boolean {
-  const target = event.target;
-  return target instanceof Element && Boolean(target.closest("[data-pi-terminal]"));
-}
-
-function canTogglePrimarySidebar(view: AppView | undefined): boolean {
-  return view === "threads" || view === "new-thread";
-}
-
-function useRunningLabel(startedAt: string | undefined) {
-  const [label, setLabel] = useState(() => formatRunningLabel(startedAt));
-
-  useEffect(() => {
-    setLabel(formatRunningLabel(startedAt));
-    if (!startedAt) {
-      return undefined;
-    }
-
-    const interval = window.setInterval(() => {
-      setLabel(formatRunningLabel(startedAt));
-    }, 1000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [startedAt]);
-
-  return label;
-}
-
-function formatRunningLabel(startedAt: string | undefined): string {
-  if (!startedAt) {
-    return "Working…";
-  }
-
-  const diffMs = Math.max(0, Date.now() - Date.parse(startedAt));
-  const seconds = Math.max(1, Math.floor(diffMs / 1000));
-  if (seconds < 60) {
-    return `Working for ${seconds}s`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
-  return remaining === 0 ? `Working for ${minutes}m` : `Working for ${minutes}m ${remaining}s`;
 }
 
 export default function App() {
@@ -2775,53 +2653,4 @@ function buildTranscriptChangeMarker(sessionKey: string, transcript: SelectedTra
 function isNearBottom(element: HTMLDivElement): boolean {
   const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
   return remaining < 32;
-}
-
-function buildFileWorkbenchContexts({
-  workspaces,
-  selectedWorkspace,
-  selectedSessionTitle,
-  rootWorkspace,
-  activeWorktrees,
-}: {
-  readonly workspaces: readonly WorkspaceRecord[];
-  readonly selectedWorkspace: WorkspaceRecord | undefined;
-  readonly selectedSessionTitle: string | undefined;
-  readonly rootWorkspace: WorkspaceRecord | undefined;
-  readonly activeWorktrees: readonly WorktreeRecord[];
-}): readonly FileWorkbenchContext[] {
-  if (!selectedWorkspace) {
-    return [];
-  }
-
-  const workspacesById = new Map(workspaces.map((workspace) => [workspace.id, workspace] as const));
-  const contexts: FileWorkbenchContext[] = [{
-    workspace: selectedWorkspace,
-    role: "thread",
-    sessionTitle: selectedSessionTitle,
-  }];
-  const seenWorkspaceIds = new Set([selectedWorkspace.id]);
-
-  const addWorkspace = (
-    workspace: WorkspaceRecord | undefined,
-    role: FileWorkbenchContext["role"],
-    worktree?: WorktreeRecord,
-  ) => {
-    if (!workspace || seenWorkspaceIds.has(workspace.id)) {
-      return;
-    }
-    contexts.push({ workspace, role, worktree });
-    seenWorkspaceIds.add(workspace.id);
-  };
-
-  addWorkspace(rootWorkspace, "workspace");
-  for (const worktree of activeWorktrees) {
-    addWorkspace(
-      worktree.linkedWorkspaceId ? workspacesById.get(worktree.linkedWorkspaceId) : undefined,
-      "worktree",
-      worktree,
-    );
-  }
-
-  return contexts;
 }
