@@ -25,8 +25,6 @@ interface FileTreeNode {
   readonly children: readonly FileTreeNode[];
 }
 
-export type { DiffPanelFileRequest, FileWorkbenchContext };
-
 interface DiffPanelProps {
   readonly panelMode: "changes" | "files";
   readonly workspaceId: string;

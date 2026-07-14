@@ -18,7 +18,8 @@ import { useRunningLabel } from "./hooks/use-running-label";
 import { useTimelineScroll, type SidePanelMode } from "./hooks/use-timeline-scroll";
 import { formatRelativeTime } from "./string-utils";
 import { ComposerPanel } from "./composer-panel";
-import { DiffPanel, type DiffPanelFileRequest } from "./diff-panel";
+import { DiffPanel } from "./diff-panel";
+import type { DiffPanelFileRequest } from "./diff-panel-types";
 import { buildModelOptions } from "./composer-commands";
 import { parseTreeComposerCommand } from "./composer-commands";
 import {
@@ -906,10 +907,10 @@ export default function App() {
   }
 
   const showTerminalTakeover = isTerminalVisibleForSelectedThread && isTerminalTakeoverForSelectedThread && Boolean(selectedWorkspace);
-  const isSecondarySurfaceView =
-    snapshot.activeView === "settings" ||
-    snapshot.activeView === "skills" ||
-    snapshot.activeView === "extensions";
+  const secondarySurfaceView =
+    snapshot.activeView === "settings" || snapshot.activeView === "skills" || snapshot.activeView === "extensions"
+      ? snapshot.activeView
+      : null;
   const mainClassName = [
     "main",
     sidePanelMode ? "main--with-side-panel" : "",
@@ -1394,12 +1395,12 @@ export default function App() {
         />
       ) : null}
 
-      {isSecondarySurfaceView ? (
+      {secondarySurfaceView ? (
         <SecondarySurfaces
           api={api}
           snapshot={snapshot}
           setSnapshot={setSnapshot}
-          activeView={snapshot.activeView as "settings" | "skills" | "extensions"}
+          activeView={secondarySurfaceView}
           rootWorkspaceOptions={rootWorkspaceOptions}
           settingsSection={settingsSection}
           onSelectSettingsSection={setSettingsSection}
