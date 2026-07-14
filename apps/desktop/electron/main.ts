@@ -1476,7 +1476,10 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  // macOS normally keeps the app alive after its final window closes. The
+  // Electron harness closes windows to end each isolated run, so let explicit
+  // test-mode launches quit instead of leaving their process behind forever.
+  if (process.platform !== "darwin" || process.env.PI_APP_TEST_MODE !== undefined) {
     stopNotifications?.();
     stopNotifications = undefined;
     notificationManager = undefined;

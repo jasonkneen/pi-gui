@@ -272,18 +272,24 @@ export function buildSlashCommandSections(
     (command) => (allowTreeCommand || command.kind !== "tree") && matchesCommand(command, normalizedQuery),
   );
 
-  const sections: ComposerSlashCommandSection[] = [
-    {
-      id: "runtime",
-      title: runtimeMatches.length > 0 ? "Runtime Commands" : undefined,
-      items: runtimeMatches,
-    },
-    {
-      id: "host",
-      title: hostMatches.length > 0 ? "Host Actions" : undefined,
-      items: hostMatches,
-  },
-];
+  // Prefer a host action when it is a prefix match and runtime skills only
+  // match fuzzily. Otherwise an installed skill such as `observe-state` can
+  // steal `/stat` from the built-in `/status` command on Tab.
+  const hostHasPrefixMatch = hostMatches.some((command) => command.command.startsWith(normalizedQuery));
+  const runtimeHasPrefixMatch = runtimeMatches.some((command) => command.command.startsWith(normalizedQuery));
+  const runtimeSection: ComposerSlashCommandSection = {
+    id: "runtime",
+    title: runtimeMatches.length > 0 ? "Runtime Commands" : undefined,
+    items: runtimeMatches,
+  };
+  const hostSection: ComposerSlashCommandSection = {
+    id: "host",
+    title: hostMatches.length > 0 ? "Host Actions" : undefined,
+    items: hostMatches,
+  };
+  const sections: ComposerSlashCommandSection[] = hostHasPrefixMatch && !runtimeHasPrefixMatch
+    ? [hostSection, runtimeSection]
+    : [runtimeSection, hostSection];
 
   return sections.filter((section) => section.items.length > 0);
 }
