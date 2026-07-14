@@ -170,8 +170,8 @@ svg {
 
 .loading-card {
   width: min(720px, 100%);
-  padding: 24px;
-  border-radius: 14px;
+  padding: var(--space-6);
+  border-radius: var(--radius-2xl);
   border: 1px solid var(--line);
   background: var(--surface);
 }
@@ -179,9 +179,9 @@ svg {
 .loading-card__eyebrow,
 .session-header__eyebrow {
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
 }
 
@@ -214,36 +214,36 @@ svg {
 }
 
 .empty-state {
-  padding: 16px;
-  border-radius: 12px;
+  padding: var(--space-4);
+  border-radius: var(--radius-xl);
   border: 1px dashed var(--line-strong);
   background: var(--surface-overlay-muted);
 }
 
 .empty-state h2 {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
   font-size: 17px;
-  letter-spacing: -0.03em;
+  letter-spacing: var(--tracking-tight);
 }
 
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-height: 36px;
   padding: 0 13px;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   border: 1px solid transparent;
   color: var(--text-strong);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--text-base);
+  font-weight: var(--font-semibold);
   transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease,
-    opacity 140ms ease;
+    background var(--motion-base) var(--ease-out),
+    border-color var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out),
+    opacity var(--motion-base) var(--ease-out);
 }
 
 .button--primary {
@@ -295,11 +295,11 @@ svg {
 .meta-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 500;
+  gap: var(--space-1-5);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1-5) var(--space-2-5);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
   color: var(--muted-strong);
   background: var(--surface-glass);
   border: 1px solid var(--line);
@@ -316,21 +316,26 @@ svg {
   white-space: nowrap;
 }
 
-/* Dark mode overrides for hardcoded light colors */
-:root.dark .empty-state {
-  background: var(--surface-overlay-muted);
+/* Tokenized focus ring for interactive elements. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
-:root.dark .button--ghost {
-  background: var(--surface-overlay);
-}
-
-:root.dark .button:hover:not(:disabled) {
-  background: var(--surface-overlay-hover);
-  border-color: var(--surface-overlay-border);
-}
-
-:root.dark .meta-chip {
-  background: var(--surface-glass);
-  border-color: var(--line);
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
