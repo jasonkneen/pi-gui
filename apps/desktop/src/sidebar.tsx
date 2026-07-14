@@ -1,4 +1,4 @@
-import { forwardRef, useState, type CSSProperties } from "react";
+import { forwardRef, useEffect, useState, type CSSProperties } from "react";
 import {
   DndContext,
   DragOverlay,
@@ -50,6 +50,9 @@ interface SidebarProps {
   readonly onUnarchiveSession: (target: { workspaceId: string; sessionId: string }) => void;
 }
 
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
+const RENAME_THREAD_SHORTCUT_HINT = IS_MAC ? "⇧⌘R" : "Ctrl+Shift+R";
+
 export function Sidebar(props: SidebarProps) {
   const {
     activeView,
@@ -76,6 +79,24 @@ export function Sidebar(props: SidebarProps) {
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const threadMenu = useThreadMenu({ api, setSnapshot, updateSnapshot });
+
+  // Cmd+Shift+R renames the currently selected thread (same flow as the
+  // "Rename thread" context-menu item).
+  useEffect(() => {
+    const handleRenameShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey) return;
+      if ((event.key.toLowerCase() !== "r" && event.code !== "KeyR")) return;
+      if (activeView !== "threads" || !selectedWorkspace || !selectedSession) return;
+      const entry = threadGroups
+        .flatMap((group) => [...group.pinnedThreads, ...group.threads, ...group.archivedThreads])
+        .find((t) => t.workspaceId === selectedWorkspace.id && t.session.id === selectedSession.id);
+      if (!entry) return;
+      event.preventDefault();
+      threadMenu.startRename(entry);
+    };
+    window.addEventListener("keydown", handleRenameShortcut);
+    return () => window.removeEventListener("keydown", handleRenameShortcut);
+  }, [activeView, selectedWorkspace, selectedSession, threadGroups, threadMenu]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const pinnedSortableId = (thread: ThreadListEntry) => `pinned:${sessionThreadKey(thread)}`;
   const pinnedSessionKeyFromSortableId = (id: string) => id.startsWith("pinned:") ? id.slice("pinned:".length) : id;
@@ -897,7 +918,8 @@ const ThreadSessionRow = forwardRef<HTMLDivElement, ThreadSessionRowProps>(funct
                   type="button"
                   onClick={(event) => threadMenu.runMenuAction(event, () => threadMenu.startRename(thread))}
                 >
-                  Rename thread
+                  <span>Rename thread</span>
+                  <span className="workspace-menu__shortcut" aria-hidden="true">{RENAME_THREAD_SHORTCUT_HINT}</span>
                 </button>
                 <button
                   className="workspace-menu__item"

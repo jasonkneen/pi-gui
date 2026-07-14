@@ -143,3 +143,43 @@ test("thread menu supports rename, archive/restore, mark read, copy id, and righ
     await harness.close();
   }
 });
+
+test("rename shortcut hint shows in menu and Cmd+Shift+R renames current thread", async () => {
+  test.setTimeout(90_000);
+  const userDataDir = await makeUserDataDir();
+  const workspacePath = await makeWorkspace("rename-shortcut-workspace");
+  const targetTitle = "Rename shortcut target thread";
+  const renamedTitle = "Renamed via keyboard shortcut";
+  const isMac = process.platform === "darwin";
+  const expectedHint = isMac ? "⇧⌘R" : "Ctrl+Shift+R";
+
+  const harness = await launchDesktop(userDataDir, {
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+  try {
+    const window = await harness.firstWindow();
+    // The newly created thread is the current/selected thread.
+    await createNamedThread(window, targetTitle);
+
+    const row = window.locator(".session-row", { hasText: targetTitle }).first();
+    await row.hover();
+    await row.locator(".session-row__menu-button").click();
+    const renameItem = row.getByRole("menu").getByRole("button", { name: "Rename thread" });
+    await expect(renameItem.locator(".workspace-menu__shortcut")).toHaveText(expectedHint);
+    await captureProof(window, "07-rename-hint.png");
+    await window.keyboard.press("Escape");
+
+    // Fire the shortcut against the current thread; the inline rename opens.
+    await window.keyboard.press(`${isMac ? "Meta" : "Control"}+Shift+R`);
+    const renameInput = window.getByLabel(`Rename thread ${targetTitle}`);
+    await expect(renameInput).toBeVisible();
+    await captureProof(window, "08-shortcut-opened-rename.png");
+
+    await renameInput.fill(renamedTitle);
+    await window.getByRole("button", { name: "Save" }).click();
+    await expect(window.locator(".session-row", { hasText: renamedTitle }).first()).toBeVisible();
+  } finally {
+    await harness.close();
+  }
+});
