@@ -1186,11 +1186,17 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.selectSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.selectSession(target)),
   );
+  ipcMain.handle(desktopIpc.renameSession, (event, target: WorkspaceSessionTarget, title: string) =>
+    runWindowScopedForEvent(event, () => store.renameSession(target, title)),
+  );
   ipcMain.handle(desktopIpc.archiveSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.archiveSession(target)),
   );
   ipcMain.handle(desktopIpc.unarchiveSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.unarchiveSession(target)),
+  );
+  ipcMain.handle(desktopIpc.markSessionRead, (event, target: WorkspaceSessionTarget) =>
+    runWindowScopedForEvent(event, () => store.markSessionRead(target)),
   );
   ipcMain.handle(desktopIpc.setSessionPinned, (event, target: WorkspaceSessionTarget, pinned: boolean) =>
     runWindowScopedForEvent(event, () => store.setSessionPinned(target, pinned)),

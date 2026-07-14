@@ -74,8 +74,10 @@ export const desktopIpc = {
   openExtensionInFinder: "pi-gui:open-extension-in-finder",
   syncCurrentWorkspace: "pi-gui:sync-current-workspace",
   selectSession: "pi-gui:select-session",
+  renameSession: "pi-gui:rename-session",
   archiveSession: "pi-gui:archive-session",
   unarchiveSession: "pi-gui:unarchive-session",
+  markSessionRead: "pi-gui:mark-session-read",
   setSessionPinned: "pi-gui:set-session-pinned",
   createSession: "pi-gui:create-session",
   startThread: "pi-gui:start-thread",
@@ -284,8 +286,10 @@ export interface PiDesktopApi {
   openExtensionInFinder(workspaceId: string, filePath: string): Promise<void>;
   syncCurrentWorkspace(): Promise<DesktopAppState>;
   selectSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
+  renameSession(target: WorkspaceSessionTarget, title: string): Promise<DesktopAppState>;
   archiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   unarchiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
+  markSessionRead(target: WorkspaceSessionTarget): Promise<DesktopAppState>;
   setSessionPinned(target: WorkspaceSessionTarget, pinned: boolean): Promise<DesktopAppState>;
   createSession(input: CreateSessionInput): Promise<DesktopAppState>;
   startThread(input: StartThreadInput): Promise<DesktopAppState>;

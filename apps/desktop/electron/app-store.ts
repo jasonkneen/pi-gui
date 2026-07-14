@@ -458,6 +458,10 @@ export class DesktopAppStore implements AppStoreInternals {
     });
   }
 
+  async renameSession(target: WorkspaceSessionTarget, title: string): Promise<DesktopAppState> {
+    return workspace.renameSession(this, target, title);
+  }
+
   async archiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
     return workspace.archiveSession(this, target);
   }
