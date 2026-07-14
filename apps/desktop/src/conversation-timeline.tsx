@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState, type MutableRe
 import type { TranscriptMessage } from "./desktop-state";
 import { ThreadSearchBar } from "./thread-search";
 import { TimelineItem } from "./timeline-item";
+import { SparkIcon } from "./icons";
 
 const OVERSCAN_PX = 720;
 const ROW_GAP_PX = 14;
@@ -186,11 +187,11 @@ export function ConversationTimeline({
       ) : null}
       {isTranscriptLoading ? (
         <div className="timeline" data-testid="transcript">
-          <div className="timeline-empty">Loading transcript…</div>
+          <TranscriptSkeleton />
         </div>
       ) : transcript.length === 0 ? (
         <div className="timeline" data-testid="transcript">
-          <div className="timeline-empty">Send a prompt to start the session.</div>
+          <TranscriptEmptyState />
         </div>
       ) : shouldVirtualize ? (
         <VirtualizedTranscriptList
@@ -227,6 +228,41 @@ export function ConversationTimeline({
           New activity below
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function TranscriptSkeleton() {
+  return (
+    <div className="transcript-skeleton" data-testid="transcript-skeleton" aria-hidden="true">
+      <div className="transcript-skeleton__row transcript-skeleton__row--user">
+        <span className="skeleton-line" style={{ width: "42%" }} />
+      </div>
+      <div className="transcript-skeleton__row">
+        <span className="skeleton-line" style={{ width: "88%" }} />
+        <span className="skeleton-line" style={{ width: "94%" }} />
+        <span className="skeleton-line" style={{ width: "66%" }} />
+      </div>
+      <div className="transcript-skeleton__row transcript-skeleton__row--tool">
+        <span className="skeleton-line skeleton-line--tool" style={{ width: "38%" }} />
+      </div>
+      <div className="transcript-skeleton__row">
+        <span className="skeleton-line" style={{ width: "80%" }} />
+        <span className="skeleton-line" style={{ width: "72%" }} />
+      </div>
+      <span className="sr-only">Loading transcript…</span>
+    </div>
+  );
+}
+
+function TranscriptEmptyState() {
+  return (
+    <div className="transcript-empty" data-testid="transcript-empty">
+      <span className="transcript-empty__glyph" aria-hidden="true">
+        <SparkIcon />
+      </span>
+      <p className="transcript-empty__title">Start the conversation</p>
+      <p className="transcript-empty__hint">Send a prompt below to begin this session.</p>
     </div>
   );
 }
