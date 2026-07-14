@@ -1,4 +1,4 @@
-import type { FileWorkbenchContext } from "../diff-panel";
+import type { FileWorkbenchContext } from "../diff-panel-types";
 import type { WorkspaceRecord, WorktreeRecord } from "../desktop-state";
 
 export function buildFileWorkbenchContexts({
