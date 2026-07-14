@@ -76,7 +76,6 @@ export function ExtensionsView({
       <div className="conversation skills-view">
         <header className="view-header">
           <div>
-            <div className="chat-header__eyebrow">Extensions</div>
             <h1 className="view-header__title">Extensions</h1>
             <p className="view-header__body">
               Inspect and manage first-class runtime extensions for this workspace.
