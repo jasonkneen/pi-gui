@@ -726,10 +726,12 @@
 
 .diff-line--added {
   background: var(--diff-added-bg);
+  color: var(--diff-added-ink);
 }
 
 .diff-line--removed {
   background: var(--diff-removed-bg);
+  color: var(--diff-removed-ink);
 }
 
 .diff-line--header {
