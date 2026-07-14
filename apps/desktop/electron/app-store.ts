@@ -470,6 +470,24 @@ export class DesktopAppStore implements AppStoreInternals {
     return workspace.unarchiveSession(this, target);
   }
 
+  async markSessionRead(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
+    await this.initialize();
+    const sessionRef = toSessionRef(target);
+    if (!this.sessionFromState(sessionRef)) {
+      return this.withError(`Unknown session: ${target.workspaceId}:${target.sessionId}`);
+    }
+    if (!this.markSessionViewed(sessionRef)) {
+      return structuredClone(this.state);
+    }
+    this.state = {
+      ...this.state,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
+  }
+
   async setSessionPinned(target: WorkspaceSessionTarget, pinned: boolean): Promise<DesktopAppState> {
     await this.initialize();
     const sessionRef = toSessionRef(target);
