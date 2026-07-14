@@ -14,10 +14,8 @@ interface TimelineOffBottomState {
 interface UseTimelineScrollOptions {
   readonly selectedSessionKey: string;
   readonly activeTranscript: SelectedTranscriptRecord["transcript"];
-  readonly isTranscriptLoading: boolean;
   readonly selectedSession: unknown;
   readonly selectedTranscriptForSession: unknown;
-  readonly hasSelectedSession: boolean;
   readonly activeView: AppView | undefined;
   readonly sidePanelMode: SidePanelMode | null;
   readonly composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -28,16 +26,16 @@ interface UseTimelineScrollOptions {
 export function useTimelineScroll({
   selectedSessionKey,
   activeTranscript,
-  isTranscriptLoading,
   selectedSession,
   selectedTranscriptForSession,
-  hasSelectedSession,
   activeView,
   sidePanelMode,
   composerRef,
   composerDraft,
   timelinePaneRef,
 }: UseTimelineScrollOptions) {
+  const hasSelectedSession = Boolean(selectedSession);
+  const isTranscriptLoading = Boolean(selectedSession) && !selectedTranscriptForSession;
   const lastTranscriptMarkerRef = useRef("");
   const pinnedToBottomRef = useRef(true);
   const previousTimelinePaneSizeRef = useRef<{ width: number; height: number } | null>(null);

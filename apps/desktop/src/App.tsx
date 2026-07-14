@@ -285,10 +285,8 @@ export default function App() {
   } = useTimelineScroll({
     selectedSessionKey,
     activeTranscript,
-    isTranscriptLoading,
     selectedSession,
     selectedTranscriptForSession,
-    hasSelectedSession: Boolean(selectedSession),
     activeView: snapshot?.activeView,
     sidePanelMode,
     composerRef,
