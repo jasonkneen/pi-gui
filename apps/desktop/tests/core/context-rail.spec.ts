@@ -66,6 +66,11 @@ test("context rail lists prompts and scrolls to a turn; timing markers render", 
     const items = window.getByTestId("timeline-context-rail-item");
     await expect(items).toHaveCount(TURN_COUNT);
 
+    // The rail sits in the outer margin: the transcript keeps its full 768px
+    // measure even while the rail is present beside it.
+    const measure = await window.getByTestId("transcript").evaluate((el) => (el as HTMLElement).clientWidth);
+    expect(measure).toBe(768);
+
     const pane = window.getByTestId("timeline-pane");
     // Start pinned at the bottom, then jump to the first prompt via the rail.
     await pane.evaluate((el) => {

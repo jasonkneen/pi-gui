@@ -55,7 +55,12 @@
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-  gap: 20px;
+  gap: 12px;
+  /* Track the reading area's own width so the rail can drop out before it would
+   * squeeze the transcript below its 768px measure, independent of viewport or
+   * sidebar width. */
+  container-type: inline-size;
+  container-name: timeline-surface;
 }
 
 .timeline-pane--thread {
@@ -67,7 +72,7 @@
 
 .timeline-context-rail {
   flex: 0 0 auto;
-  width: 176px;
+  width: 132px;
   align-self: stretch;
   min-height: 0;
   overflow-y: auto;
@@ -133,8 +138,11 @@
   white-space: nowrap;
 }
 
-/* The rail only earns its space once the conversation column has room for it. */
-@media (max-width: 1100px) {
+/* The rail lives in the outer margin beside the reading column. It only earns
+ * its space once the surface is wide enough to hold the full 768px measure plus
+ * the rail (768 + 12 gap + 132 rail = 912); below that we drop it so the
+ * transcript keeps its measure instead of getting squeezed. */
+@container timeline-surface (max-width: 911px) {
   .timeline-context-rail {
     display: none;
   }
