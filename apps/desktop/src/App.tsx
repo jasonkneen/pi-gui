@@ -1,15 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import type { SessionTreeSnapshot } from "@pi-gui/session-driver/types";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import {
   getSelectedSession,
   getSelectedWorkspace,
   type AppView,
-  type ComposerAttachment,
   type ComposerImageAttachment,
   type ForkThreadInput,
   type NewThreadEnvironment,
-  type StartThreadInput,
 } from "./desktop-state";
 import { applySnapshotIfNewer, updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
 import { buildFileWorkbenchContexts } from "./app/file-workbench-contexts";
@@ -42,6 +40,7 @@ import { useSlashMenu } from "./hooks/use-slash-menu";
 import { useMentionMenu } from "./hooks/use-mention-menu";
 import { useThreadSearch } from "./hooks/use-thread-search";
 import { useWorkspaceMenu } from "./hooks/use-workspace-menu";
+import { useNewThreadController } from "./hooks/use-new-thread-controller";
 import { buildExtensionDockModel, ExtensionDialog, hasExtensionDockContent } from "./extension-session-ui";
 import { TreeModal } from "./tree-modal";
 import { ForkModal } from "./fork-modal";
@@ -52,6 +51,7 @@ import { deriveWorkspaceContext } from "./workspace-context";
 import {
   extractImageFilesFromClipboardData,
   extractFilesFromDataTransfer,
+  handleClipboardImageShortcut,
   readComposerAttachmentsFromFiles,
 } from "./composer-attachments";
 
@@ -62,15 +62,6 @@ export default function App() {
   const [settingsWorkspaceId, setSettingsWorkspaceId] = useState("");
   const [skillsWorkspaceId, setSkillsWorkspaceId] = useState("");
   const [extensionsWorkspaceId, setExtensionsWorkspaceId] = useState("");
-  const [pendingNewThreadWorkspaceId, setPendingNewThreadWorkspaceId] = useState("");
-  const [newThreadRootWorkspaceId, setNewThreadRootWorkspaceId] = useState("");
-  const [newThreadEnvironment, setNewThreadEnvironment] = useState<NewThreadEnvironment>("local");
-  const [newThreadPrompt, setNewThreadPrompt] = useState("");
-  const [newThreadAttachments, setNewThreadAttachments] = useState<readonly ComposerAttachment[]>([]);
-  const [newThreadProvider, setNewThreadProvider] = useState<string | undefined>();
-  const [newThreadModelId, setNewThreadModelId] = useState<string | undefined>();
-  const [newThreadThinkingLevel, setNewThreadThinkingLevel] = useState<string | undefined>();
-  const [newThreadComposerError, setNewThreadComposerError] = useState<string | undefined>();
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
   const [dockExpandedBySession, setDockExpandedBySession] = useState<Record<string, boolean>>({});
   const [treeModalState, setTreeModalState] = useState<{
@@ -96,7 +87,6 @@ export default function App() {
     sourceMessageIndex: -1,
   });
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const newThreadComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const timelinePaneRef = useRef<HTMLDivElement | null>(null);
   const previousActiveViewRef = useRef<AppView | null>(null);
   const hydratedComposerSessionKeyRef = useRef("");
@@ -169,12 +159,6 @@ export default function App() {
   const selectedRuntime = selectedWorkspace ? snapshot?.runtimeByWorkspace[selectedWorkspace.id] : undefined;
   const selectedModelRuntime = snapshot ? getEffectiveModelRuntime(snapshot, selectedWorkspace) : undefined;
   const selectedWorktree = selectedWorkspace ? linkedWorktreeByWorkspaceId.get(selectedWorkspace.id) : undefined;
-  const newThreadWorkspace =
-    rootWorkspaceOptions.find((entry) => entry.id === newThreadRootWorkspaceId) ?? rootWorkspaceOptions[0];
-  const newThreadRuntime = snapshot ? getEffectiveModelRuntime(snapshot, newThreadWorkspace) : undefined;
-  const newThreadDefaultEnabled = buildModelOptions(newThreadRuntime).some(
-    (m) => m.providerId === newThreadRuntime?.settings.defaultProvider && m.modelId === newThreadRuntime?.settings.defaultModelId,
-  );
   const selectedDefaultEnabled = buildModelOptions(selectedModelRuntime).some(
     (m) => m.providerId === selectedModelRuntime?.settings.defaultProvider && m.modelId === selectedModelRuntime?.settings.defaultModelId,
   );
@@ -186,16 +170,9 @@ export default function App() {
     (selectedDefaultEnabled ? selectedModelRuntime?.settings.defaultModelId : undefined);
   const resolvedSessionThinkingLevel =
     selectedSession?.config?.thinkingLevel ?? selectedModelRuntime?.settings.defaultThinkingLevel;
-  const resolvedNewThreadProvider = newThreadProvider ?? (newThreadDefaultEnabled ? newThreadRuntime?.settings.defaultProvider : undefined);
-  const resolvedNewThreadModelId = newThreadModelId ?? (newThreadDefaultEnabled ? newThreadRuntime?.settings.defaultModelId : undefined);
-  const resolvedNewThreadThinkingLevel = newThreadThinkingLevel ?? newThreadRuntime?.settings.defaultThinkingLevel;
   const selectedSessionModelOnboarding = deriveModelOnboardingState(selectedModelRuntime, {
     provider: resolvedSessionProvider,
     modelId: resolvedSessionModelId,
-  });
-  const newThreadModelOnboarding = deriveModelOnboardingState(newThreadRuntime, {
-    provider: resolvedNewThreadProvider,
-    modelId: resolvedNewThreadModelId,
   });
   const [attachmentsClearedOnSubmit, setAttachmentsClearedOnSubmit] = useState(false);
   const composerAttachments = attachmentsClearedOnSubmit ? [] : (snapshot?.composerAttachments ?? []);
@@ -301,15 +278,6 @@ export default function App() {
     }
     setOpenTerminalSessionKey(selectedSessionKey);
   }, [openTerminalSessionKey, selectedSessionKey]);
-  const focusNewThreadComposer = () => {
-    window.requestAnimationFrame(() => {
-      newThreadComposerRef.current?.focus();
-    });
-  };
-  const updateNewThreadPrompt = useCallback((value: SetStateAction<string>) => {
-    setNewThreadComposerError(undefined);
-    setNewThreadPrompt(value);
-  }, []);
   const handleViewFileInDiff = useCallback((path: string) => {
     setSidePanelMode("changes");
     setDiffFileRequest({ path, nonce: Date.now() });
@@ -559,69 +527,22 @@ export default function App() {
     onEnableExtension: enableSelectedMentionExtension,
   });
 
-  const newThreadSlashMenu = useSlashMenu({
-    composerDraft: newThreadPrompt,
-    setComposerDraft: updateNewThreadPrompt,
-    selectedRuntime: newThreadRuntime,
-    selectedModelRuntime: newThreadRuntime,
-    sessionCommands: [],
-    commandCompatibility: [],
-    selectedSessionKey: `new-thread:${newThreadWorkspace?.id ?? ""}`,
-    selectedSession: undefined,
-    selectedWorkspace: newThreadWorkspace,
-    isRunning: false,
-    api,
-    setSnapshot,
-    focusComposer: focusNewThreadComposer,
-    openSettings,
-    updateSnapshot,
-    allowTreeCommand: false,
-    immediateCommandMode: "prefill",
-    onSelectModelOption: (provider, modelId) => {
-      setNewThreadProvider(provider);
-      setNewThreadModelId(modelId);
-    },
-    onSelectThinkingOption: setNewThreadThinkingLevel,
-    onSelectLoginProvider: (providerId) => {
-      if (!api || !newThreadWorkspace) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.loginProvider(newThreadWorkspace.id, providerId));
-    },
-    onSelectLogoutProvider: (providerId) => {
-      if (!api || !newThreadWorkspace) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.logoutProvider(newThreadWorkspace.id, providerId));
-    },
-  });
-
-  const enableNewThreadMentionExtension = useCallback(
-    (filePath: string) => {
-      if (!api || !newThreadWorkspace) {
-        return Promise.resolve();
-      }
-      return updateSnapshot(api, setSnapshot, () => api.setExtensionEnabled(newThreadWorkspace.id, filePath, true)).then(
-        () => undefined,
-      );
-    },
-    [api, newThreadWorkspace],
-  );
-
-  const newThreadMentionMenu = useMentionMenu({
-    composerDraft: newThreadPrompt,
-    setComposerDraft: setNewThreadPrompt,
-    composerRef: newThreadComposerRef,
-    workspaceId: newThreadWorkspace?.id,
-    runtime: newThreadRuntime,
-    api,
-    onEnableExtension: enableNewThreadMentionExtension,
-  });
-
   const wsMenu = useWorkspaceMenu({
     api,
     setSnapshot,
     updateSnapshot,
+  });
+
+  const newThread = useNewThreadController({
+    api,
+    snapshot,
+    setSnapshot,
+    rootWorkspace,
+    rootWorkspaceOptions,
+    visibleWorkspaces,
+    selectedWorkspace,
+    expandWorkspace: wsMenu.expandWorkspace,
+    openSettings,
   });
 
   useEffect(() => {
@@ -683,10 +604,6 @@ export default function App() {
       setSettingsWorkspaceId("");
       setSkillsWorkspaceId("");
       setExtensionsWorkspaceId("");
-      setPendingNewThreadWorkspaceId("");
-      setNewThreadRootWorkspaceId("");
-      setNewThreadEnvironment("local");
-      setNewThreadAttachments([]);
       return;
     }
     setSettingsWorkspaceId((current) =>
@@ -698,43 +615,7 @@ export default function App() {
     setExtensionsWorkspaceId((current) =>
       rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
     );
-    setNewThreadRootWorkspaceId((current) =>
-      rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
-    );
   }, [rootWorkspaceOptions]);
-
-  useEffect(() => {
-    if (!snapshot || !pendingNewThreadWorkspaceId) {
-      return;
-    }
-    const nextRootWorkspaceId = resolveRepoWorkspaceId(snapshot.workspaces, pendingNewThreadWorkspaceId);
-    if (!nextRootWorkspaceId || !rootWorkspaceOptions.some((workspace) => workspace.id === nextRootWorkspaceId)) {
-      return;
-    }
-    setNewThreadRootWorkspaceId(nextRootWorkspaceId);
-    setPendingNewThreadWorkspaceId("");
-  }, [pendingNewThreadWorkspaceId, rootWorkspaceOptions, snapshot]);
-
-  const resetNewThreadSurface = (workspaceId?: string) => {
-    const nextWorkspaceId =
-      (workspaceId && (
-        rootWorkspaceOptions.find((workspace) => workspace.id === workspaceId)?.id ||
-        (snapshot ? resolveRepoWorkspaceId(snapshot.workspaces, workspaceId) : undefined)
-      )) ||
-      rootWorkspace?.id ||
-      visibleWorkspaces[0]?.id ||
-      "";
-    if (nextWorkspaceId) {
-      setNewThreadRootWorkspaceId(nextWorkspaceId);
-    }
-    setNewThreadEnvironment("local");
-    setNewThreadPrompt("");
-    setNewThreadAttachments([]);
-    setNewThreadProvider(undefined);
-    setNewThreadModelId(undefined);
-    setNewThreadThinkingLevel(undefined);
-    setNewThreadComposerError(undefined);
-  };
 
   const primarySidebarToggleVisible = canTogglePrimarySidebar(snapshot?.activeView);
   const handleTogglePrimarySidebar = useCallback(() => {
@@ -754,7 +635,7 @@ export default function App() {
         openSettings(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
         return true;
       } else if (command === desktopCommands.openNewThread) {
-        openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
+        newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
         return true;
       } else if (command === desktopCommands.toggleTerminal) {
         toggleTerminal();
@@ -767,8 +648,8 @@ export default function App() {
 
     const removeCommandListener = window.piApp?.onCommand?.(handleCommand);
     const removeWorkspacePickedListener = window.piApp?.onWorkspacePicked?.((workspaceId) => {
-      setPendingNewThreadWorkspaceId(workspaceId);
-      resetNewThreadSurface();
+      newThread.setPendingWorkspaceId(workspaceId);
+      newThread.resetSurface();
     });
     const removeClipboardImageListener = window.piApp?.onClipboardImagePasted?.(handlePastedClipboardImage);
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -826,6 +707,7 @@ export default function App() {
     toggleChangesPanel,
     toggleTerminal,
     handleTogglePrimarySidebar,
+    newThread,
   ]);
 
   useEffect(() => {
@@ -843,13 +725,6 @@ export default function App() {
   useEffect(() => {
     if (!snapshot) {
       return;
-    }
-
-    if (snapshot.activeView === "new-thread" && previousActiveViewRef.current !== "new-thread") {
-      const nextRootWorkspaceId = resolveRepoWorkspaceId(snapshot.workspaces, selectedWorkspace?.id);
-      if (nextRootWorkspaceId) {
-        setNewThreadRootWorkspaceId(nextRootWorkspaceId);
-      }
     }
 
     if (
@@ -965,22 +840,6 @@ export default function App() {
     setActiveView("extensions");
   };
 
-  const openNewThreadSurface = (workspaceId?: string) => {
-    setPendingNewThreadWorkspaceId("");
-    resetNewThreadSurface(workspaceId);
-    setActiveView("new-thread");
-  };
-
-  const handleSelectNewThreadWorkspace = (workspaceId: string) => {
-    setPendingNewThreadWorkspaceId("");
-    setNewThreadRootWorkspaceId(workspaceId);
-    setNewThreadAttachments([]);
-    setNewThreadProvider(undefined);
-    setNewThreadModelId(undefined);
-    setNewThreadThinkingLevel(undefined);
-    setNewThreadComposerError(undefined);
-  };
-
   const submitComposerDraft = (options: { readonly deliverAs?: "steer" | "followUp" } = {}) => {
     if (!selectedSession) {
       return;
@@ -1065,19 +924,6 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.steerQueuedComposerMessage(messageId));
   };
 
-  const handleNewThreadAddAttachments = (files: File[]) => {
-    void readComposerAttachmentsFromFiles(files).then((attachments) => {
-      if (attachments.length === 0) {
-        return;
-      }
-      setNewThreadAttachments((current) => [...current, ...attachments]);
-    });
-  };
-
-  const handleNewThreadRemoveAttachment = (attachmentId: string) => {
-    setNewThreadAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
-  };
-
   const handleImagePaste = (event: ClipboardEvent<HTMLDivElement>, onFiles: (files: File[]) => void) => {
     const files = extractImageFilesFromClipboardData(event.clipboardData);
     if (files.length === 0) {
@@ -1102,18 +948,10 @@ export default function App() {
     });
   };
 
-  const handleNewThreadComposerPaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    handleImagePaste(event, handleNewThreadAddAttachments);
-  };
-
   const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
     handleAttachmentDrop(event, (files) => {
       void addAttachmentsToSessionComposer(files);
     });
-  };
-
-  const handleNewThreadComposerDrop = (event: DragEvent<HTMLDivElement>) => {
-    handleAttachmentDrop(event, handleNewThreadAddAttachments);
   };
 
   async function addAttachmentsToSessionComposer(files: File[]) {
@@ -1127,24 +965,6 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments(valid));
   }
 
-  const handleClipboardImageShortcut = (
-    event: KeyboardEvent<HTMLTextAreaElement>,
-    onImage: (attachment: ComposerImageAttachment) => void,
-  ): boolean => {
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "v") {
-      return false;
-    }
-
-    const clipboardImage = api?.readClipboardImage();
-    if (!clipboardImage) {
-      return false;
-    }
-
-    event.preventDefault();
-    onImage(clipboardImage);
-    return true;
-  };
-
   function handlePastedClipboardImage(clipboardImage: ComposerImageAttachment) {
     const activeElement = document.activeElement;
     if (activeElement === composerRef.current) {
@@ -1155,8 +975,8 @@ export default function App() {
       return;
     }
 
-    if (activeElement === newThreadComposerRef.current) {
-      setNewThreadAttachments((current) => [...current, clipboardImage]);
+    if (activeElement === newThread.composerRef.current) {
+      newThread.appendAttachment(clipboardImage);
     }
   }
 
@@ -1252,49 +1072,8 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.setSessionPinned(target, pinned));
   };
 
-  const handleStartThread = () => {
-    if (!newThreadRootWorkspaceId || (!newThreadPrompt.trim() && newThreadAttachments.length === 0)) {
-      return;
-    }
-    if (newThreadModelOnboarding.requiresModelSelection) {
-      return;
-    }
-    const treeCommand = parseTreeComposerCommand(newThreadPrompt);
-    if (treeCommand?.type === "error") {
-      setNewThreadComposerError(treeCommand.message);
-      return;
-    }
-    if (treeCommand?.type === "tree") {
-      setNewThreadComposerError("/tree is only available inside an existing session.");
-      return;
-    }
-    const modelConfig = {
-      prompt: newThreadPrompt,
-      attachments: newThreadAttachments,
-      provider: resolvedNewThreadProvider,
-      modelId: resolvedNewThreadModelId,
-      thinkingLevel: resolvedNewThreadThinkingLevel,
-    };
-    const input: StartThreadInput = {
-      rootWorkspaceId: newThreadRootWorkspaceId,
-      environment: newThreadEnvironment,
-      ...modelConfig,
-    };
-    wsMenu.expandWorkspace(newThreadRootWorkspaceId);
-    void updateSnapshot(api, setSnapshot, () =>
-      api.startThread(input),
-    ).then(() => {
-      setNewThreadPrompt("");
-      setNewThreadAttachments([]);
-      setNewThreadProvider(undefined);
-      setNewThreadModelId(undefined);
-      setNewThreadThinkingLevel(undefined);
-      setNewThreadEnvironment("local");
-    });
-  };
-
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (handleClipboardImageShortcut(event, (clipboardImage) => {
+    if (handleClipboardImageShortcut(event, api?.readClipboardImage, (clipboardImage) => {
       void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments([clipboardImage]));
     })) {
       return;
@@ -1329,36 +1108,6 @@ export default function App() {
     submitComposerDraft();
   };
 
-  const handleNewThreadComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (handleClipboardImageShortcut(event, (clipboardImage) => {
-      setNewThreadAttachments((current) => [...current, clipboardImage]);
-    })) {
-      return;
-    }
-
-    if (newThreadMentionMenu.handleMentionKeyDown(event)) {
-      return;
-    }
-
-    if (newThreadSlashMenu.handleSlashKeyDown(event)) {
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-      return;
-    }
-
-    event.preventDefault();
-    if (!newThreadPrompt.trim() && newThreadAttachments.length === 0) {
-      return;
-    }
-    if (newThreadModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    handleStartThread();
-  };
-
   const shellClassName = `shell${snapshot.sidebarCollapsed ? " shell--sidebar-collapsed" : ""}`;
 
   return (
@@ -1383,7 +1132,7 @@ export default function App() {
           api={api}
           setSnapshot={setSnapshot}
           updateSnapshot={updateSnapshot}
-          onNewThread={() => openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
+          onNewThread={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
           onSetActiveView={setActiveView}
           onOpenSkills={openSkills}
           onOpenExtensions={openExtensions}
@@ -1444,50 +1193,50 @@ export default function App() {
           rootWorkspaceOptions.length > 0 ? (
             <NewThreadView
               workspaces={rootWorkspaceOptions}
-              selectedWorkspaceId={newThreadRootWorkspaceId || rootWorkspaceOptions[0]?.id || ""}
-              runtime={newThreadRuntime}
-              environment={newThreadEnvironment}
-              prompt={newThreadPrompt}
-              attachments={newThreadAttachments}
-              lastError={newThreadComposerError}
-              provider={resolvedNewThreadProvider}
-              modelId={resolvedNewThreadModelId}
-              thinkingLevel={resolvedNewThreadThinkingLevel}
-              modelOnboarding={newThreadModelOnboarding}
-              composerRef={newThreadComposerRef}
-              activeSlashCommand={newThreadSlashMenu.activeSlashFlow?.command}
-              activeSlashCommandMeta={newThreadSlashMenu.activeSlashFlow?.command?.description}
-              slashSections={newThreadSlashMenu.slashSections}
-              slashOptions={newThreadSlashMenu.slashOptions}
-              selectedSlashCommand={newThreadSlashMenu.activeSlashOptionCommand ?? newThreadSlashMenu.selectedSlashCommand}
-              selectedSlashOption={newThreadSlashMenu.selectedSlashOption}
-              showSlashMenu={newThreadSlashMenu.showSlashMenu}
-              showSlashOptionMenu={newThreadSlashMenu.showSlashOptionMenu}
-              slashOptionEmptyState={newThreadSlashMenu.slashOptionEmptyState}
-              showMentionMenu={newThreadMentionMenu.showMentionMenu}
-              mentionOptions={newThreadMentionMenu.mentionOptions}
-              selectedMentionIndex={newThreadMentionMenu.selectedIndex}
-              onChangePrompt={setNewThreadPrompt}
-              onSelectEnvironment={setNewThreadEnvironment}
-              onSelectWorkspace={handleSelectNewThreadWorkspace}
-              onSetModel={(provider, modelId) => { setNewThreadProvider(provider); setNewThreadModelId(modelId); }}
-              onSetThinking={setNewThreadThinkingLevel}
-              onOpenModelSettings={(section) => openSettings(newThreadWorkspace?.id, section)}
-              onComposerKeyDown={handleNewThreadComposerKeyDown}
-              onComposerPaste={handleNewThreadComposerPaste}
-              onComposerDrop={handleNewThreadComposerDrop}
-              onClearSlashCommand={newThreadSlashMenu.resetSlashUi}
+              selectedWorkspaceId={newThread.rootWorkspaceId || rootWorkspaceOptions[0]?.id || ""}
+              runtime={newThread.runtime}
+              environment={newThread.environment}
+              prompt={newThread.prompt}
+              attachments={newThread.attachments}
+              lastError={newThread.composerError}
+              provider={newThread.resolvedProvider}
+              modelId={newThread.resolvedModelId}
+              thinkingLevel={newThread.resolvedThinkingLevel}
+              modelOnboarding={newThread.modelOnboarding}
+              composerRef={newThread.composerRef}
+              activeSlashCommand={newThread.slashMenu.activeSlashFlow?.command}
+              activeSlashCommandMeta={newThread.slashMenu.activeSlashFlow?.command?.description}
+              slashSections={newThread.slashMenu.slashSections}
+              slashOptions={newThread.slashMenu.slashOptions}
+              selectedSlashCommand={newThread.slashMenu.activeSlashOptionCommand ?? newThread.slashMenu.selectedSlashCommand}
+              selectedSlashOption={newThread.slashMenu.selectedSlashOption}
+              showSlashMenu={newThread.slashMenu.showSlashMenu}
+              showSlashOptionMenu={newThread.slashMenu.showSlashOptionMenu}
+              slashOptionEmptyState={newThread.slashMenu.slashOptionEmptyState}
+              showMentionMenu={newThread.mentionMenu.showMentionMenu}
+              mentionOptions={newThread.mentionMenu.mentionOptions}
+              selectedMentionIndex={newThread.mentionMenu.selectedIndex}
+              onChangePrompt={newThread.setPrompt}
+              onSelectEnvironment={newThread.setEnvironment}
+              onSelectWorkspace={newThread.selectWorkspace}
+              onSetModel={(provider, modelId) => { newThread.setProvider(provider); newThread.setModelId(modelId); }}
+              onSetThinking={newThread.setThinkingLevel}
+              onOpenModelSettings={(section) => openSettings(newThread.workspace?.id, section)}
+              onComposerKeyDown={newThread.handleComposerKeyDown}
+              onComposerPaste={newThread.handleComposerPaste}
+              onComposerDrop={newThread.handleComposerDrop}
+              onClearSlashCommand={newThread.slashMenu.resetSlashUi}
               onSelectSlashCommand={(command) => {
-                newThreadSlashMenu.applySlashCommandSelection(command, "click");
+                newThread.slashMenu.applySlashCommandSelection(command, "click");
               }}
               onSelectSlashOption={(option) => {
-                newThreadSlashMenu.applySlashOptionSelection(option);
+                newThread.slashMenu.applySlashOptionSelection(option);
               }}
-              onSelectMention={newThreadMentionMenu.insertMention}
-              onEnableMentionExtension={newThreadMentionMenu.enableMentionExtension}
-              onAddAttachments={handleNewThreadAddAttachments}
-              onRemoveAttachment={handleNewThreadRemoveAttachment}
-              onSubmit={handleStartThread}
+              onSelectMention={newThread.mentionMenu.insertMention}
+              onEnableMentionExtension={newThread.mentionMenu.enableMentionExtension}
+              onAddAttachments={newThread.addAttachments}
+              onRemoveAttachment={newThread.removeAttachment}
+              onSubmit={newThread.startThread}
             />
           ) : (
             <section className="canvas canvas--empty">
@@ -1641,7 +1390,7 @@ export default function App() {
                 <button
                   className="button button--primary"
                   type="button"
-                  onClick={() => openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
+                  onClick={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
                 >
                   New thread
                 </button>
