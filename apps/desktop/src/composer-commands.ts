@@ -275,8 +275,8 @@ export function buildSlashCommandSections(
   // Prefer a host action when it is a prefix match and runtime skills only
   // match fuzzily. Otherwise an installed skill such as `observe-state` can
   // steal `/stat` from the built-in `/status` command on Tab.
-  const hostHasPrefixMatch = hostMatches.some((command) => command.command.startsWith(normalizedQuery));
-  const runtimeHasPrefixMatch = runtimeMatches.some((command) => command.command.startsWith(normalizedQuery));
+const hostHasPrefixMatch = hostMatches.some((command) => command.command.toLowerCase().startsWith(normalizedQuery));
+const runtimeHasPrefixMatch = runtimeMatches.some((command) => command.command.toLowerCase().startsWith(normalizedQuery));
   const runtimeSection: ComposerSlashCommandSection = {
     id: "runtime",
     title: runtimeMatches.length > 0 ? "Runtime Commands" : undefined,
