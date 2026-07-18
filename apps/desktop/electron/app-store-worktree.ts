@@ -461,6 +461,11 @@ async function generateAndApplyAutoTitle(
       ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     });
     if (!generatedTitle) {
+      // Generation succeeded but produced nothing usable — the thread silently
+      // keeps its placeholder title, so make the empty result visible.
+      console.warn(
+        `[app-store] auto-title skipped for ${sessionRef.workspaceId}:${sessionRef.sessionId}: generation returned empty`,
+      );
       clearMatchingPendingTitle();
       return;
     }

@@ -45,9 +45,13 @@ import type {
 const CHILD_TITLE_LIMIT = 56;
 const MAX_CHILD_TRANSCRIPT_MESSAGES = 40;
 const MAX_READ_THREAD_MESSAGES = 60;
+const MAX_READ_THREAD_MESSAGE_CHARS = 2_000;
+const MAX_READ_THREAD_RESULT_CHARS = 24_000;
 const MAX_EVIDENCE_RECORDS_PER_CHILD = 80;
 const DEFAULT_SUPERVISION_INTERVAL_MS = 60_000;
 const MIN_SUPERVISION_INTERVAL_MS = 250;
+const CHILD_START_TIMEOUT_MS = 10_000;
+const CHILD_RUNNING_FAILURE_GRACE_MS = 1_000;
 const pendingCreateChildThreadToolCalls = new Set<string>();
 const execFileAsync = promisify(execFile);
 
@@ -58,22 +62,15 @@ interface SpawnChildThreadInput {
   readonly sourceToolCallId?: string;
 }
 
-async function spawnChildThread(
-  store: AppStoreInternals,
-  input: SpawnChildThreadInput,
-): Promise<DesktopAppState> {
-  try {
-    await createChildThreadRecord(store, input);
-    return structuredClone(store.state);
-  } catch (error) {
-    return store.withError(error);
-  }
+interface CreatedChildThreadResult {
+  readonly child: OrchestrationChildThread;
+  readonly deliveryStatus: NonNullable<CreateChildThreadToolDetails["deliveryStatus"]>;
 }
 
 async function createChildThreadRecord(
   store: AppStoreInternals,
   input: SpawnChildThreadInput,
-): Promise<OrchestrationChildThread> {
+): Promise<CreatedChildThreadResult> {
   await store.initialize();
   const prompt = input.prompt.trim();
   if (!prompt) {
@@ -100,7 +97,15 @@ async function createChildThreadRecord(
 
   const existing = input.sourceToolCallId ? childForToolCall(store, input) : undefined;
   if (existing) {
-    return existing;
+    if (existing.status === "failed") {
+      throw new Error(existing.latestTranscript || "Failed to start child thread.");
+    }
+    const childRef = childSessionRef(existing);
+    await store.ensureSessionReady(childRef);
+    return {
+      child: existing,
+      deliveryStatus: requireInitialPromptRun(store, childRef, prompt),
+    };
   }
 
   if (pendingKey) {
@@ -172,14 +177,19 @@ async function createChildThreadRecord(
       publishSelectedTranscript: false,
     });
 
-    void submitComposerToSession(store, childRef, prompt, [], {
-      deliverAs: "followUp",
-      allowCommands: false,
-    }).catch((error) => {
-      void store.withError(error);
-    });
+    let deliveryStatus: CreatedChildThreadResult["deliveryStatus"];
+    try {
+      deliveryStatus = await launchInitialChildPrompt(store, childRef, prompt);
+    } catch (error) {
+      markInitialPromptDeliveryFailed(store, child.id, error);
+      await store.persistUiState();
+      throw error;
+    }
 
-    return store.state.orchestrationChildren.find((entry) => entry.id === child.id) ?? childWithEvidence;
+    return {
+      child: store.state.orchestrationChildren.find((entry) => entry.id === child.id) ?? childWithEvidence,
+      deliveryStatus,
+    };
   } finally {
     if (pendingKey) {
       pendingCreateChildThreadToolCalls.delete(pendingKey);
@@ -211,12 +221,21 @@ async function handleCreateChildThreadToolResult(
     return false;
   }
 
-  await spawnChildThread(store, {
-    parentWorkspaceId: event.sessionRef.workspaceId,
-    parentSessionId: event.sessionRef.sessionId,
-    prompt,
-    sourceToolCallId: event.callId,
-  });
+  let deliveryStatus: CreatedChildThreadResult["deliveryStatus"];
+  try {
+    const result = await createChildThreadRecord(store, {
+      parentWorkspaceId: event.sessionRef.workspaceId,
+      parentSessionId: event.sessionRef.sessionId,
+      prompt,
+      sourceToolCallId: event.callId,
+    });
+    deliveryStatus = result.deliveryStatus;
+  } catch (error) {
+    const message = errorMessage(error);
+    await store.withError(error);
+    updateThreadToolOutput(store, event, projectionFromToolResult(createChildThreadErrorResult(prompt, message)));
+    return true;
+  }
 
   const child = childForToolCall(store, {
     parentWorkspaceId: event.sessionRef.workspaceId,
@@ -227,7 +246,7 @@ async function handleCreateChildThreadToolResult(
     return false;
   }
 
-  updateCreateChildThreadToolOutput(store, event, prompt, child);
+  updateCreateChildThreadToolOutput(store, event, prompt, child, deliveryStatus);
   return true;
 }
 
@@ -354,7 +373,7 @@ export async function createChildThreadToolResult(
   parentRef: SessionRef,
   input: { readonly prompt: string; readonly toolCallId: string },
 ): Promise<AgentToolResult<CreateChildThreadToolDetails>> {
-  const child = await createChildThreadRecord(store, {
+  const { child, deliveryStatus } = await createChildThreadRecord(store, {
     parentWorkspaceId: parentRef.workspaceId,
     parentSessionId: parentRef.sessionId,
     prompt: input.prompt,
@@ -367,6 +386,7 @@ export async function createChildThreadToolResult(
     childWorkspaceId: child.childWorkspaceId,
     childSessionId: child.childSessionId,
     title: child.title,
+    deliveryStatus,
   };
 
   return {
@@ -622,8 +642,7 @@ export async function hydrateVisibleOrchestrationChildren(store: AppStoreInterna
     seen.add(key);
     hydrationTasks.push(
       store.ensureSessionReady(childRef).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        store.sessionState.sessionErrorsBySession.set(key, message);
+        store.sessionState.sessionErrorsBySession.set(key, errorMessage(error));
       }),
     );
   }
@@ -685,6 +704,169 @@ function childSessionRef(child: OrchestrationChildThread): SessionRef {
   return {
     workspaceId: child.childWorkspaceId,
     sessionId: child.childSessionId,
+  };
+}
+
+async function launchInitialChildPrompt(
+  store: AppStoreInternals,
+  childRef: SessionRef,
+  prompt: string,
+): Promise<CreatedChildThreadResult["deliveryStatus"]> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let runningTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = setTimeout(() => {
+      finish(new Error(`Child thread did not acknowledge its initial prompt within ${CHILD_START_TIMEOUT_MS}ms.`));
+    }, CHILD_START_TIMEOUT_MS);
+    const unsubscribe = store.subscribeToSessionEvents((event) => {
+      if (sessionKey(event.sessionRef) !== sessionKey(childRef)) {
+        return;
+      }
+      if (event.type === "runFailed") {
+        finish(new Error(`Failed to start child thread: ${event.error.message}`));
+        return;
+      }
+      if (event.type === "sessionClosed" && event.reason === "failed") {
+        finish(new Error("Failed to start child thread: the child session closed."));
+        return;
+      }
+      acknowledgeCurrentState();
+    });
+
+    function cleanup(): void {
+      clearTimeout(timeout);
+      if (runningTimer) {
+        clearTimeout(runningTimer);
+      }
+      unsubscribe();
+    }
+
+    function finish(result: CreatedChildThreadResult["deliveryStatus"] | Error): void {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (result instanceof Error) {
+        reject(result);
+      } else {
+        resolve(result);
+      }
+    }
+
+    function acknowledgeCurrentState(): void {
+      try {
+        const status = initialPromptDeliveryStatus(store, childRef, prompt);
+        if (status === "responded") {
+          finish(status);
+        } else if (status === "running" && !runningTimer) {
+          // The driver publishes `running` immediately before session.prompt().
+          // Race submission completion and failure events against a bounded grace
+          // so deterministic auth/config failures win without awaiting the turn.
+          runningTimer = setTimeout(() => finish("running"), CHILD_RUNNING_FAILURE_GRACE_MS);
+        }
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(errorMessage(error)));
+      }
+    }
+
+    const submission = submitComposerToSession(store, childRef, prompt, [], {
+      deliverAs: "followUp",
+      allowCommands: false,
+    });
+    void submission.then(
+      () => {
+        if (settled) {
+          return;
+        }
+        acknowledgeCurrentState();
+        if (!settled && !runningTimer) {
+          finish(new Error("Child thread prompt submission completed without starting a run or producing a response."));
+        }
+      },
+      (error) => finish(error instanceof Error ? error : new Error(errorMessage(error))),
+    );
+  });
+}
+
+function requireInitialPromptRun(
+  store: AppStoreInternals,
+  childRef: SessionRef,
+  prompt: string,
+): CreatedChildThreadResult["deliveryStatus"] {
+  const status = initialPromptDeliveryStatus(store, childRef, prompt);
+  if (status) {
+    return status;
+  }
+  throw new Error("Child thread has no evidence that its initial prompt started a run or produced a response.");
+}
+
+function initialPromptDeliveryStatus(
+  store: AppStoreInternals,
+  childRef: SessionRef,
+  prompt: string,
+): CreatedChildThreadResult["deliveryStatus"] | undefined {
+  const key = sessionKey(childRef);
+  const sessionError = store.sessionState.sessionErrorsBySession.get(key);
+  if (sessionError) {
+    throw new Error(`Failed to start child thread: ${sessionError}`);
+  }
+
+  const session = store.sessionFromState(childRef);
+  if (session?.status === "failed") {
+    throw new Error(`Failed to start child thread: ${session.preview || "the child session failed."}`);
+  }
+
+  const transcript = store.sessionState.transcriptCache.get(key) ?? [];
+  const promptIndex = transcript.findIndex(
+    (item) => item.kind === "message" && item.role === "user" && item.text === prompt,
+  );
+  if (promptIndex < 0) {
+    return undefined;
+  }
+  if (transcript.slice(promptIndex + 1).some(isWorkerResponse)) {
+    return "responded";
+  }
+  return session?.status === "running" ? "running" : undefined;
+}
+
+function isWorkerResponse(item: TranscriptMessage): boolean {
+  return item.kind === "tool" || (item.kind === "message" && item.role === "assistant");
+}
+
+function markInitialPromptDeliveryFailed(
+  store: AppStoreInternals,
+  childThreadId: string,
+  error: unknown,
+): void {
+  const now = new Date().toISOString();
+  const message = errorMessage(error);
+  store.state = {
+    ...store.state,
+    orchestrationChildren: store.state.orchestrationChildren.map((child) =>
+      child.id === childThreadId
+        ? {
+            ...child,
+            status: "failed",
+            latestTranscript: message,
+            evidence: mergeEvidenceRecords(child.evidence, [
+              {
+                id: evidenceId("delivery-failed", child.sourceToolCallId ?? child.childSessionId),
+                childThreadId: child.id,
+                kind: "blocker",
+                source: "blocker",
+                status: "failed",
+                title: "Initial prompt delivery failed",
+                detail: message,
+                parentSessionId: child.parentSessionId,
+                childSessionId: child.childSessionId,
+                createdAt: now,
+              },
+            ]),
+            updatedAt: now,
+          }
+        : child,
+    ),
   };
 }
 
@@ -876,6 +1058,7 @@ function updateCreateChildThreadToolOutput(
   event: Extract<SessionDriverEvent, { type: "toolFinished" }>,
   prompt: string,
   child: OrchestrationChildThread,
+  deliveryStatus: CreatedChildThreadResult["deliveryStatus"],
 ): void {
   updateThreadToolOutput(store, event, {
     detail: `Created child thread: ${child.title}`,
@@ -887,6 +1070,7 @@ function updateCreateChildThreadToolOutput(
       childWorkspaceId: child.childWorkspaceId,
       childSessionId: child.childSessionId,
       title: child.title,
+      deliveryStatus,
     },
   });
 }
@@ -952,6 +1136,20 @@ type ThreadListEntry = OrchestrationThreadListEntry;
 interface ResolvedThreadTarget {
   readonly sessionRef: SessionRef;
   readonly child?: OrchestrationChildThread;
+}
+
+function createChildThreadErrorResult(
+  prompt: string,
+  error: string,
+): AgentToolResult<CreateChildThreadToolDetails> {
+  return {
+    content: [{ type: "text", text: error }],
+    details: {
+      action: createChildThreadAction,
+      prompt,
+      error,
+    },
+  };
 }
 
 function readThreadErrorResult(
@@ -1244,16 +1442,37 @@ function formatThreadReadResult(result: {
   if (result.messages.length === 0) {
     lines.push("- No transcript messages loaded.");
   } else {
-    lines.push(...result.messages.map((message) => `- ${message.role}: ${message.text}`));
+    let remainingBudget = MAX_READ_THREAD_RESULT_CHARS;
+    let omittedCount = 0;
+    for (const message of result.messages) {
+      const line = `- ${message.role}: ${truncateReadThreadText(message.text)}`;
+      if (line.length > remainingBudget) {
+        omittedCount += 1;
+        continue;
+      }
+      lines.push(line);
+      remainingBudget -= line.length;
+    }
+    if (omittedCount > 0) {
+      lines.push(`- … ${omittedCount} transcript message(s) omitted: read_thread output limit reached.`);
+    }
   }
   return lines.join("\n");
+}
+
+function truncateReadThreadText(text: string): string {
+  if (text.length <= MAX_READ_THREAD_MESSAGE_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_READ_THREAD_MESSAGE_CHARS)}… [truncated ${text.length - MAX_READ_THREAD_MESSAGE_CHARS} chars]`;
 }
 
 function formatCreateChildThreadResult(result: CreateChildThreadToolDetails): string {
   return `Created child thread: ${result.title ?? result.prompt}\n` +
     `childThreadId: ${result.childThreadId ?? ""}\n` +
     `childWorkspaceId: ${result.childWorkspaceId ?? ""}\n` +
-    `childSessionId: ${result.childSessionId ?? ""}`;
+    `childSessionId: ${result.childSessionId ?? ""}` +
+    (result.deliveryStatus ? `\ninitialPrompt: ${result.deliveryStatus}` : "");
 }
 
 function formatSendMessageToThreadResult(result: SendMessageToThreadToolDetails): string {
@@ -1604,9 +1823,7 @@ function toOrchestrationStatus(
 
 function hasStartedRun(store: AppStoreInternals, sessionRef: SessionRef): boolean {
   const transcript = store.sessionState.transcriptCache.get(sessionKey(sessionRef)) ?? [];
-  return transcript.some(
-    (message) => message.kind === "tool" || (message.kind === "message" && message.role === "assistant"),
-  );
+  return transcript.some(isWorkerResponse);
 }
 
 function toChildTranscript(
@@ -1661,6 +1878,10 @@ function transcriptRole(message: TranscriptMessage): OrchestrationChildTranscrip
     return "child";
   }
   return "system";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function titleFromPrompt(prompt: string): string {

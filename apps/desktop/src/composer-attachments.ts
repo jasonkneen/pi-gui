@@ -1,6 +1,26 @@
 /// <reference lib="dom" />
 
+import type { KeyboardEvent } from "react";
 import type { ComposerAttachment, ComposerFileAttachment, ComposerImageAttachment } from "./desktop-state";
+
+export function handleClipboardImageShortcut(
+  event: KeyboardEvent<HTMLTextAreaElement>,
+  readClipboardImage: (() => ComposerImageAttachment | null) | undefined,
+  onImage: (attachment: ComposerImageAttachment) => void,
+): boolean {
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "v") {
+    return false;
+  }
+
+  const clipboardImage = readClipboardImage?.();
+  if (!clipboardImage) {
+    return false;
+  }
+
+  event.preventDefault();
+  onImage(clipboardImage);
+  return true;
+}
 
 export const SUPPORTED_COMPOSER_IMAGE_TYPES = [
   { extension: "png", mimeType: "image/png" },

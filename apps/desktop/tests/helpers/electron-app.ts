@@ -1239,6 +1239,38 @@ export async function scrollTimelineAwayFromBottom(window: Page, pixels = 160): 
     .toBeGreaterThan(minimumRemainingFromBottom);
 }
 
+export interface OrchestrationRuntimeToolTestInput {
+  readonly toolName: string;
+  readonly toolCallId?: string;
+  readonly sessionRef: SessionRef;
+  readonly params: unknown;
+}
+
+export interface OrchestrationRuntimeToolTestResult {
+  readonly content: readonly { readonly type: string; readonly text?: string }[];
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export async function runOrchestrationRuntimeTool(
+  harness: DesktopHarness,
+  input: OrchestrationRuntimeToolTestInput,
+): Promise<OrchestrationRuntimeToolTestResult> {
+  await harness.firstWindow();
+  return harness.electronApp.evaluate(async (_, payload) => {
+    const hooks = (globalThis as {
+      __PI_APP_TEST_HOOKS?: {
+        runOrchestrationRuntimeTool?: (
+          input: OrchestrationRuntimeToolTestInput,
+        ) => Promise<OrchestrationRuntimeToolTestResult>;
+      };
+    }).__PI_APP_TEST_HOOKS;
+    if (!hooks?.runOrchestrationRuntimeTool) {
+      throw new Error("Orchestration runtime-tool hook is unavailable");
+    }
+    return hooks.runOrchestrationRuntimeTool(payload);
+  }, input);
+}
+
 export async function emitTestSessionEvent(
   harness: DesktopHarness,
   event: SessionDriverEvent,

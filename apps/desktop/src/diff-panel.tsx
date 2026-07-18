@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { WorkspaceRecord, WorktreeRecord } from "./desktop-state";
+import type { DiffPanelFileRequest, FileWorkbenchContext } from "./diff-panel-types";
 import type { ChangedFileEntry, PiDesktopApi, WorkspaceFilePreview } from "./ipc";
 import { InlineDiff } from "./diff-inline";
 import { FileIcon, FolderIcon, RefreshIcon } from "./icons";
@@ -22,18 +23,6 @@ interface FileTreeNode {
   readonly path: string;
   readonly kind: "directory" | "file";
   readonly children: readonly FileTreeNode[];
-}
-
-export interface DiffPanelFileRequest {
-  readonly path: string;
-  readonly nonce: number;
-}
-
-export interface FileWorkbenchContext {
-  readonly workspace: WorkspaceRecord;
-  readonly worktree?: WorktreeRecord;
-  readonly role: "thread" | "workspace" | "worktree";
-  readonly sessionTitle?: string;
 }
 
 interface DiffPanelProps {

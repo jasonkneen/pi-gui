@@ -3,12 +3,13 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
   createNamedThread,
+  getDesktopState,
   launchDesktop,
   makeUserDataDir,
   makeWorkspace,
-  seedTranscriptMessages,
   waitForWorkspaceByPath,
 } from "../helpers/electron-app";
+import { appendMessagesToSessionFile, sessionFilePathFromCatalog } from "../helpers/session-file";
 
 const markdownResponse = [
   "## Markdown rendering proof",
@@ -36,19 +37,36 @@ test("renders markdown formatting in assistant responses", async () => {
     await mkdir(proofDir, { recursive: true });
   }
   const workspacePath = await makeWorkspace("message-markdown-workspace");
-  const harness = await launchDesktop(userDataDir, {
+  const firstRun = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath],
     testMode: "background",
   });
 
+  let workspaceId = "";
+  let sessionId = "";
   try {
-    const window = await harness.firstWindow();
+    const window = await firstRun.firstWindow();
     await waitForWorkspaceByPath(window, workspacePath);
     await createNamedThread(window, "Markdown proof thread");
-    await seedTranscriptMessages(harness, window, {
-      count: 1,
-      textFactory: () => markdownResponse,
-    });
+    const state = await getDesktopState(window);
+    workspaceId = state.selectedWorkspaceId;
+    sessionId = state.selectedSessionId;
+    expect(workspaceId).toBeTruthy();
+    expect(sessionId).toBeTruthy();
+  } finally {
+    await firstRun.close();
+  }
+
+  const sessionFilePath = await sessionFilePathFromCatalog(userDataDir, { workspaceId, sessionId });
+  await appendMessagesToSessionFile(sessionFilePath, [
+    { role: "user", text: "Return the verification report." },
+    { role: "assistant", text: markdownResponse },
+  ]);
+
+  const secondRun = await launchDesktop(userDataDir, { testMode: "background" });
+  try {
+    const window = await secondRun.firstWindow();
+    await waitForWorkspaceByPath(window, workspacePath);
 
     const messageRow = window.locator(".timeline-item--assistant", { hasText: "Markdown rendering proof" });
     await expect(messageRow).toBeVisible();
@@ -72,6 +90,6 @@ test("renders markdown formatting in assistant responses", async () => {
       });
     }
   } finally {
-    await harness.close();
+    await secondRun.close();
   }
 });

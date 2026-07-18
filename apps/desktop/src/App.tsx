@@ -1,265 +1,63 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type Dispatch, type DragEvent, type KeyboardEvent, type SetStateAction } from "react";
-import type { SessionTreeSnapshot } from "@pi-gui/session-driver/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import {
   getSelectedSession,
   getSelectedWorkspace,
   type AppView,
-  type ComposerAttachment,
-  type ComposerImageAttachment,
-  type DesktopAppState,
-  type ForkThreadInput,
-  type NewThreadEnvironment,
-  type SelectedTranscriptRecord,
-  type StartThreadInput,
-  type WorkspaceRecord,
-  type WorktreeRecord,
 } from "./desktop-state";
+import { updateSnapshot, useDesktopAppState } from "./app/desktop-app-state";
+import { buildFileWorkbenchContexts } from "./app/file-workbench-contexts";
+import { canTogglePrimarySidebar, isEventInsideTerminal } from "./app/app-shell-utils";
+import { useRunningLabel } from "./hooks/use-running-label";
+import { useTimelineScroll, type SidePanelMode } from "./hooks/use-timeline-scroll";
 import { formatRelativeTime } from "./string-utils";
 import { ComposerPanel } from "./composer-panel";
-import { DiffPanel, type DiffPanelFileRequest, type FileWorkbenchContext } from "./diff-panel";
+import { DiffPanel } from "./diff-panel";
+import type { DiffPanelFileRequest } from "./diff-panel-types";
 import { buildModelOptions } from "./composer-commands";
-import { parseTreeComposerCommand } from "./composer-commands";
 import {
   desktopCommands,
   getDesktopCommandFromShortcut,
   getDesktopShortcutLabel,
-  type CustomProviderConfig,
-  type DesktopNotificationPermissionStatus,
   type PiDesktopCommand,
 } from "./ipc";
 import { deriveModelOnboardingState } from "./model-onboarding";
-import { SkillsView } from "./skills-view";
-import { ExtensionsView } from "./extensions-view";
-import { SettingsView, type SettingsSection } from "./settings-view";
-import { SecondarySurface } from "./secondary-surface";
+import type { SettingsSection } from "./settings-view";
+import { SecondarySurfaces } from "./app/secondary-surfaces";
 import { NewThreadView } from "./new-thread-view";
 import { buildThreadGroups } from "./thread-groups";
 import { Sidebar } from "./sidebar";
 import { SidebarToggleButton } from "./sidebar-toggle-button";
 import { Topbar } from "./topbar";
 import { TerminalPanel } from "./terminal-panel";
-import { ConversationTimeline, VIRTUALIZATION_THRESHOLD } from "./conversation-timeline";
+import { ConversationTimeline } from "./conversation-timeline";
+import { loadPromptRailVisible, savePromptRailVisible } from "./prompt-rail-store";
 import { useSlashMenu } from "./hooks/use-slash-menu";
 import { useMentionMenu } from "./hooks/use-mention-menu";
 import { useThreadSearch } from "./hooks/use-thread-search";
 import { useWorkspaceMenu } from "./hooks/use-workspace-menu";
+import { useNewThreadController } from "./hooks/use-new-thread-controller";
 import { buildExtensionDockModel, ExtensionDialog, hasExtensionDockContent } from "./extension-session-ui";
 import { TreeModal } from "./tree-modal";
 import { ForkModal } from "./fork-modal";
 import { getEffectiveModelRuntime } from "./model-settings";
 import { applyThemePresetToRoot } from "./theme-presets";
-import { resolveRepoWorkspaceId } from "./workspace-roots";
 import { deriveWorkspaceContext } from "./workspace-context";
-import {
-  extractImageFilesFromClipboardData,
-  extractFilesFromDataTransfer,
-  readComposerAttachmentsFromFiles,
-} from "./composer-attachments";
-
-type SidePanelMode = "changes" | "files";
-const TIMELINE_SCROLL_INTENT_WINDOW_MS = 750;
-
-interface TimelineOffBottomState {
-  readonly scrollTop: number;
-  readonly transcriptMarker: string;
-}
-
-function useDesktopAppState() {
-  const [snapshot, setSnapshot] = useState<DesktopAppState | null>(null);
-  const [selectedTranscript, setSelectedTranscript] = useState<SelectedTranscriptRecord | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    let receivedPushedTranscript = false;
-    const api = window.piApp;
-    if (!api) {
-      return undefined;
-    }
-
-    // The initial getState() can resolve after an early pushed state-changed event; never let a
-    // snapshot with a lower revision overwrite a newer one already applied to state.
-    const applyState = (incoming: DesktopAppState) => {
-      applySnapshotIfNewer(setSnapshot, incoming);
-    };
-
-    void Promise.all([api.getState(), api.getSelectedTranscript()]).then(([state, transcript]) => {
-      if (!active) {
-        return;
-      }
-      applyState(state);
-      // SelectedTranscriptRecord carries no revision marker, so the stale initial transcript is
-      // only applied when no pushed transcript has arrived yet.
-      if (!receivedPushedTranscript) {
-        setSelectedTranscript(transcript);
-      }
-    });
-
-    const unsubscribeState = api.onStateChanged((state) => {
-      if (active) {
-        applyState(state);
-      }
-    });
-    const unsubscribeTranscript = api.onSelectedTranscriptChanged((payload) => {
-      if (active) {
-        receivedPushedTranscript = true;
-        setSelectedTranscript(payload);
-      }
-    });
-
-    return () => {
-      active = false;
-      unsubscribeState();
-      unsubscribeTranscript();
-    };
-  }, []);
-
-  return [snapshot, setSnapshot, selectedTranscript] as const;
-}
-
-/**
- * Never let a state snapshot with a lower revision overwrite a newer one. IPC
- * responses race the pushed state-changed events: a response is built when the
- * handler returns, but concurrent session events can bump the state (and get
- * pushed) before the response crosses the IPC boundary. Applying the stale
- * response unguarded would silently roll the UI back — e.g. a /name rename
- * right after an aborted run lost its title this way.
- */
-function applySnapshotIfNewer(
-  setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-  incoming: DesktopAppState,
-): void {
-  setSnapshot((current) => (current && incoming.revision < current.revision ? current : incoming));
-}
-
-function updateSnapshot(
-  api: NonNullable<typeof window.piApp>,
-  setSnapshot: Dispatch<SetStateAction<DesktopAppState | null>>,
-  action: () => Promise<DesktopAppState>,
-) {
-  return action().then((state) => {
-    applySnapshotIfNewer(setSnapshot, state);
-    return state;
-  });
-}
-
-function isEventInsideTerminal(event: globalThis.KeyboardEvent): boolean {
-  const target = event.target;
-  return target instanceof Element && Boolean(target.closest("[data-pi-terminal]"));
-}
-
-function canTogglePrimarySidebar(view: AppView | undefined): boolean {
-  return view === "threads" || view === "new-thread";
-}
-
-function useRunningLabel(startedAt: string | undefined) {
-  const [label, setLabel] = useState(() => formatRunningLabel(startedAt));
-
-  useEffect(() => {
-    setLabel(formatRunningLabel(startedAt));
-    if (!startedAt) {
-      return undefined;
-    }
-
-    const interval = window.setInterval(() => {
-      setLabel(formatRunningLabel(startedAt));
-    }, 1000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [startedAt]);
-
-  return label;
-}
-
-function formatRunningLabel(startedAt: string | undefined): string {
-  if (!startedAt) {
-    return "Working…";
-  }
-
-  const diffMs = Math.max(0, Date.now() - Date.parse(startedAt));
-  const seconds = Math.max(1, Math.floor(diffMs / 1000));
-  if (seconds < 60) {
-    return `Working for ${seconds}s`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
-  return remaining === 0 ? `Working for ${minutes}m` : `Working for ${minutes}m ${remaining}s`;
-}
+import { useTreeForkModals } from "./hooks/use-tree-fork-modals";
+import { useComposerDraftSync } from "./hooks/use-composer-draft-sync";
+import { useSessionComposer } from "./hooks/use-session-composer";
 
 export default function App() {
   const [snapshot, setSnapshot, selectedTranscript] = useDesktopAppState();
-  const [composerDraft, setComposerDraft] = useState("");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [settingsWorkspaceId, setSettingsWorkspaceId] = useState("");
   const [skillsWorkspaceId, setSkillsWorkspaceId] = useState("");
   const [extensionsWorkspaceId, setExtensionsWorkspaceId] = useState("");
-  const [pendingNewThreadWorkspaceId, setPendingNewThreadWorkspaceId] = useState("");
-  const [newThreadRootWorkspaceId, setNewThreadRootWorkspaceId] = useState("");
-  const [newThreadEnvironment, setNewThreadEnvironment] = useState<NewThreadEnvironment>("local");
-  const [newThreadPrompt, setNewThreadPrompt] = useState("");
-  const [newThreadAttachments, setNewThreadAttachments] = useState<readonly ComposerAttachment[]>([]);
-  const [newThreadProvider, setNewThreadProvider] = useState<string | undefined>();
-  const [newThreadModelId, setNewThreadModelId] = useState<string | undefined>();
-  const [newThreadThinkingLevel, setNewThreadThinkingLevel] = useState<string | undefined>();
-  const [newThreadComposerError, setNewThreadComposerError] = useState<string | undefined>();
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
-  const [notificationPermissionStatus, setNotificationPermissionStatus] =
-    useState<DesktopNotificationPermissionStatus>("unknown");
-  const [notificationPermissionPending, setNotificationPermissionPending] = useState(false);
   const [dockExpandedBySession, setDockExpandedBySession] = useState<Record<string, boolean>>({});
-  const [treeModalState, setTreeModalState] = useState<{
-    readonly open: boolean;
-    readonly loading: boolean;
-    readonly submitting: boolean;
-    readonly tree?: SessionTreeSnapshot;
-    readonly error?: string;
-  }>({
-    open: false,
-    loading: false,
-    submitting: false,
-  });
-  const [forkModalState, setForkModalState] = useState<{
-    readonly open: boolean;
-    readonly submitting: boolean;
-    readonly sourceMessageIndex: number;
-    readonly messagePreview?: string;
-    readonly error?: string;
-  }>({
-    open: false,
-    submitting: false,
-    sourceMessageIndex: -1,
-  });
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const newThreadComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const timelinePaneRef = useRef<HTMLDivElement | null>(null);
-  const lastTranscriptMarkerRef = useRef("");
-  const pinnedToBottomRef = useRef(true);
-  const previousTimelinePaneSizeRef = useRef<{ width: number; height: number } | null>(null);
-  const lastTimelineScrollTopBySessionRef = useRef(new Map<string, number>());
-  const lastTimelinePinnedBySessionRef = useRef(new Map<string, boolean>());
-  const lastTimelineOffBottomStateBySessionRef = useRef(new Map<string, TimelineOffBottomState>());
-  const preserveBottomOnNextPaneResizeRef = useRef(false);
-  const exactBottomRestoreSessionKeyRef = useRef<string | null>(null);
-  const deferredPinnedBottomAlignmentRef = useRef(false);
-  const pendingPinnedBottomBehaviorRef = useRef<ScrollBehavior>("auto");
-  const bottomAlignmentGenerationRef = useRef(0);
-  const offBottomRestoreGenerationRef = useRef(0);
-  const restoredTimelineScrollSessionKeyRef = useRef("");
-  const protectedTimelineScrollSessionKeysRef = useRef(new Set<string>());
-  const timelineScrollSaveGuardRef = useRef<string | null>(null);
-  const timelineScrollIntentUntilRef = useRef(0);
-  const selectedSessionKeyRef = useRef("");
   const previousActiveViewRef = useRef<AppView | null>(null);
-  const hydratedComposerSessionKeyRef = useRef("");
-  const handledComposerSyncNonceRef = useRef(0);
-  const pendingComposerDraftRef = useRef<string | null>(null);
-  const composerDraftWriteTimerRef = useRef<number | null>(null);
-  const flushComposerDraftRef = useRef<() => void>(() => {});
-  const composerDraftRef = useRef("");
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [dismissedSchemaSkewSessionKeys, setDismissedSchemaSkewSessionKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -268,8 +66,7 @@ export default function App() {
   const [takeoverTerminalSessionKey, setTakeoverTerminalSessionKey] = useState("");
   const [terminalHeight, setTerminalHeight] = useState(340);
   const [diffFileRequest, setDiffFileRequest] = useState<DiffPanelFileRequest | null>(null);
-  const [timelinePaneMountVersion, setTimelinePaneMountVersion] = useState(0);
-  const [disableTimelineVirtualization, setDisableTimelineVirtualization] = useState(true);
+  const [promptRailVisible, setPromptRailVisible] = useState(loadPromptRailVisible);
   const threadSearch = useThreadSearch(timelinePaneRef);
   const api = window.piApp;
   const sidebarToggleStateRef = useRef<{
@@ -314,37 +111,6 @@ export default function App() {
     }
   }, [snapshot?.enableTransparency]);
 
-  useEffect(() => {
-    const piApi = window.piApp;
-    if (!piApi?.onNotificationPermissionStatusChanged) {
-      return;
-    }
-
-    return piApi.onNotificationPermissionStatusChanged((status) => {
-      setNotificationPermissionStatus(status);
-    });
-  }, []);
-
-  const refreshNotificationPermissionStatus = useCallback(() => {
-    if (!api?.getNotificationPermissionStatus) {
-      return Promise.resolve("unknown" as DesktopNotificationPermissionStatus);
-    }
-
-    return api.getNotificationPermissionStatus().then((status) => {
-      setNotificationPermissionStatus(status);
-      return status;
-    });
-  }, [api]);
-
-  useEffect(() => {
-    if (snapshot?.activeView !== "settings" || settingsSection !== "notifications") {
-      return undefined;
-    }
-
-    void refreshNotificationPermissionStatus();
-    return undefined;
-  }, [refreshNotificationPermissionStatus, settingsSection, snapshot?.activeView]);
-
   const {
     activeWorktrees,
     linkedWorktreeByWorkspaceId,
@@ -357,28 +123,6 @@ export default function App() {
   const selectedRuntime = selectedWorkspace ? snapshot?.runtimeByWorkspace[selectedWorkspace.id] : undefined;
   const selectedModelRuntime = snapshot ? getEffectiveModelRuntime(snapshot, selectedWorkspace) : undefined;
   const selectedWorktree = selectedWorkspace ? linkedWorktreeByWorkspaceId.get(selectedWorkspace.id) : undefined;
-  const settingsWorkspace = settingsWorkspaceId
-    ? rootWorkspaceOptions.find((workspace) => workspace.id === settingsWorkspaceId)
-    : undefined;
-  const skillsWorkspace = skillsWorkspaceId
-    ? rootWorkspaceOptions.find((workspace) => workspace.id === skillsWorkspaceId)
-    : undefined;
-  const extensionsWorkspace = extensionsWorkspaceId
-    ? rootWorkspaceOptions.find((workspace) => workspace.id === extensionsWorkspaceId)
-    : undefined;
-  const settingsRuntime = settingsWorkspace ? snapshot?.runtimeByWorkspace[settingsWorkspace.id] : undefined;
-  const settingsModelRuntime = snapshot ? getEffectiveModelRuntime(snapshot, settingsWorkspace) : undefined;
-  const skillsRuntime = skillsWorkspace ? snapshot?.runtimeByWorkspace[skillsWorkspace.id] : undefined;
-  const extensionsRuntime = extensionsWorkspace ? snapshot?.runtimeByWorkspace[extensionsWorkspace.id] : undefined;
-  const extensionsCommandCompatibility = extensionsWorkspace
-    ? snapshot?.extensionCommandCompatibilityByWorkspace[extensionsWorkspace.id] ?? []
-    : [];
-  const newThreadWorkspace =
-    rootWorkspaceOptions.find((entry) => entry.id === newThreadRootWorkspaceId) ?? rootWorkspaceOptions[0];
-  const newThreadRuntime = snapshot ? getEffectiveModelRuntime(snapshot, newThreadWorkspace) : undefined;
-  const newThreadDefaultEnabled = buildModelOptions(newThreadRuntime).some(
-    (m) => m.providerId === newThreadRuntime?.settings.defaultProvider && m.modelId === newThreadRuntime?.settings.defaultModelId,
-  );
   const selectedDefaultEnabled = buildModelOptions(selectedModelRuntime).some(
     (m) => m.providerId === selectedModelRuntime?.settings.defaultProvider && m.modelId === selectedModelRuntime?.settings.defaultModelId,
   );
@@ -390,25 +134,19 @@ export default function App() {
     (selectedDefaultEnabled ? selectedModelRuntime?.settings.defaultModelId : undefined);
   const resolvedSessionThinkingLevel =
     selectedSession?.config?.thinkingLevel ?? selectedModelRuntime?.settings.defaultThinkingLevel;
-  const resolvedNewThreadProvider = newThreadProvider ?? (newThreadDefaultEnabled ? newThreadRuntime?.settings.defaultProvider : undefined);
-  const resolvedNewThreadModelId = newThreadModelId ?? (newThreadDefaultEnabled ? newThreadRuntime?.settings.defaultModelId : undefined);
-  const resolvedNewThreadThinkingLevel = newThreadThinkingLevel ?? newThreadRuntime?.settings.defaultThinkingLevel;
   const selectedSessionModelOnboarding = deriveModelOnboardingState(selectedModelRuntime, {
     provider: resolvedSessionProvider,
     modelId: resolvedSessionModelId,
   });
-  const newThreadModelOnboarding = deriveModelOnboardingState(newThreadRuntime, {
-    provider: resolvedNewThreadProvider,
-    modelId: resolvedNewThreadModelId,
-  });
-  const [attachmentsClearedOnSubmit, setAttachmentsClearedOnSubmit] = useState(false);
-  const composerAttachments = attachmentsClearedOnSubmit ? [] : (snapshot?.composerAttachments ?? []);
   const queuedComposerMessages = snapshot?.queuedComposerMessages ?? [];
   const editingQueuedMessageId = snapshot?.editingQueuedMessageId;
   const runningLabel = useRunningLabel(selectedSession?.status === "running" ? selectedSession.runningSince : undefined);
   const selectedSessionKey = selectedWorkspace && selectedSession ? `${selectedWorkspace.id}:${selectedSession.id}` : "";
-  selectedSessionKeyRef.current = selectedSessionKey;
-  composerDraftRef.current = composerDraft;
+  const { composerDraft, setComposerDraft, composerDraftRef, flushComposerDraft } = useComposerDraftSync({
+    api,
+    snapshot,
+    selectedSessionKey,
+  });
   const isTerminalVisibleForSelectedThread = Boolean(selectedSessionKey) && openTerminalSessionKey === selectedSessionKey;
   const isTerminalTakeoverForSelectedThread = Boolean(selectedSessionKey) && takeoverTerminalSessionKey === selectedSessionKey;
   const selectedTranscriptForSession =
@@ -421,6 +159,29 @@ export default function App() {
       : null;
   const activeTranscript = selectedTranscriptForSession?.transcript ?? [];
   const isTranscriptLoading = Boolean(selectedSession) && !selectedTranscriptForSession;
+  const {
+    setTimelinePaneElement,
+    disableTimelineVirtualization,
+    finalizeTimelineVirtualizationDisable,
+    handleTimelineScroll,
+    handleTimelineScrollIntent,
+    handleTimelineContentHeightChange,
+    showJumpToLatest,
+    jumpToLatest,
+    saveCurrentTimelineScrollState,
+    beginPreserveTimelineBottom,
+    schedulePinnedBottomRealignment,
+  } = useTimelineScroll({
+    selectedSessionKey,
+    activeTranscript,
+    selectedSession,
+    selectedTranscriptForSession,
+    activeView: snapshot?.activeView,
+    sidePanelMode,
+    composerRef,
+    composerDraft,
+    timelinePaneRef,
+  });
   const showSchemaSkewNotice =
     selectedTranscriptForSession?.schemaInfo?.writtenByNewerRuntime === true &&
     Boolean(selectedSessionKey) &&
@@ -462,7 +223,6 @@ export default function App() {
   const displayedSessionTitle = selectedExtensionUi?.title ?? selectedSession?.title ?? "";
   const activeExtensionDialog = selectedExtensionUi?.pendingDialogs[0];
   const isSelectedExtensionDockExpanded = dockExpandedBySession[selectedSessionKey] ?? false;
-  const persistedComposerDraft = snapshot?.composerDraft ?? "";
   const threadGroups = useMemo(
     () => (snapshot ? buildThreadGroups(snapshot) : []),
     [snapshot?.workspaces, snapshot?.worktreesByWorkspace, snapshot?.workspaceOrder],
@@ -483,302 +243,6 @@ export default function App() {
     }
     setOpenTerminalSessionKey(selectedSessionKey);
   }, [openTerminalSessionKey, selectedSessionKey]);
-  const focusNewThreadComposer = () => {
-    window.requestAnimationFrame(() => {
-      newThreadComposerRef.current?.focus();
-    });
-  };
-  const resetExactBottomRestoreState = (nextSessionKey: string | null = null) => {
-    exactBottomRestoreSessionKeyRef.current = nextSessionKey;
-    deferredPinnedBottomAlignmentRef.current = false;
-    pendingPinnedBottomBehaviorRef.current = "auto";
-  };
-  const clearTimelineOffBottomState = (sessionKey: string) => {
-    lastTimelineOffBottomStateBySessionRef.current.delete(sessionKey);
-  };
-  const hasTimelineOffBottomState = (sessionKey: string) =>
-    lastTimelineOffBottomStateBySessionRef.current.has(sessionKey);
-  const saveTimelineOffBottomState = (sessionKey: string, pane: HTMLDivElement) => {
-    lastTimelineOffBottomStateBySessionRef.current.set(sessionKey, {
-      scrollTop: pane.scrollTop,
-      transcriptMarker: buildTranscriptChangeMarker(sessionKey, activeTranscript),
-    });
-  };
-  const restoreTimelineOffBottomState = (sessionKey: string, pane: HTMLDivElement) => {
-    const savedState = lastTimelineOffBottomStateBySessionRef.current.get(sessionKey);
-    if (!savedState) {
-      return false;
-    }
-
-    pane.scrollTop = savedState.scrollTop;
-    return true;
-  };
-  const cancelPendingTimelineOffBottomRestore = (sessionKey: string) => {
-    if (!sessionKey || !protectedTimelineScrollSessionKeysRef.current.has(sessionKey)) {
-      return;
-    }
-    offBottomRestoreGenerationRef.current += 1;
-    protectedTimelineScrollSessionKeysRef.current.delete(sessionKey);
-  };
-  // Two useLayoutEffect cleanups both save timeline scroll on a session switch; they fire in the
-  // same commit, so dedupe by session key to run the save (and consume the single-use protection
-  // guard) exactly once. Otherwise the second, unguarded save clobbers the saved off-bottom read
-  // position.
-  const saveTimelineScrollStateOnLeave = (sessionKey: string) => {
-    const pane = timelinePaneRef.current;
-    if (!pane || !sessionKey) {
-      return;
-    }
-    if (timelineScrollSaveGuardRef.current === sessionKey) {
-      return;
-    }
-    timelineScrollSaveGuardRef.current = sessionKey;
-    queueMicrotask(() => {
-      if (timelineScrollSaveGuardRef.current === sessionKey) {
-        timelineScrollSaveGuardRef.current = null;
-      }
-    });
-    if (protectedTimelineScrollSessionKeysRef.current.has(sessionKey)) {
-      protectedTimelineScrollSessionKeysRef.current.delete(sessionKey);
-      return;
-    }
-    const pinned = isNearBottom(pane);
-    lastTimelineScrollTopBySessionRef.current.set(sessionKey, pane.scrollTop);
-    lastTimelinePinnedBySessionRef.current.set(sessionKey, pinned);
-    if (pinned) {
-      clearTimelineOffBottomState(sessionKey);
-    }
-  };
-  const updateNewThreadPrompt = useCallback((value: SetStateAction<string>) => {
-    setNewThreadComposerError(undefined);
-    setNewThreadPrompt(value);
-  }, []);
-  const scrollTimelineToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    const pane = timelinePaneRef.current;
-    if (!pane) {
-      return;
-    }
-
-    if (
-      selectedSessionKey &&
-      hasTimelineOffBottomState(selectedSessionKey) &&
-      !pinnedToBottomRef.current
-    ) {
-      return;
-    }
-
-    const alignmentGeneration = bottomAlignmentGenerationRef.current + 1;
-    bottomAlignmentGenerationRef.current = alignmentGeneration;
-
-    const align = (remainingChecks: number) => {
-      if (alignmentGeneration !== bottomAlignmentGenerationRef.current) {
-        return;
-      }
-      if (behavior === "auto") {
-        pane.scrollTop = pane.scrollHeight;
-      } else {
-        pane.scrollTo({ top: pane.scrollHeight, behavior });
-      }
-      pinnedToBottomRef.current = true;
-      lastTimelineScrollTopBySessionRef.current.set(selectedSessionKey, pane.scrollTop);
-      lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, true);
-      clearTimelineOffBottomState(selectedSessionKey);
-      setShowJumpToLatest(false);
-
-      if (remainingChecks <= 0) {
-        return;
-      }
-
-      window.requestAnimationFrame(() => {
-        if (alignmentGeneration !== bottomAlignmentGenerationRef.current) {
-          return;
-        }
-        const remaining = pane.scrollHeight - pane.scrollTop - pane.clientHeight;
-        if (remaining > 1 || remainingChecks > 1) {
-          align(remainingChecks - 1);
-        }
-      });
-    };
-
-    align(6);
-  }, [selectedSessionKey]);
-
-  const requestPinnedBottomAlignment = useCallback((
-    behavior: ScrollBehavior = "auto",
-    options?: { readonly preferExactRestore?: boolean },
-  ) => {
-    if (
-      selectedSessionKey &&
-      hasTimelineOffBottomState(selectedSessionKey) &&
-      !pinnedToBottomRef.current
-    ) {
-      return;
-    }
-
-    if (exactBottomRestoreSessionKeyRef.current === selectedSessionKey && selectedSessionKey) {
-      pendingPinnedBottomBehaviorRef.current = behavior;
-      deferredPinnedBottomAlignmentRef.current = true;
-      return;
-    }
-
-    if (options?.preferExactRestore && selectedSessionKey && activeTranscript.length > VIRTUALIZATION_THRESHOLD) {
-      exactBottomRestoreSessionKeyRef.current = selectedSessionKey;
-      pendingPinnedBottomBehaviorRef.current = behavior;
-      preserveBottomOnNextPaneResizeRef.current = true;
-      setDisableTimelineVirtualization(true);
-      return;
-    }
-
-    scrollTimelineToBottom(behavior);
-  }, [activeTranscript.length, scrollTimelineToBottom, selectedSessionKey]);
-
-  const finalizeTimelineVirtualizationDisable = useCallback(() => {
-    const pane = timelinePaneRef.current;
-    const restoreSessionKey = exactBottomRestoreSessionKeyRef.current;
-    if (!pane || snapshot?.activeView !== "threads") {
-      resetExactBottomRestoreState();
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-
-    if (restoreSessionKey !== selectedSessionKey || !restoreSessionKey) {
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-
-    const shouldRestoreBottom =
-      pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current || deferredPinnedBottomAlignmentRef.current;
-    if (!shouldRestoreBottom) {
-      resetExactBottomRestoreState();
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-
-    const finishRestore = (remainingChecks: number, stableChecks: number) => {
-      window.requestAnimationFrame(() => {
-        if (timelinePaneRef.current !== pane || exactBottomRestoreSessionKeyRef.current !== restoreSessionKey) {
-          return;
-        }
-
-        if (pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current) {
-          scrollTimelineToBottom();
-        }
-
-        const remaining = pane.scrollHeight - pane.scrollTop - pane.clientHeight;
-        const nextStableChecks = remaining <= 16 ? stableChecks + 1 : 0;
-        if (remainingChecks <= 1 || nextStableChecks >= 2) {
-          const shouldApplyDeferredAlignment = deferredPinnedBottomAlignmentRef.current;
-          resetExactBottomRestoreState();
-          if (shouldApplyDeferredAlignment) {
-            scrollTimelineToBottom();
-          }
-          preserveBottomOnNextPaneResizeRef.current = false;
-          return;
-        }
-
-        finishRestore(remainingChecks - 1, nextStableChecks);
-      });
-    };
-
-    if (pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current) {
-      scrollTimelineToBottom();
-    }
-
-    window.requestAnimationFrame(() => {
-      if (timelinePaneRef.current !== pane || exactBottomRestoreSessionKeyRef.current !== restoreSessionKey) {
-        return;
-      }
-      setDisableTimelineVirtualization(false);
-      scrollTimelineToBottom(pendingPinnedBottomBehaviorRef.current);
-      pendingPinnedBottomBehaviorRef.current = "auto";
-      finishRestore(6, 0);
-    });
-  }, [scrollTimelineToBottom, selectedSessionKey, snapshot?.activeView]);
-
-  const setTimelinePaneElement = useCallback((node: HTMLDivElement | null) => {
-    timelinePaneRef.current = node;
-    if (!node) {
-      return;
-    }
-
-    setTimelinePaneMountVersion((current) => current + 1);
-
-    const savedOffBottomState = lastTimelineOffBottomStateBySessionRef.current.get(selectedSessionKey);
-    const savedPinned = lastTimelinePinnedBySessionRef.current.get(selectedSessionKey);
-    const savedScrollTop = savedOffBottomState?.scrollTop ?? lastTimelineScrollTopBySessionRef.current.get(selectedSessionKey);
-
-    if (!selectedSessionKey || snapshot?.activeView !== "threads") {
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-    if (savedOffBottomState && isTranscriptLoading) {
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-
-    const shouldRestoreBottom =
-      !savedOffBottomState &&
-      ((savedPinned ?? pinnedToBottomRef.current) || preserveBottomOnNextPaneResizeRef.current);
-    if (shouldRestoreBottom) {
-      preserveBottomOnNextPaneResizeRef.current = true;
-      node.scrollTop = node.scrollHeight;
-      window.requestAnimationFrame(() => {
-        if (timelinePaneRef.current !== node) {
-          return;
-        }
-        if (pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current) {
-          requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-        }
-      });
-      return;
-    }
-
-    if (savedScrollTop == null && !savedOffBottomState) {
-      setDisableTimelineVirtualization(false);
-      return;
-    }
-
-    if (savedOffBottomState) {
-      restoreTimelineOffBottomState(selectedSessionKey, node);
-    } else {
-      node.scrollTop = savedScrollTop ?? node.scrollTop;
-    }
-    const restoredPinned = isNearBottom(node);
-    bottomAlignmentGenerationRef.current += 1;
-    pinnedToBottomRef.current = restoredPinned;
-    resetExactBottomRestoreState();
-    lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, restoredPinned);
-    if (restoredPinned) {
-      clearTimelineOffBottomState(selectedSessionKey);
-    }
-    window.requestAnimationFrame(() => {
-      if (timelinePaneRef.current !== node) {
-        return;
-      }
-      setDisableTimelineVirtualization(false);
-    });
-  }, [isTranscriptLoading, requestPinnedBottomAlignment, selectedSessionKey, snapshot?.activeView]);
-
-  const schedulePinnedBottomRealignment = useCallback((delayFrames = 0) => {
-    const waitForFrames = (remainingFrames: number) => {
-      window.requestAnimationFrame(() => {
-        if (remainingFrames > 0) {
-          waitForFrames(remainingFrames - 1);
-          return;
-        }
-        requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-        window.requestAnimationFrame(() => {
-          preserveBottomOnNextPaneResizeRef.current = false;
-          if (pinnedToBottomRef.current) {
-            requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-          }
-        });
-      });
-    };
-
-    waitForFrames(delayFrames);
-  }, [requestPinnedBottomAlignment]);
-
   const handleViewFileInDiff = useCallback((path: string) => {
     setSidePanelMode("changes");
     setDiffFileRequest({ path, nonce: Date.now() });
@@ -796,11 +260,7 @@ export default function App() {
   }, []);
 
   const toggleSidePanelMode = useCallback((mode: SidePanelMode) => {
-    const pane = timelinePaneRef.current;
-    const shouldPreserveBottom = pane ? isNearBottom(pane) || pinnedToBottomRef.current : pinnedToBottomRef.current;
-    if (shouldPreserveBottom) {
-      preserveBottomOnNextPaneResizeRef.current = true;
-    }
+    const shouldPreserveBottom = beginPreserveTimelineBottom();
 
     setSidePanelMode((current) => (current === mode ? null : mode));
 
@@ -809,7 +269,7 @@ export default function App() {
     }
 
     schedulePinnedBottomRealignment(3);
-  }, [schedulePinnedBottomRealignment]);
+  }, [beginPreserveTimelineBottom, schedulePinnedBottomRealignment]);
 
   const toggleChangesPanel = useCallback(() => {
     toggleSidePanelMode("changes");
@@ -819,6 +279,14 @@ export default function App() {
     toggleSidePanelMode("files");
   }, [toggleSidePanelMode]);
 
+  const togglePromptRail = useCallback(() => {
+    setPromptRailVisible((current) => {
+      const next = !current;
+      savePromptRailVisible(next);
+      return next;
+    });
+  }, []);
+
   const openSettings = (workspaceId?: string, section?: SettingsSection) => {
     if (!api) {
       return;
@@ -826,7 +294,7 @@ export default function App() {
     const nextWorkspaceId =
       workspaceId && rootWorkspaceOptions.some((workspace) => workspace.id === workspaceId)
         ? workspaceId
-        : settingsWorkspace?.id || rootWorkspaceOptions[0]?.id || "";
+        : settingsWorkspaceId || rootWorkspaceOptions[0]?.id || "";
     if (nextWorkspaceId) {
       setSettingsWorkspaceId(nextWorkspaceId);
     }
@@ -836,159 +304,28 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.setActiveView("settings"));
   };
 
-  const closeTreeModal = useCallback(() => {
-    setTreeModalState((current) =>
-      current.submitting
-        ? current
-        : {
-            open: false,
-            loading: false,
-            submitting: false,
-          },
-    );
-    focusComposer();
-  }, []);
-
-  const openTreeModal = useCallback(() => {
-    if (!api || !selectedWorkspace || !selectedSession) {
-      return;
-    }
-
-    setTreeModalState({
-      open: true,
-      loading: true,
-      submitting: false,
-    });
-    setComposerDraft("");
-
-    void api
-      .getSessionTree({
-        workspaceId: selectedWorkspace.id,
-        sessionId: selectedSession.id,
-      })
-      .then((tree) => {
-        setTreeModalState({
-          open: true,
-          loading: false,
-          submitting: false,
-          tree,
-        });
-      })
-      .catch((error) => {
-        setTreeModalState({
-          open: true,
-          loading: false,
-          submitting: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-  }, [api, selectedSession, selectedWorkspace]);
-
-  const navigateTreeSelection = useCallback(
-    (targetId: string, options?: { readonly summarize?: boolean; readonly customInstructions?: string }) => {
-      if (!api || !selectedWorkspace || !selectedSession) {
-        return;
-      }
-
-      setTreeModalState((current) => ({ ...current, submitting: true, error: undefined }));
-      void api
-        .navigateSessionTree(
-          {
-            workspaceId: selectedWorkspace.id,
-            sessionId: selectedSession.id,
-          },
-          targetId,
-          options,
-        )
-        .then(({ state, result }) => {
-          applySnapshotIfNewer(setSnapshot, state);
-          setTreeModalState({
-            open: false,
-            loading: false,
-            submitting: false,
-          });
-          setComposerDraft((current) =>
-            !current.trim() && result.editorText ? result.editorText : state.composerDraft,
-          );
-          focusComposer();
-        })
-        .catch((error) => {
-          setTreeModalState((current) => ({
-            ...current,
-            submitting: false,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        });
-    },
-    [api, selectedSession, selectedWorkspace],
-  );
-
-  const closeForkModal = useCallback(() => {
-    setForkModalState((current) =>
-      current.submitting
-        ? current
-        : {
-            open: false,
-            submitting: false,
-            sourceMessageIndex: -1,
-          },
-    );
-  }, []);
-
-  const openForkModal = useCallback(
-    (sourceMessageIndex: number, preview?: string) => {
-      if (!api || !selectedWorkspace || !selectedSession) {
-        return;
-      }
-      const trimmed = preview?.trim();
-      setForkModalState({
-        open: true,
-        submitting: false,
-        sourceMessageIndex,
-        messagePreview: trimmed ? trimmed.slice(0, 280) : undefined,
-      });
-    },
-    [api, selectedSession, selectedWorkspace],
-  );
-
-  const handleForkSubmit = useCallback(
-    (environment: NewThreadEnvironment) => {
-      if (!api || !selectedWorkspace || !selectedSession) {
-        return;
-      }
-      const rootWorkspaceId =
-        (snapshot ? resolveRepoWorkspaceId(snapshot.workspaces, selectedWorkspace.id) : undefined) ??
-        selectedWorkspace.id;
-      const input: ForkThreadInput = {
-        sourceWorkspaceId: selectedWorkspace.id,
-        sourceSessionId: selectedSession.id,
-        rootWorkspaceId,
-        environment,
-        sourceMessageIndex: forkModalState.sourceMessageIndex,
-        position: "after",
-      };
-      setForkModalState((current) => ({ ...current, submitting: true, error: undefined }));
-      void api
-        .forkThread(input)
-        .then((state) => {
-          applySnapshotIfNewer(setSnapshot, state);
-          setForkModalState({
-            open: false,
-            submitting: false,
-            sourceMessageIndex: -1,
-          });
-          focusComposer();
-        })
-        .catch((error) => {
-          setForkModalState((current) => ({
-            ...current,
-            submitting: false,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        });
-    },
-    [api, forkModalState.sourceMessageIndex, selectedSession, selectedWorkspace, snapshot],
-  );
+  const {
+    treeModalState,
+    forkModalState,
+    closeTreeModal,
+    openTreeModal,
+    navigateTreeSelection,
+    closeForkModal,
+    openForkModal,
+    handleForkSubmit,
+    canUseWorktree,
+  } = useTreeForkModals({
+    api,
+    snapshot,
+    setSnapshot,
+    selectedWorkspace,
+    selectedSession,
+    selectedSessionKey,
+    rootWorkspace,
+    activeView: snapshot?.activeView,
+    setComposerDraft,
+    focusComposer,
+  });
 
   const slashMenu = useSlashMenu({
     composerDraft,
@@ -1032,99 +369,53 @@ export default function App() {
     onEnableExtension: enableSelectedMentionExtension,
   });
 
-  const newThreadSlashMenu = useSlashMenu({
-    composerDraft: newThreadPrompt,
-    setComposerDraft: updateNewThreadPrompt,
-    selectedRuntime: newThreadRuntime,
-    selectedModelRuntime: newThreadRuntime,
-    sessionCommands: [],
-    commandCompatibility: [],
-    selectedSessionKey: `new-thread:${newThreadWorkspace?.id ?? ""}`,
-    selectedSession: undefined,
-    selectedWorkspace: newThreadWorkspace,
-    isRunning: false,
-    api,
-    setSnapshot,
-    focusComposer: focusNewThreadComposer,
-    openSettings,
-    updateSnapshot,
-    allowTreeCommand: false,
-    immediateCommandMode: "prefill",
-    onSelectModelOption: (provider, modelId) => {
-      setNewThreadProvider(provider);
-      setNewThreadModelId(modelId);
-    },
-    onSelectThinkingOption: setNewThreadThinkingLevel,
-    onSelectLoginProvider: (providerId) => {
-      if (!api || !newThreadWorkspace) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.loginProvider(newThreadWorkspace.id, providerId));
-    },
-    onSelectLogoutProvider: (providerId) => {
-      if (!api || !newThreadWorkspace) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.logoutProvider(newThreadWorkspace.id, providerId));
-    },
-  });
-
-  const enableNewThreadMentionExtension = useCallback(
-    (filePath: string) => {
-      if (!api || !newThreadWorkspace) {
-        return Promise.resolve();
-      }
-      return updateSnapshot(api, setSnapshot, () => api.setExtensionEnabled(newThreadWorkspace.id, filePath, true)).then(
-        () => undefined,
-      );
-    },
-    [api, newThreadWorkspace],
-  );
-
-  const newThreadMentionMenu = useMentionMenu({
-    composerDraft: newThreadPrompt,
-    setComposerDraft: setNewThreadPrompt,
-    composerRef: newThreadComposerRef,
-    workspaceId: newThreadWorkspace?.id,
-    runtime: newThreadRuntime,
-    api,
-    onEnableExtension: enableNewThreadMentionExtension,
-  });
-
   const wsMenu = useWorkspaceMenu({
     api,
     setSnapshot,
     updateSnapshot,
   });
 
-  useEffect(() => {
-    if (!snapshot) {
-      return;
-    }
+  const newThread = useNewThreadController({
+    api,
+    snapshot,
+    setSnapshot,
+    rootWorkspace,
+    rootWorkspaceOptions,
+    visibleWorkspaces,
+    selectedWorkspace,
+    expandWorkspace: wsMenu.expandWorkspace,
+    openSettings,
+  });
 
-    if (hydratedComposerSessionKeyRef.current !== selectedSessionKey) {
-      hydratedComposerSessionKeyRef.current = selectedSessionKey;
-      handledComposerSyncNonceRef.current = snapshot.composerDraftSyncNonce;
-      setComposerDraft(snapshot.composerDraft);
-      return;
-    }
-
-    if (snapshot.composerDraftSyncNonce === handledComposerSyncNonceRef.current) {
-      return;
-    }
-
-    handledComposerSyncNonceRef.current = snapshot.composerDraftSyncNonce;
-    if (snapshot.composerDraftSyncSource === "persist" || snapshot.composerDraftSyncSource === "state") {
-      return;
-    }
-
-    setComposerDraft(snapshot.composerDraft);
-  }, [
-    selectedSessionKey,
-    snapshot?.composerDraft,
-    snapshot?.composerDraftSyncNonce,
-    snapshot?.composerDraftSyncSource,
-  ]);
+  const {
+    composerAttachments,
+    submitComposerDraft,
+    handlePickAttachments,
+    handleRemoveAttachment,
+    handleEditQueuedMessage,
+    handleCancelQueuedEdit,
+    handleRemoveQueuedMessage,
+    handleSteerQueuedMessage,
+    handleComposerPaste,
+    handleComposerDrop,
+    handlePastedClipboardImage,
+    handleComposerKeyDown,
+  } = useSessionComposer({
+    api,
+    snapshot,
+    setSnapshot,
+    selectedSession,
+    composerDraft,
+    setComposerDraft,
+    composerDraftRef,
+    composerRef,
+    requiresModelSelection: selectedSessionModelOnboarding.requiresModelSelection,
+    openTreeModal,
+    handleMentionKeyDown: mentionMenu.handleMentionKeyDown,
+    handleSlashKeyDown: slashMenu.handleSlashKeyDown,
+    newThreadComposerRef: newThread.composerRef,
+    appendNewThreadAttachment: newThread.appendAttachment,
+  });
 
   useEffect(() => {
     const sessionExtensionUiBySession = snapshot?.sessionExtensionUiBySession;
@@ -1156,10 +447,6 @@ export default function App() {
       setSettingsWorkspaceId("");
       setSkillsWorkspaceId("");
       setExtensionsWorkspaceId("");
-      setPendingNewThreadWorkspaceId("");
-      setNewThreadRootWorkspaceId("");
-      setNewThreadEnvironment("local");
-      setNewThreadAttachments([]);
       return;
     }
     setSettingsWorkspaceId((current) =>
@@ -1171,43 +458,7 @@ export default function App() {
     setExtensionsWorkspaceId((current) =>
       rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
     );
-    setNewThreadRootWorkspaceId((current) =>
-      rootWorkspaceOptions.some((workspace) => workspace.id === current) ? current : (current || rootWorkspaceOptions[0]?.id || ""),
-    );
   }, [rootWorkspaceOptions]);
-
-  useEffect(() => {
-    if (!snapshot || !pendingNewThreadWorkspaceId) {
-      return;
-    }
-    const nextRootWorkspaceId = resolveRepoWorkspaceId(snapshot.workspaces, pendingNewThreadWorkspaceId);
-    if (!nextRootWorkspaceId || !rootWorkspaceOptions.some((workspace) => workspace.id === nextRootWorkspaceId)) {
-      return;
-    }
-    setNewThreadRootWorkspaceId(nextRootWorkspaceId);
-    setPendingNewThreadWorkspaceId("");
-  }, [pendingNewThreadWorkspaceId, rootWorkspaceOptions, snapshot]);
-
-  const resetNewThreadSurface = (workspaceId?: string) => {
-    const nextWorkspaceId =
-      (workspaceId && (
-        rootWorkspaceOptions.find((workspace) => workspace.id === workspaceId)?.id ||
-        (snapshot ? resolveRepoWorkspaceId(snapshot.workspaces, workspaceId) : undefined)
-      )) ||
-      rootWorkspace?.id ||
-      visibleWorkspaces[0]?.id ||
-      "";
-    if (nextWorkspaceId) {
-      setNewThreadRootWorkspaceId(nextWorkspaceId);
-    }
-    setNewThreadEnvironment("local");
-    setNewThreadPrompt("");
-    setNewThreadAttachments([]);
-    setNewThreadProvider(undefined);
-    setNewThreadModelId(undefined);
-    setNewThreadThinkingLevel(undefined);
-    setNewThreadComposerError(undefined);
-  };
 
   const primarySidebarToggleVisible = canTogglePrimarySidebar(snapshot?.activeView);
   const handleTogglePrimarySidebar = useCallback(() => {
@@ -1227,7 +478,7 @@ export default function App() {
         openSettings(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
         return true;
       } else if (command === desktopCommands.openNewThread) {
-        openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
+        newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id);
         return true;
       } else if (command === desktopCommands.toggleTerminal) {
         toggleTerminal();
@@ -1240,8 +491,8 @@ export default function App() {
 
     const removeCommandListener = window.piApp?.onCommand?.(handleCommand);
     const removeWorkspacePickedListener = window.piApp?.onWorkspacePicked?.((workspaceId) => {
-      setPendingNewThreadWorkspaceId(workspaceId);
-      resetNewThreadSurface();
+      newThread.setPendingWorkspaceId(workspaceId);
+      newThread.resetSurface();
     });
     const removeClipboardImageListener = window.piApp?.onClipboardImagePasted?.(handlePastedClipboardImage);
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -1299,151 +550,12 @@ export default function App() {
     toggleChangesPanel,
     toggleTerminal,
     handleTogglePrimarySidebar,
+    newThread,
   ]);
-
-  useLayoutEffect(() => {
-    const savedOffBottomState = selectedSessionKey
-      ? lastTimelineOffBottomStateBySessionRef.current.get(selectedSessionKey)
-      : undefined;
-    const savedPinned = selectedSessionKey ? lastTimelinePinnedBySessionRef.current.get(selectedSessionKey) : undefined;
-    const shouldRestorePinned = !savedOffBottomState
-      ? savedPinned ?? true
-      : false;
-    setShowJumpToLatest(false);
-    lastTranscriptMarkerRef.current = "";
-    pinnedToBottomRef.current = shouldRestorePinned;
-    timelineScrollIntentUntilRef.current = 0;
-    previousTimelinePaneSizeRef.current = null;
-    preserveBottomOnNextPaneResizeRef.current = false;
-    restoredTimelineScrollSessionKeyRef.current = "";
-    resetExactBottomRestoreState(shouldRestorePinned ? selectedSessionKey || null : null);
-    setDisableTimelineVirtualization(Boolean(selectedSessionKey && shouldRestorePinned));
-
-    return () => {
-      saveTimelineScrollStateOnLeave(selectedSessionKey);
-    };
-  }, [selectedSessionKey]);
-
-  useLayoutEffect(() => {
-    if (snapshot?.activeView !== "threads" || !selectedSession || !selectedTranscriptForSession) {
-      return;
-    }
-    if (exactBottomRestoreSessionKeyRef.current !== selectedSessionKey) {
-      return;
-    }
-    if (!pinnedToBottomRef.current && !preserveBottomOnNextPaneResizeRef.current) {
-      return;
-    }
-
-    scrollTimelineToBottom();
-  }, [
-    activeTranscript,
-    disableTimelineVirtualization,
-    scrollTimelineToBottom,
-    selectedSession,
-    selectedSessionKey,
-    selectedTranscriptForSession,
-    snapshot?.activeView,
-  ]);
-
-  useLayoutEffect(() => {
-    const pane = timelinePaneRef.current;
-    if (
-      !pane ||
-      !selectedSessionKey ||
-      snapshot?.activeView !== "threads" ||
-      isTranscriptLoading ||
-      restoredTimelineScrollSessionKeyRef.current === selectedSessionKey
-    ) {
-      return;
-    }
-
-    const savedOffBottomState = lastTimelineOffBottomStateBySessionRef.current.get(selectedSessionKey);
-    if (!savedOffBottomState) {
-      protectedTimelineScrollSessionKeysRef.current.delete(selectedSessionKey);
-      restoredTimelineScrollSessionKeyRef.current = selectedSessionKey;
-      return;
-    }
-
-    const restoreGeneration = offBottomRestoreGenerationRef.current + 1;
-    offBottomRestoreGenerationRef.current = restoreGeneration;
-    let shouldSuppressJumpForRestore = true;
-    const applyRestore = () => {
-      const currentPane = timelinePaneRef.current;
-      if (
-        offBottomRestoreGenerationRef.current !== restoreGeneration ||
-        !currentPane ||
-        selectedSessionKeyRef.current !== selectedSessionKey
-      ) {
-        return;
-      }
-      if (!restoreTimelineOffBottomState(selectedSessionKey, currentPane)) {
-        return;
-      }
-      const restoredPinned = isNearBottom(currentPane);
-      bottomAlignmentGenerationRef.current += 1;
-      pinnedToBottomRef.current = restoredPinned;
-      preserveBottomOnNextPaneResizeRef.current = false;
-      resetExactBottomRestoreState();
-      lastTimelineScrollTopBySessionRef.current.set(selectedSessionKey, currentPane.scrollTop);
-      lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, restoredPinned);
-      if (restoredPinned) {
-        clearTimelineOffBottomState(selectedSessionKey);
-      }
-      if (shouldSuppressJumpForRestore) {
-        setShowJumpToLatest(false);
-        shouldSuppressJumpForRestore = false;
-      }
-    };
-
-    applyRestore();
-    window.requestAnimationFrame(applyRestore);
-    window.setTimeout(applyRestore, 50);
-    window.setTimeout(applyRestore, 150);
-    window.setTimeout(applyRestore, 300);
-    window.setTimeout(applyRestore, 600);
-    window.setTimeout(applyRestore, 1_000);
-    window.setTimeout(applyRestore, 2_000);
-    lastTranscriptMarkerRef.current = savedOffBottomState.transcriptMarker;
-    setDisableTimelineVirtualization(false);
-    window.setTimeout(() => {
-      if (
-        offBottomRestoreGenerationRef.current === restoreGeneration &&
-        selectedSessionKeyRef.current === selectedSessionKey
-      ) {
-        protectedTimelineScrollSessionKeysRef.current.delete(selectedSessionKey);
-      }
-    }, 2_200);
-    restoredTimelineScrollSessionKeyRef.current = selectedSessionKey;
-  }, [activeTranscript, isTranscriptLoading, selectedSessionKey, snapshot?.activeView]);
-
-  useEffect(() => {
-    setTreeModalState((current) =>
-      current.open
-        ? {
-            open: false,
-            loading: false,
-            submitting: false,
-          }
-        : current,
-    );
-  }, [selectedSessionKey, snapshot?.activeView]);
 
   useEffect(() => {
     if (!snapshot) {
       return;
-    }
-
-    if (snapshot.activeView === "new-thread" && previousActiveViewRef.current !== "new-thread") {
-      const nextRootWorkspaceId = resolveRepoWorkspaceId(snapshot.workspaces, selectedWorkspace?.id);
-      if (nextRootWorkspaceId) {
-        setNewThreadRootWorkspaceId(nextRootWorkspaceId);
-      }
-    }
-
-    if (snapshot.activeView !== "threads") {
-      previousTimelinePaneSizeRef.current = null;
-      resetExactBottomRestoreState();
     }
 
     if (
@@ -1452,165 +564,10 @@ export default function App() {
       selectedSession
     ) {
       focusComposer();
-      if (pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current) {
-        preserveBottomOnNextPaneResizeRef.current = true;
-        schedulePinnedBottomRealignment(1);
-      }
     }
 
     previousActiveViewRef.current = snapshot.activeView;
-  }, [schedulePinnedBottomRealignment, selectedSession, selectedWorkspace?.id, snapshot]);
-
-  useEffect(() => {
-    if (!api || composerDraft === persistedComposerDraft) {
-      pendingComposerDraftRef.current = null;
-      return undefined;
-    }
-
-    pendingComposerDraftRef.current = composerDraft;
-    const timeout = window.setTimeout(() => {
-      composerDraftWriteTimerRef.current = null;
-      pendingComposerDraftRef.current = null;
-      void api.updateComposerDraft(composerDraft);
-    }, 350);
-    composerDraftWriteTimerRef.current = timeout;
-
-    // Only the timer is cancelled here (each keystroke reschedules it); the pending value stays in
-    // pendingComposerDraftRef so a session switch can flush it before the active session changes.
-    return () => {
-      window.clearTimeout(timeout);
-      composerDraftWriteTimerRef.current = null;
-    };
-  }, [api, composerDraft, persistedComposerDraft]);
-
-  useEffect(() => () => flushComposerDraftRef.current(), []);
-
-  useLayoutEffect(() => {
-    const composer = composerRef.current;
-    if (!composer) {
-      return undefined;
-    }
-
-    const pane = timelinePaneRef.current;
-    const previousHeight = composer.getBoundingClientRect().height;
-    const shouldPreserveBottom = pane
-      ? isNearBottom(pane) || pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current
-      : pinnedToBottomRef.current || preserveBottomOnNextPaneResizeRef.current;
-
-    composer.style.height = "0px";
-    composer.style.height = `${Math.min(composer.scrollHeight, 220)}px`;
-
-    const nextHeight = composer.getBoundingClientRect().height;
-    if (Math.abs(nextHeight - previousHeight) >= 1 && shouldPreserveBottom) {
-      preserveBottomOnNextPaneResizeRef.current = true;
-      requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          preserveBottomOnNextPaneResizeRef.current = false;
-          if (pinnedToBottomRef.current) {
-            requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-          }
-        });
-      });
-    }
-  }, [composerDraft, requestPinnedBottomAlignment]);
-
-  useLayoutEffect(() => {
-    if (snapshot?.activeView !== "threads" || !selectedSession) {
-      return undefined;
-    }
-
-    return () => {
-      saveTimelineScrollStateOnLeave(selectedSessionKey);
-    };
-  }, [selectedSession, selectedSessionKey, snapshot?.activeView]);
-
-  useLayoutEffect(() => {
-    const pane = timelinePaneRef.current;
-    if (!pane || !selectedSession || snapshot?.activeView !== "threads") {
-      previousTimelinePaneSizeRef.current = null;
-      return undefined;
-    }
-
-    const stickToBottomAfterLayoutChange = () => {
-      preserveBottomOnNextPaneResizeRef.current = false;
-      pinnedToBottomRef.current = true;
-      window.requestAnimationFrame(() => {
-        requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-        window.requestAnimationFrame(() => {
-          if (pinnedToBottomRef.current) {
-            requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-          }
-        });
-      });
-    };
-
-    const updateMeasuredSize = (nextSize: { width: number; height: number }) => {
-      const previousSize = previousTimelinePaneSizeRef.current;
-      previousTimelinePaneSizeRef.current = nextSize;
-      const shouldStickToBottom = preserveBottomOnNextPaneResizeRef.current || pinnedToBottomRef.current;
-      const widthChanged = previousSize ? Math.abs(nextSize.width - previousSize.width) >= 1 : false;
-      const heightChanged = previousSize ? Math.abs(nextSize.height - previousSize.height) >= 1 : false;
-      if (!previousSize || (!widthChanged && !heightChanged) || !shouldStickToBottom) {
-        return;
-      }
-
-      stickToBottomAfterLayoutChange();
-    };
-
-    const paneRect = pane.getBoundingClientRect();
-    updateMeasuredSize({ width: paneRect.width, height: paneRect.height });
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) {
-        return;
-      }
-      updateMeasuredSize({ width: entry.contentRect.width, height: entry.contentRect.height });
-    });
-
-    resizeObserver.observe(pane);
-    return () => {
-      resizeObserver.disconnect();
-      previousTimelinePaneSizeRef.current = null;
-    };
-  }, [requestPinnedBottomAlignment, selectedSessionKey, sidePanelMode, snapshot?.activeView, timelinePaneMountVersion]);
-
-  useEffect(() => {
-    const pane = timelinePaneRef.current;
-    if (!pane || !selectedSession) {
-      return;
-    }
-
-    const marker = buildTranscriptChangeMarker(selectedSessionKey, activeTranscript);
-    if (marker === lastTranscriptMarkerRef.current) {
-      return;
-    }
-    lastTranscriptMarkerRef.current = marker;
-
-    if (pinnedToBottomRef.current) {
-      requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-      return;
-    }
-
-    setShowJumpToLatest(true);
-  }, [activeTranscript, requestPinnedBottomAlignment, selectedSession, selectedSessionKey]);
-
-  const handleTimelineContentHeightChange = useCallback((state?: { readonly wasAtBottom: boolean }) => {
-    if (state?.wasAtBottom) {
-      pinnedToBottomRef.current = true;
-    }
-    if (!pinnedToBottomRef.current && !preserveBottomOnNextPaneResizeRef.current) {
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      if (!pinnedToBottomRef.current && !preserveBottomOnNextPaneResizeRef.current) {
-        return;
-      }
-      requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-    });
-  }, [requestPinnedBottomAlignment]);
+  }, [selectedSession, selectedWorkspace?.id, snapshot]);
 
   const sidePanelAvailable = snapshot?.activeView === "threads" && Boolean(selectedWorkspace && selectedSession);
   useEffect(() => {
@@ -1632,6 +589,10 @@ export default function App() {
   }
 
   const showTerminalTakeover = isTerminalVisibleForSelectedThread && isTerminalTakeoverForSelectedThread && Boolean(selectedWorkspace);
+  const secondarySurfaceView =
+    snapshot.activeView === "settings" || snapshot.activeView === "skills" || snapshot.activeView === "extensions"
+      ? snapshot.activeView
+      : null;
   const mainClassName = [
     "main",
     sidePanelMode ? "main--with-side-panel" : "",
@@ -1668,7 +629,7 @@ export default function App() {
     const nextWorkspaceId =
       workspaceId && rootWorkspaceOptions.some((workspace) => workspace.id === workspaceId)
         ? workspaceId
-        : skillsWorkspace?.id || rootWorkspaceOptions[0]?.id || "";
+        : skillsWorkspaceId || rootWorkspaceOptions[0]?.id || "";
     if (nextWorkspaceId) {
       setSkillsWorkspaceId(nextWorkspaceId);
     }
@@ -1679,207 +640,12 @@ export default function App() {
     const nextWorkspaceId =
       workspaceId && rootWorkspaceOptions.some((workspace) => workspace.id === workspaceId)
         ? workspaceId
-        : extensionsWorkspace?.id || rootWorkspaceOptions[0]?.id || "";
+        : extensionsWorkspaceId || rootWorkspaceOptions[0]?.id || "";
     if (nextWorkspaceId) {
       setExtensionsWorkspaceId(nextWorkspaceId);
     }
     setActiveView("extensions");
   };
-
-  const openNewThreadSurface = (workspaceId?: string) => {
-    setPendingNewThreadWorkspaceId("");
-    resetNewThreadSurface(workspaceId);
-    setActiveView("new-thread");
-  };
-
-  const handleSelectNewThreadWorkspace = (workspaceId: string) => {
-    setPendingNewThreadWorkspaceId("");
-    setNewThreadRootWorkspaceId(workspaceId);
-    setNewThreadAttachments([]);
-    setNewThreadProvider(undefined);
-    setNewThreadModelId(undefined);
-    setNewThreadThinkingLevel(undefined);
-    setNewThreadComposerError(undefined);
-  };
-
-  const submitComposerDraft = (options: { readonly deliverAs?: "steer" | "followUp" } = {}) => {
-    if (!selectedSession) {
-      return;
-    }
-
-    const hasComposerInput = composerDraft.trim().length > 0 || composerAttachments.length > 0;
-    if (selectedSession.status === "running" && !hasComposerInput) {
-      void updateSnapshot(api, setSnapshot, () => api.cancelCurrentRun());
-      return;
-    }
-
-    if (!hasComposerInput) {
-      return;
-    }
-    if (selectedSessionModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    const treeCommand = parseTreeComposerCommand(composerDraft);
-    if (treeCommand?.type === "error") {
-      setSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              lastError: treeCommand.message,
-            }
-          : current,
-      );
-      return;
-    }
-    if (treeCommand?.type === "tree") {
-      openTreeModal();
-      return;
-    }
-
-    const previousDraft = composerDraft;
-    setComposerDraft("");
-    setAttachmentsClearedOnSubmit(true);
-    void (async () => {
-      const nextState = await updateSnapshot(api, setSnapshot, () =>
-        api.submitComposer(previousDraft, selectedSession.status === "running" ? { deliverAs: options.deliverAs ?? "followUp" } : undefined),
-      );
-      // Only apply the resolved draft if the user hasn't typed into the composer during the
-      // in-flight submit; otherwise their new input would be clobbered.
-      if (composerDraftRef.current === "") {
-        setComposerDraft(nextState.composerDraft);
-      }
-      setAttachmentsClearedOnSubmit(false);
-    })().catch(() => {
-      if (composerDraftRef.current === "") {
-        setComposerDraft(previousDraft);
-      }
-      setAttachmentsClearedOnSubmit(false);
-    });
-  };
-
-  const handlePickAttachments = () => {
-    void updateSnapshot(api, setSnapshot, () => api.pickComposerAttachments());
-  };
-
-  const handleRemoveAttachment = (attachmentId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.removeComposerAttachment(attachmentId));
-  };
-
-  const handleEditQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.editQueuedComposerMessage(messageId, composerDraft)).then(() => {
-      composerRef.current?.focus();
-    });
-  };
-
-  const handleCancelQueuedEdit = () => {
-    void updateSnapshot(api, setSnapshot, () => api.cancelQueuedComposerEdit()).then(() => {
-      composerRef.current?.focus();
-    });
-  };
-
-  const handleRemoveQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.removeQueuedComposerMessage(messageId));
-  };
-
-  const handleSteerQueuedMessage = (messageId: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.steerQueuedComposerMessage(messageId));
-  };
-
-  const handleNewThreadAddAttachments = (files: File[]) => {
-    void readComposerAttachmentsFromFiles(files).then((attachments) => {
-      if (attachments.length === 0) {
-        return;
-      }
-      setNewThreadAttachments((current) => [...current, ...attachments]);
-    });
-  };
-
-  const handleNewThreadRemoveAttachment = (attachmentId: string) => {
-    setNewThreadAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
-  };
-
-  const handleImagePaste = (event: ClipboardEvent<HTMLDivElement>, onFiles: (files: File[]) => void) => {
-    const files = extractImageFilesFromClipboardData(event.clipboardData);
-    if (files.length === 0) {
-      return;
-    }
-    event.preventDefault();
-    onFiles(files);
-  };
-
-  const handleAttachmentDrop = (event: DragEvent<HTMLDivElement>, onFiles: (files: File[]) => void) => {
-    event.preventDefault();
-    const files = extractFilesFromDataTransfer(event.dataTransfer);
-    if (files.length === 0) {
-      return;
-    }
-    onFiles(files);
-  };
-
-  const handleComposerPaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    handleImagePaste(event, (files) => {
-      void addAttachmentsToSessionComposer(files);
-    });
-  };
-
-  const handleNewThreadComposerPaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    handleImagePaste(event, handleNewThreadAddAttachments);
-  };
-
-  const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
-    handleAttachmentDrop(event, (files) => {
-      void addAttachmentsToSessionComposer(files);
-    });
-  };
-
-  const handleNewThreadComposerDrop = (event: DragEvent<HTMLDivElement>) => {
-    handleAttachmentDrop(event, handleNewThreadAddAttachments);
-  };
-
-  async function addAttachmentsToSessionComposer(files: File[]) {
-    if (!api) {
-      return;
-    }
-    const valid = await readComposerAttachmentsFromFiles(files);
-    if (valid.length === 0) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments(valid));
-  }
-
-  const handleClipboardImageShortcut = (
-    event: KeyboardEvent<HTMLTextAreaElement>,
-    onImage: (attachment: ComposerImageAttachment) => void,
-  ): boolean => {
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "v") {
-      return false;
-    }
-
-    const clipboardImage = api?.readClipboardImage();
-    if (!clipboardImage) {
-      return false;
-    }
-
-    event.preventDefault();
-    onImage(clipboardImage);
-    return true;
-  };
-
-  function handlePastedClipboardImage(clipboardImage: ComposerImageAttachment) {
-    const activeElement = document.activeElement;
-    if (activeElement === composerRef.current) {
-      if (!api) {
-        return;
-      }
-      void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments([clipboardImage]));
-      return;
-    }
-
-    if (activeElement === newThreadComposerRef.current) {
-      setNewThreadAttachments((current) => [...current, clipboardImage]);
-    }
-  }
 
   const handleSetSessionModel = (provider: string, modelId: string) => {
     if (!selectedWorkspace || !selectedSession) {
@@ -1903,207 +669,13 @@ export default function App() {
     );
   };
 
-  const handleSetDefaultModel = (provider: string, modelId: string) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setDefaultModel(settingsWorkspace.id, provider, modelId));
-  };
-
-  const handleSetThinkingLevel = (thinkingLevel: RuntimeSnapshot["settings"]["defaultThinkingLevel"]) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setDefaultThinkingLevel(settingsWorkspace.id, thinkingLevel));
-  };
-
-  const handleToggleSkillCommands = (enabled: boolean) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setEnableSkillCommands(settingsWorkspace.id, enabled));
-  };
-
-  const handleSetScopedModelPatterns = (patterns: readonly string[]) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setScopedModelPatterns(settingsWorkspace.id, patterns));
-  };
-
-  const handleSetModelSettingsScopeMode = (mode: "app-global" | "per-repo") => {
-    if (!api) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setModelSettingsScopeMode(mode));
-  };
-
-  const handleLoginProvider = (providerId: string) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.loginProvider(settingsWorkspace.id, providerId));
-  };
-
-  const handleLogoutProvider = (providerId: string) => {
-    if (!settingsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.logoutProvider(settingsWorkspace.id, providerId));
-  };
-
-  const handleSetProviderApiKey = async (providerId: string, apiKey: string): Promise<string | undefined> => {
-    if (!api || !settingsWorkspace) {
-      return "Select a workspace first.";
-    }
-    const state = await updateSnapshot(api, setSnapshot, () =>
-      api.setProviderApiKey(settingsWorkspace.id, providerId, apiKey),
-    );
-    return state.lastError;
-  };
-
-  const handleRemoveProviderApiKey = async (providerId: string): Promise<string | undefined> => {
-    if (!api || !settingsWorkspace) {
-      return "Select a workspace first.";
-    }
-    const state = await updateSnapshot(api, setSnapshot, () =>
-      api.logoutProvider(settingsWorkspace.id, providerId),
-    );
-    return state.lastError;
-  };
-
-  const handleSaveCustomProvider = async (config: CustomProviderConfig): Promise<string | undefined> => {
-    if (!api || !settingsWorkspace) {
-      return "Select a workspace first.";
-    }
-    const state = await updateSnapshot(api, setSnapshot, () =>
-      api.setCustomProvider(settingsWorkspace.id, config),
-    );
-    return state.lastError;
-  };
-
-  const handleDeleteCustomProvider = async (providerId: string): Promise<string | undefined> => {
-    if (!api || !settingsWorkspace) {
-      return "Select a workspace first.";
-    }
-    const state = await updateSnapshot(api, setSnapshot, () =>
-      api.deleteCustomProvider(settingsWorkspace.id, providerId),
-    );
-    return state.lastError;
-  };
-
-  const handleToggleSkill = (filePath: string, enabled: boolean) => {
-    if (!skillsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setSkillEnabled(skillsWorkspace.id, filePath, enabled));
-  };
-
-  const handleOpenSkillFolder = (filePath: string) => {
-    if (!skillsWorkspace) {
-      return;
-    }
-    void api.openSkillInFinder(skillsWorkspace.id, filePath);
-  };
-
-  const handleToggleExtension = (filePath: string, enabled: boolean) => {
-    if (!extensionsWorkspace) {
-      return;
-    }
-    void updateSnapshot(api, setSnapshot, () => api.setExtensionEnabled(extensionsWorkspace.id, filePath, enabled));
-  };
-
-  const handleOpenExtensionFolder = (filePath: string) => {
-    if (!extensionsWorkspace) {
-      return;
-    }
-    void api.openExtensionInFinder(extensionsWorkspace.id, filePath);
-  };
-
   const handleTrySkill = (command: string) => {
     void updateSnapshot(api, setSnapshot, () => api.setActiveView("threads"));
     slashMenu.fillComposerFromSlash(command);
   };
 
-  const handleSetThemeMode = (mode: "system" | "light" | "dark") => {
-    if (!api) return;
-    void updateSnapshot(api, setSnapshot, () => api.setThemeMode(mode));
-  };
-
-  const handleSetThemePresetId = (presetId: DesktopAppState["themePresetId"]) => {
-    if (!api) return;
-    void updateSnapshot(api, setSnapshot, () => api.setThemePresetId(presetId));
-  };
-
-  const handleSetNotificationPreferences = (preferences: Partial<DesktopAppState["notificationPreferences"]>) => {
-    void updateSnapshot(api, setSnapshot, () => api.setNotificationPreferences(preferences));
-  };
-
-  const handleSetIntegratedTerminalShell = (shellPath: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.setIntegratedTerminalShell(shellPath));
-  };
-
-  const handleRequestNotificationPermission = () => {
-    if (!api?.requestNotificationPermission) {
-      return;
-    }
-    setNotificationPermissionPending(true);
-    void api
-      .requestNotificationPermission()
-      .then((status) => {
-        setNotificationPermissionStatus(status);
-      })
-      .finally(() => {
-        setNotificationPermissionPending(false);
-      });
-  };
-
-  const handleOpenSystemNotificationSettings = () => {
-    if (!api?.openSystemNotificationSettings) {
-      return;
-    }
-    setNotificationPermissionPending(true);
-    void api
-      .openSystemNotificationSettings()
-      .finally(() => {
-        setNotificationPermissionPending(false);
-      });
-  };
-
   const handleArchiveSession = (target: { workspaceId: string; sessionId: string }) => {
     void updateSnapshot(api, setSnapshot, () => api.archiveSession(target));
-  };
-
-  const flushComposerDraft = () => {
-    if (composerDraftWriteTimerRef.current !== null) {
-      window.clearTimeout(composerDraftWriteTimerRef.current);
-      composerDraftWriteTimerRef.current = null;
-    }
-    const pending = pendingComposerDraftRef.current;
-    pendingComposerDraftRef.current = null;
-    if (pending !== null && api) {
-      void api.updateComposerDraft(pending);
-    }
-  };
-  flushComposerDraftRef.current = flushComposerDraft;
-
-  const saveCurrentTimelineScrollState = () => {
-    const pane = timelinePaneRef.current;
-    if (!pane || !selectedSessionKey) {
-      return;
-    }
-    const pinned = isNearBottom(pane);
-    lastTimelineScrollTopBySessionRef.current.set(selectedSessionKey, pane.scrollTop);
-    lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, pinned);
-    if (pinned) {
-      clearTimelineOffBottomState(selectedSessionKey);
-    } else {
-      preserveBottomOnNextPaneResizeRef.current = false;
-      resetExactBottomRestoreState();
-      bottomAlignmentGenerationRef.current += 1;
-      saveTimelineOffBottomState(selectedSessionKey, pane);
-      protectedTimelineScrollSessionKeysRef.current.add(selectedSessionKey);
-    }
   };
 
   const handleSelectSession = (target: { workspaceId: string; sessionId: string }) => {
@@ -2154,316 +726,25 @@ export default function App() {
     void updateSnapshot(api, setSnapshot, () => api.setSessionPinned(target, pinned));
   };
 
-  const handleStartThread = () => {
-    if (!newThreadRootWorkspaceId || (!newThreadPrompt.trim() && newThreadAttachments.length === 0)) {
-      return;
-    }
-    if (newThreadModelOnboarding.requiresModelSelection) {
-      return;
-    }
-    const treeCommand = parseTreeComposerCommand(newThreadPrompt);
-    if (treeCommand?.type === "error") {
-      setNewThreadComposerError(treeCommand.message);
-      return;
-    }
-    if (treeCommand?.type === "tree") {
-      setNewThreadComposerError("/tree is only available inside an existing session.");
-      return;
-    }
-    const modelConfig = {
-      prompt: newThreadPrompt,
-      attachments: newThreadAttachments,
-      provider: resolvedNewThreadProvider,
-      modelId: resolvedNewThreadModelId,
-      thinkingLevel: resolvedNewThreadThinkingLevel,
-    };
-    const input: StartThreadInput = {
-      rootWorkspaceId: newThreadRootWorkspaceId,
-      environment: newThreadEnvironment,
-      ...modelConfig,
-    };
-    wsMenu.expandWorkspace(newThreadRootWorkspaceId);
-    void updateSnapshot(api, setSnapshot, () =>
-      api.startThread(input),
-    ).then(() => {
-      setNewThreadPrompt("");
-      setNewThreadAttachments([]);
-      setNewThreadProvider(undefined);
-      setNewThreadModelId(undefined);
-      setNewThreadThinkingLevel(undefined);
-      setNewThreadEnvironment("local");
-    });
-  };
-
-  const handleTimelineScroll = () => {
-    const pane = timelinePaneRef.current;
-    if (!pane) {
-      return;
-    }
-
-    const pinned = isNearBottom(pane);
-    const hasRecentScrollIntent = window.performance.now() <= timelineScrollIntentUntilRef.current;
-    if (
-      !pinned &&
-      !hasRecentScrollIntent &&
-      (pinnedToBottomRef.current ||
-        preserveBottomOnNextPaneResizeRef.current ||
-        exactBottomRestoreSessionKeyRef.current === selectedSessionKey ||
-        deferredPinnedBottomAlignmentRef.current)
-    ) {
-      pinnedToBottomRef.current = true;
-      preserveBottomOnNextPaneResizeRef.current = true;
-      lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, true);
-      clearTimelineOffBottomState(selectedSessionKey);
-      setShowJumpToLatest(false);
-      requestPinnedBottomAlignment("auto", { preferExactRestore: true });
-      return;
-    }
-
-    if (!pinned) {
-      preserveBottomOnNextPaneResizeRef.current = false;
-      resetExactBottomRestoreState();
-      bottomAlignmentGenerationRef.current += 1;
-    }
-
-    pinnedToBottomRef.current = pinned;
-    lastTimelineScrollTopBySessionRef.current.set(selectedSessionKey, pane.scrollTop);
-    lastTimelinePinnedBySessionRef.current.set(selectedSessionKey, pinned);
-    if (pinned) {
-      clearTimelineOffBottomState(selectedSessionKey);
-    } else if (selectedSessionKey) {
-      saveTimelineOffBottomState(selectedSessionKey, pane);
-    }
-    if (pinned) {
-      setShowJumpToLatest(false);
-    }
-  };
-
-  const handleTimelineScrollIntent = () => {
-    timelineScrollIntentUntilRef.current = window.performance.now() + TIMELINE_SCROLL_INTENT_WINDOW_MS;
-    cancelPendingTimelineOffBottomRestore(selectedSessionKey);
-  };
-
-  const jumpToLatest = () => {
-    cancelPendingTimelineOffBottomRestore(selectedSessionKey);
-    if (selectedSessionKey) {
-      clearTimelineOffBottomState(selectedSessionKey);
-    }
-    pinnedToBottomRef.current = true;
-    requestPinnedBottomAlignment("smooth", { preferExactRestore: true });
-  };
-
-  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (handleClipboardImageShortcut(event, (clipboardImage) => {
-      void updateSnapshot(api, setSnapshot, () => api.addComposerAttachments([clipboardImage]));
-    })) {
-      return;
-    }
-
-    if (mentionMenu.handleMentionKeyDown(event)) {
-      return;
-    }
-
-    if (slashMenu.handleSlashKeyDown(event)) {
-      return;
-    }
-
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && selectedSession?.status === "running") {
-      event.preventDefault();
-      submitComposerDraft({ deliverAs: (event.metaKey || event.ctrlKey) ? "steer" : "followUp" });
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-      return;
-    }
-
-    event.preventDefault();
-    if (!composerDraft.trim() && composerAttachments.length === 0) {
-      return;
-    }
-    if (selectedSessionModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    submitComposerDraft();
-  };
-
-  const handleNewThreadComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (handleClipboardImageShortcut(event, (clipboardImage) => {
-      setNewThreadAttachments((current) => [...current, clipboardImage]);
-    })) {
-      return;
-    }
-
-    if (newThreadMentionMenu.handleMentionKeyDown(event)) {
-      return;
-    }
-
-    if (newThreadSlashMenu.handleSlashKeyDown(event)) {
-      return;
-    }
-
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-      return;
-    }
-
-    event.preventDefault();
-    if (!newThreadPrompt.trim() && newThreadAttachments.length === 0) {
-      return;
-    }
-    if (newThreadModelOnboarding.requiresModelSelection) {
-      return;
-    }
-
-    handleStartThread();
-  };
-
-  const settingsNav = [
-    { id: "appearance", label: "Appearance" },
-    { id: "general", label: "General" },
-    { id: "providers", label: "Providers" },
-    { id: "models", label: "Models" },
-    { id: "notifications", label: "Notifications" },
-  ] as const;
-
-  if (snapshot.activeView === "settings") {
+  if (secondarySurfaceView) {
     return (
-      <SecondarySurface
-        activeNavId={settingsSection}
-        navItems={settingsNav}
+      <SecondarySurfaces
+        api={api}
+        snapshot={snapshot}
+        setSnapshot={setSnapshot}
+        activeView={secondarySurfaceView}
+        rootWorkspaceOptions={rootWorkspaceOptions}
+        settingsSection={settingsSection}
+        onSelectSettingsSection={setSettingsSection}
+        settingsWorkspaceId={settingsWorkspaceId}
+        onSelectSettingsWorkspace={setSettingsWorkspaceId}
+        skillsWorkspaceId={skillsWorkspaceId}
+        onSelectSkillsWorkspace={setSkillsWorkspaceId}
+        extensionsWorkspaceId={extensionsWorkspaceId}
+        onSelectExtensionsWorkspace={setExtensionsWorkspaceId}
         onBack={() => setActiveView("threads")}
-        onSelectNav={(section) => setSettingsSection(section as SettingsSection)}
-        testId="settings-surface"
-        title="Settings"
-      >
-        {settingsSection === "providers" || (settingsSection === "models" && snapshot.modelSettingsScopeMode === "per-repo") ? (
-          <div className="surface-toolbar">
-            <label className="surface-toolbar__field">
-              <span>Workspace</span>
-              <select
-                value={settingsWorkspace?.id ?? ""}
-                onChange={(event) => setSettingsWorkspaceId(event.target.value)}
-              >
-                {rootWorkspaceOptions.map((workspace) => (
-                  <option key={workspace.id} value={workspace.id}>
-                    {workspace.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        ) : null}
-        <SettingsView
-          workspace={settingsWorkspace}
-          runtime={settingsSection === "models" ? settingsModelRuntime : settingsRuntime}
-          section={settingsSection}
-          notificationPreferences={snapshot.notificationPreferences}
-          notificationPermissionStatus={notificationPermissionStatus}
-          notificationPermissionPending={notificationPermissionPending}
-          modelSettingsScopeMode={snapshot.modelSettingsScopeMode}
-          integratedTerminalShell={snapshot.integratedTerminalShell}
-          themeMode={snapshot.themeMode}
-          themePresetId={snapshot.themePresetId}
-          enableTransparency={snapshot.enableTransparency}
-          onLoginProvider={handleLoginProvider}
-          onLogoutProvider={handleLogoutProvider}
-          onSetProviderApiKey={handleSetProviderApiKey}
-          onRemoveProviderApiKey={handleRemoveProviderApiKey}
-          onSaveCustomProvider={handleSaveCustomProvider}
-          onDeleteCustomProvider={handleDeleteCustomProvider}
-          onSetModelSettingsScopeMode={handleSetModelSettingsScopeMode}
-          onSetDefaultModel={handleSetDefaultModel}
-          onSetNotificationPreferences={handleSetNotificationPreferences}
-          onSetIntegratedTerminalShell={handleSetIntegratedTerminalShell}
-          onRequestNotificationPermission={handleRequestNotificationPermission}
-          onOpenSystemNotificationSettings={handleOpenSystemNotificationSettings}
-          onSetScopedModelPatterns={handleSetScopedModelPatterns}
-          onSetThemeMode={handleSetThemeMode}
-          onSetThemePresetId={handleSetThemePresetId}
-          onSetThinkingLevel={handleSetThinkingLevel}
-          onToggleSkillCommands={handleToggleSkillCommands}
-          onSetEnableTransparency={(enabled) => {
-            void updateSnapshot(api, setSnapshot, () => api.setEnableTransparency(enabled));
-          }}
-        />
-      </SecondarySurface>
-    );
-  }
-
-  if (snapshot.activeView === "skills") {
-    return (
-      <SecondarySurface onBack={() => setActiveView("threads")} testId="skills-surface" title="Skills">
-        <div className="surface-toolbar">
-          <label className="surface-toolbar__field">
-            <span>Workspace</span>
-            <select
-              value={skillsWorkspace?.id ?? ""}
-              onChange={(event) => setSkillsWorkspaceId(event.target.value)}
-            >
-              {rootWorkspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <SkillsView
-          workspace={skillsWorkspace}
-          runtime={skillsRuntime}
-          onOpenSkillFolder={handleOpenSkillFolder}
-          onRefresh={() => {
-            if (!skillsWorkspace) {
-              return;
-            }
-            void updateSnapshot(api, setSnapshot, () => api.refreshRuntime(skillsWorkspace.id));
-          }}
-          onToggleSkill={handleToggleSkill}
-          onTrySkill={(skill) =>
-            handleTrySkill(
-              skill.filePath
-                ? `${skill.slashCommand} `
-                : "Create a new skill for this workspace and explain which files you will add.",
-            )
-          }
-        />
-      </SecondarySurface>
-    );
-  }
-
-  if (snapshot.activeView === "extensions") {
-    return (
-      <SecondarySurface onBack={() => setActiveView("threads")} testId="extensions-surface" title="Extensions">
-        <div className="surface-toolbar">
-          <label className="surface-toolbar__field">
-            <span>Workspace</span>
-            <select
-              value={extensionsWorkspace?.id ?? ""}
-              onChange={(event) => setExtensionsWorkspaceId(event.target.value)}
-            >
-              {rootWorkspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <ExtensionsView
-          workspace={extensionsWorkspace}
-          runtime={extensionsRuntime}
-          commandCompatibility={extensionsCommandCompatibility}
-          onOpenExtensionFolder={handleOpenExtensionFolder}
-          onRefresh={() => {
-            if (!extensionsWorkspace) {
-              return;
-            }
-            void updateSnapshot(api, setSnapshot, () => api.refreshRuntime(extensionsWorkspace.id));
-          }}
-          onToggleExtension={handleToggleExtension}
-        />
-      </SecondarySurface>
+        onTrySkill={handleTrySkill}
+      />
     );
   }
 
@@ -2491,7 +772,7 @@ export default function App() {
           api={api}
           setSnapshot={setSnapshot}
           updateSnapshot={updateSnapshot}
-          onNewThread={() => openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
+          onNewThread={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
           onSetActiveView={setActiveView}
           onOpenSkills={openSkills}
           onOpenExtensions={openExtensions}
@@ -2523,6 +804,8 @@ export default function App() {
           onToggleChanges={toggleChangesPanel}
           filesVisible={sidePanelMode === "files"}
           onToggleFiles={toggleFilesPanel}
+          promptRailVisible={promptRailVisible}
+          onTogglePromptRail={togglePromptRail}
         />
 
         {showTerminalTakeover ? (
@@ -2533,50 +816,50 @@ export default function App() {
           rootWorkspaceOptions.length > 0 ? (
             <NewThreadView
               workspaces={rootWorkspaceOptions}
-              selectedWorkspaceId={newThreadRootWorkspaceId || rootWorkspaceOptions[0]?.id || ""}
-              runtime={newThreadRuntime}
-              environment={newThreadEnvironment}
-              prompt={newThreadPrompt}
-              attachments={newThreadAttachments}
-              lastError={newThreadComposerError}
-              provider={resolvedNewThreadProvider}
-              modelId={resolvedNewThreadModelId}
-              thinkingLevel={resolvedNewThreadThinkingLevel}
-              modelOnboarding={newThreadModelOnboarding}
-              composerRef={newThreadComposerRef}
-              activeSlashCommand={newThreadSlashMenu.activeSlashFlow?.command}
-              activeSlashCommandMeta={newThreadSlashMenu.activeSlashFlow?.command?.description}
-              slashSections={newThreadSlashMenu.slashSections}
-              slashOptions={newThreadSlashMenu.slashOptions}
-              selectedSlashCommand={newThreadSlashMenu.activeSlashOptionCommand ?? newThreadSlashMenu.selectedSlashCommand}
-              selectedSlashOption={newThreadSlashMenu.selectedSlashOption}
-              showSlashMenu={newThreadSlashMenu.showSlashMenu}
-              showSlashOptionMenu={newThreadSlashMenu.showSlashOptionMenu}
-              slashOptionEmptyState={newThreadSlashMenu.slashOptionEmptyState}
-              showMentionMenu={newThreadMentionMenu.showMentionMenu}
-              mentionOptions={newThreadMentionMenu.mentionOptions}
-              selectedMentionIndex={newThreadMentionMenu.selectedIndex}
-              onChangePrompt={setNewThreadPrompt}
-              onSelectEnvironment={setNewThreadEnvironment}
-              onSelectWorkspace={handleSelectNewThreadWorkspace}
-              onSetModel={(provider, modelId) => { setNewThreadProvider(provider); setNewThreadModelId(modelId); }}
-              onSetThinking={setNewThreadThinkingLevel}
-              onOpenModelSettings={(section) => openSettings(newThreadWorkspace?.id, section)}
-              onComposerKeyDown={handleNewThreadComposerKeyDown}
-              onComposerPaste={handleNewThreadComposerPaste}
-              onComposerDrop={handleNewThreadComposerDrop}
-              onClearSlashCommand={newThreadSlashMenu.resetSlashUi}
+              selectedWorkspaceId={newThread.rootWorkspaceId || rootWorkspaceOptions[0]?.id || ""}
+              runtime={newThread.runtime}
+              environment={newThread.environment}
+              prompt={newThread.prompt}
+              attachments={newThread.attachments}
+              lastError={newThread.composerError}
+              provider={newThread.resolvedProvider}
+              modelId={newThread.resolvedModelId}
+              thinkingLevel={newThread.resolvedThinkingLevel}
+              modelOnboarding={newThread.modelOnboarding}
+              composerRef={newThread.composerRef}
+              activeSlashCommand={newThread.slashMenu.activeSlashFlow?.command}
+              activeSlashCommandMeta={newThread.slashMenu.activeSlashFlow?.command?.description}
+              slashSections={newThread.slashMenu.slashSections}
+              slashOptions={newThread.slashMenu.slashOptions}
+              selectedSlashCommand={newThread.slashMenu.activeSlashOptionCommand ?? newThread.slashMenu.selectedSlashCommand}
+              selectedSlashOption={newThread.slashMenu.selectedSlashOption}
+              showSlashMenu={newThread.slashMenu.showSlashMenu}
+              showSlashOptionMenu={newThread.slashMenu.showSlashOptionMenu}
+              slashOptionEmptyState={newThread.slashMenu.slashOptionEmptyState}
+              showMentionMenu={newThread.mentionMenu.showMentionMenu}
+              mentionOptions={newThread.mentionMenu.mentionOptions}
+              selectedMentionIndex={newThread.mentionMenu.selectedIndex}
+              onChangePrompt={newThread.setPrompt}
+              onSelectEnvironment={newThread.setEnvironment}
+              onSelectWorkspace={newThread.selectWorkspace}
+              onSetModel={(provider, modelId) => { newThread.setProvider(provider); newThread.setModelId(modelId); }}
+              onSetThinking={newThread.setThinkingLevel}
+              onOpenModelSettings={(section) => openSettings(newThread.workspace?.id, section)}
+              onComposerKeyDown={newThread.handleComposerKeyDown}
+              onComposerPaste={newThread.handleComposerPaste}
+              onComposerDrop={newThread.handleComposerDrop}
+              onClearSlashCommand={newThread.slashMenu.resetSlashUi}
               onSelectSlashCommand={(command) => {
-                newThreadSlashMenu.applySlashCommandSelection(command, "click");
+                newThread.slashMenu.applySlashCommandSelection(command, "click");
               }}
               onSelectSlashOption={(option) => {
-                newThreadSlashMenu.applySlashOptionSelection(option);
+                newThread.slashMenu.applySlashOptionSelection(option);
               }}
-              onSelectMention={newThreadMentionMenu.insertMention}
-              onEnableMentionExtension={newThreadMentionMenu.enableMentionExtension}
-              onAddAttachments={handleNewThreadAddAttachments}
-              onRemoveAttachment={handleNewThreadRemoveAttachment}
-              onSubmit={handleStartThread}
+              onSelectMention={newThread.mentionMenu.insertMention}
+              onEnableMentionExtension={newThread.mentionMenu.enableMentionExtension}
+              onAddAttachments={newThread.addAttachments}
+              onRemoveAttachment={newThread.removeAttachment}
+              onSubmit={newThread.startThread}
             />
           ) : (
             <section className="canvas canvas--empty">
@@ -2637,6 +920,7 @@ export default function App() {
                   onContentHeightChange={handleTimelineContentHeightChange}
                   onViewFileInDiff={handleViewFileInDiff}
                   onForkFromMessage={selectedSession.status === "running" ? undefined : openForkModal}
+                  promptRailVisible={promptRailVisible}
                 />
               </div>
             </section>
@@ -2714,7 +998,7 @@ export default function App() {
                 error={forkModalState.error}
                 submitting={forkModalState.submitting}
                 messagePreview={forkModalState.messagePreview}
-                canUseWorktree={Boolean(rootWorkspace)}
+                canUseWorktree={canUseWorktree}
                 onClose={closeForkModal}
                 onSubmit={handleForkSubmit}
               />
@@ -2730,7 +1014,7 @@ export default function App() {
                 <button
                   className="button button--primary"
                   type="button"
-                  onClick={() => openNewThreadSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
+                  onClick={() => newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)}
                 >
                   New thread
                 </button>
@@ -2765,63 +1049,4 @@ export default function App() {
       </main>
     </div>
   );
-}
-
-function buildTranscriptChangeMarker(sessionKey: string, transcript: SelectedTranscriptRecord["transcript"]): string {
-  const lastItem = transcript.at(-1);
-  return `${sessionKey}:${transcript.length}:${lastItem ? JSON.stringify(lastItem) : ""}`;
-}
-
-function isNearBottom(element: HTMLDivElement): boolean {
-  const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
-  return remaining < 32;
-}
-
-function buildFileWorkbenchContexts({
-  workspaces,
-  selectedWorkspace,
-  selectedSessionTitle,
-  rootWorkspace,
-  activeWorktrees,
-}: {
-  readonly workspaces: readonly WorkspaceRecord[];
-  readonly selectedWorkspace: WorkspaceRecord | undefined;
-  readonly selectedSessionTitle: string | undefined;
-  readonly rootWorkspace: WorkspaceRecord | undefined;
-  readonly activeWorktrees: readonly WorktreeRecord[];
-}): readonly FileWorkbenchContext[] {
-  if (!selectedWorkspace) {
-    return [];
-  }
-
-  const workspacesById = new Map(workspaces.map((workspace) => [workspace.id, workspace] as const));
-  const contexts: FileWorkbenchContext[] = [{
-    workspace: selectedWorkspace,
-    role: "thread",
-    sessionTitle: selectedSessionTitle,
-  }];
-  const seenWorkspaceIds = new Set([selectedWorkspace.id]);
-
-  const addWorkspace = (
-    workspace: WorkspaceRecord | undefined,
-    role: FileWorkbenchContext["role"],
-    worktree?: WorktreeRecord,
-  ) => {
-    if (!workspace || seenWorkspaceIds.has(workspace.id)) {
-      return;
-    }
-    contexts.push({ workspace, role, worktree });
-    seenWorkspaceIds.add(workspace.id);
-  };
-
-  addWorkspace(rootWorkspace, "workspace");
-  for (const worktree of activeWorktrees) {
-    addWorkspace(
-      worktree.linkedWorkspaceId ? workspacesById.get(worktree.linkedWorkspaceId) : undefined,
-      "worktree",
-      worktree,
-    );
-  }
-
-  return contexts;
 }

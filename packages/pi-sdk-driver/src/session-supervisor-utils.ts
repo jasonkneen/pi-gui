@@ -363,8 +363,8 @@ export function messageText(message: Record<string, unknown>): string {
           ? stripSerializedFileAttachments(part.text, message.role).text
           : "",
       )
-      .join(" ")
-      .replace(/\s+/g, " ")
+      .filter((text) => text.length > 0)
+      .join("\n\n")
       .trim();
   }
 

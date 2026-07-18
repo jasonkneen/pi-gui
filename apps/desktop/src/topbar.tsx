@@ -1,6 +1,6 @@
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type { AppView, SessionRecord, WorkspaceRecord, WorktreeRecord } from "./desktop-state";
-import { DiffIcon, FileIcon, TerminalIcon } from "./icons";
+import { DiffIcon, FileIcon, PromptRailIcon, TerminalIcon } from "./icons";
 import { getDesktopShortcutLabel, type PiDesktopApi } from "./ipc";
 import type { WorkspaceMenuState } from "./hooks/use-workspace-menu";
 
@@ -23,6 +23,8 @@ interface TopbarProps {
   readonly onToggleChanges: () => void;
   readonly filesVisible: boolean;
   readonly onToggleFiles: () => void;
+  readonly promptRailVisible: boolean;
+  readonly onTogglePromptRail: () => void;
 }
 
 export function Topbar(props: TopbarProps) {
@@ -45,6 +47,8 @@ export function Topbar(props: TopbarProps) {
     onToggleChanges,
     filesVisible,
     onToggleFiles,
+    promptRailVisible,
+    onTogglePromptRail,
   } = props;
   const terminalShortcut = getDesktopShortcutLabel(api.platform, "J");
   const diffShortcut = getDesktopShortcutLabel(api.platform, "D");
@@ -153,6 +157,12 @@ export function Topbar(props: TopbarProps) {
           icon={<FileIcon />}
           label="Toggle files"
           onClick={onToggleFiles}
+        />
+        <TopbarActionButton
+          active={promptRailVisible}
+          icon={<PromptRailIcon />}
+          label={promptRailVisible ? "Hide prompt navigation" : "Show prompt navigation"}
+          onClick={onTogglePromptRail}
         />
       </div>
     </header>

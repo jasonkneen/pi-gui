@@ -1,0 +1,165 @@
+/* =============================================================================
+ * Design tokens — the scale foundation for the desktop renderer.
+ *
+ * Informed by the extracted Codex design system: 4px spacing base, compact
+ * 11/12/14/16px type ramp, squircle-ish radius ramp, alpha-mix-of-foreground
+ * borders, hairline-stroke elevation, and 0.15s ease-out motion.
+ *
+ * Dark mode is pure variable reassignment. Borders, overlays, accent tints,
+ * and status tints are expressed as color-mix() over foreground/accent/status
+ * colors that already flip in :root.dark (see base.css), so they adapt to the
+ * active theme without per-selector overrides. Only the handful of tokens with
+ * genuinely distinct light/dark values are reassigned in the :root.dark block.
+ * ========================================================================== */
+
+:root {
+  /* ---- Spacing (4px base) ------------------------------------------------ */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-2-5: 10px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  /* ---- Radius ramp ------------------------------------------------------- */
+  --radius-2xs: 2px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+  --radius-3xl: 16px;
+  --radius-4xl: 18px;
+  --radius-composer: 22px;
+  --radius-panel: 24px;
+  --radius-pill: 999px;
+  --radius-round: 50%;
+
+  /* ---- Type scale (compact, px-based like Codex) ------------------------- */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  --leading-tight: 1.25;
+  --leading-snug: 1.375;
+  --leading-normal: 1.5;
+
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+
+  --tracking-tight: -0.03em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.08em;
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --motion-fast: 0.12s;
+  --motion-base: 0.15s;
+  --motion-slow: 0.24s;
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- Borders — alpha mixes of the foreground color (auto-flip) --------- */
+  --border-light: color-mix(in srgb, var(--text-strong) 5%, transparent);
+  --border-default: color-mix(in srgb, var(--text-strong) 8%, transparent);
+  --border-heavy: color-mix(in srgb, var(--text-strong) 13%, transparent);
+
+  /* ---- Interaction overlays — alpha mixes of foreground (auto-flip) ------ */
+  --overlay-subtle: color-mix(in srgb, var(--text-strong) 4%, transparent);
+  --overlay-hover: color-mix(in srgb, var(--text-strong) 6%, transparent);
+  --overlay-active: color-mix(in srgb, var(--text-strong) 9%, transparent);
+
+  /* ---- Accent tints (auto-flip via --accent) ----------------------------- */
+  --accent-tint-bg: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-tint-bg-strong: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-tint-border: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-rail: color-mix(in srgb, var(--accent) 90%, transparent);
+
+  /* ---- Focus ring -------------------------------------------------------- */
+  --focus-ring-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  --focus-ring: 0 0 0 3px var(--focus-ring-color);
+  --focus-ring-border: color-mix(in srgb, var(--accent) 45%, transparent);
+
+  /* ---- Status tints ------------------------------------------------------ */
+  --success: #2ea043;
+  --success-ink: #2e6a3a;
+  --success-tint-bg: color-mix(in srgb, var(--success) 14%, transparent);
+  --danger-tint-bg: color-mix(in srgb, var(--error) 10%, transparent);
+  --danger-tint-border: color-mix(in srgb, var(--error) 18%, transparent);
+  --warning: #d97706;
+  --warning-ink: #a45a18;
+
+  /* ---- Semantic status signals — color = state, never decoration --------- */
+  /* One coherent language across sidebar / terminal / diff / notifications:  */
+  /* green = live/running, red = failed, amber = attention, grey = idle,      */
+  /* accent = selection/unseen. All derive from theme colors so they flip.    */
+  --status-running: var(--success);
+  --status-success: var(--success);
+  --status-error: var(--error);
+  --status-warning: var(--warning);
+  --status-neutral: color-mix(in srgb, var(--text-strong) 34%, transparent);
+
+  /* ---- Diff file-status dots (git status glyphs) ------------------------- */
+  --diff-added-ink: var(--success);
+  --diff-removed-ink: var(--error);
+  --diff-modified-ink: var(--warning);
+  --diff-untracked-ink: var(--status-neutral);
+
+  /* ---- Elevation — hairline stroke baked in (Codex signature) ------------ */
+  --elevation-hairline: 0 0 0 0.5px var(--border-heavy);
+  --elevation-popover: var(--elevation-hairline), var(--shadow-md);
+  --elevation-menu: var(--elevation-hairline), var(--shadow-lg);
+  --elevation-modal: var(--elevation-hairline), var(--shadow-xl);
+
+  /* ---- Code / diff / find / summary — distinct light/dark values --------- */
+  --code-inline-bg: #f2f4f8;
+  --code-block-bg: #eef2f8;
+  --code-ink: #25304a;
+  --code-border: #dfe3eb;
+
+  --diff-added-bg: color-mix(in srgb, var(--success) 14%, transparent);
+  --diff-removed-bg: color-mix(in srgb, var(--error) 14%, transparent);
+  --diff-header-bg: rgba(56, 132, 255, 0.08);
+
+  --find-match-bg: #fde68a;
+  --find-match-ink: #7a4b06;
+  --find-active-bg: #fbbf5a;
+  --find-active-ink: #6a3608;
+
+  --summary-card-bg: linear-gradient(180deg, rgba(255, 247, 226, 0.92) 0%, rgba(255, 252, 244, 0.98) 100%);
+  --summary-card-border: rgba(210, 177, 98, 0.36);
+  --summary-eyebrow: #a45a18;
+}
+
+:root.dark {
+  --success: #40c977;
+  --success-ink: #6ee7b7;
+  --warning-ink: #f0b25a;
+
+  --code-inline-bg: rgba(255, 255, 255, 0.08);
+  --code-block-bg: rgba(0, 0, 0, 0.25);
+  --code-ink: #e4e4e7;
+  --code-border: var(--line);
+
+  --diff-header-bg: rgba(56, 132, 255, 0.1);
+
+  --find-match-bg: #854d0e;
+  --find-match-ink: #fde68a;
+  --find-active-bg: #9a3412;
+  --find-active-ink: #fed7aa;
+
+  --summary-card-bg: linear-gradient(180deg, rgba(71, 55, 28, 0.58) 0%, rgba(46, 38, 24, 0.78) 100%);
+  --summary-card-border: rgba(210, 177, 98, 0.22);
+  --summary-eyebrow: #f2cd79;
+}

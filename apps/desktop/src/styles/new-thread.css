@@ -1,0 +1,127 @@
+/* =============================================================================
+ * New-thread empty state — the composer is the hero.
+ * Extracted from main.css; hero scale dialed back from marketing-size to a
+ * restrained, Codex-like empty state.
+ * ========================================================================== */
+
+.new-thread {
+  min-height: calc(100vh - 164px);
+  display: grid;
+  align-content: center;
+  gap: 20px;
+}
+
+.new-thread__hero {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.new-thread__logo {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+}
+
+.new-thread__logo svg {
+  width: 44px;
+  height: 44px;
+  display: block;
+}
+
+.new-thread__eyebrow {
+  color: var(--muted-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.new-thread__hero h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 30px;
+  font-weight: 640;
+  letter-spacing: -0.03em;
+}
+
+.new-thread__title {
+  margin: 0;
+}
+
+.new-thread__workspace-picker {
+  display: grid;
+  justify-items: center;
+}
+
+.new-thread__workspace {
+  padding: 8px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+}
+
+.new-thread__composer {
+  width: min(820px, 100%);
+  margin: 0 auto;
+}
+
+.new-thread__composer.composer {
+  padding: 0;
+  background: transparent;
+}
+
+.new-thread__composer .conversation--composer {
+  width: 100%;
+}
+
+.new-thread__environment-group {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.new-thread__environment {
+  padding: 7px 11px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.new-thread__environment--active {
+  border-color: var(--line-strong);
+  background: var(--accent-tint-bg);
+  color: var(--text-strong);
+}
+
+.new-thread__textarea {
+  min-height: 100px;
+  resize: vertical;
+  border: none;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.new-thread__textarea:focus {
+  outline: none;
+}
+
+.new-thread__hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.new-thread__hint-separator {
+  color: var(--muted-soft);
+}

@@ -1,5 +1,12 @@
 import type { PiSdkDriver, JsonCatalogStore } from "@pi-gui/pi-sdk-driver";
-import type { CreateSessionOptions, SessionConfig, SessionRef, SessionSnapshot, WorkspaceRef } from "@pi-gui/session-driver";
+import type {
+  CreateSessionOptions,
+  SessionConfig,
+  SessionDriverEvent,
+  SessionRef,
+  SessionSnapshot,
+  WorkspaceRef,
+} from "@pi-gui/session-driver";
 import type { RuntimeCommandRecord, RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type {
   AppView,
@@ -51,6 +58,9 @@ export interface AppStoreInternals {
   ensureSessionReady(sessionRef: SessionRef): Promise<SessionSnapshot | undefined>;
   ensureSessionSubscription(sessionRef: SessionRef): Promise<void>;
   ensureSessionSubscribed(sessionRef: SessionRef): Promise<void>;
+  subscribeToSessionEvents(
+    listener: (event: SessionDriverEvent, state: DesktopAppState) => void | Promise<void>,
+  ): () => void;
   refreshSessionCommandsFor(sessionRef: SessionRef): Promise<void>;
   getLearnedRuntimeCommandCompatibility(
     workspaceId: string,

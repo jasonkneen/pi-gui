@@ -1,0 +1,161 @@
+/* =============================================================================
+ * Topbar — compact window chrome above the transcript/canvas.
+ * Extracted from main.css; tuned to Codex-dense vertical rhythm.
+ * ========================================================================== */
+
+.topbar {
+  -webkit-app-region: drag;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.topbar__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.environment-picker,
+.environment-picker * {
+  -webkit-app-region: no-drag;
+}
+
+.environment-picker {
+  position: relative;
+}
+
+.environment-picker__button {
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.environment-picker__menu {
+  left: 0;
+  right: auto;
+  min-width: 190px;
+}
+
+.topbar__workspace,
+.topbar__session {
+  font-size: 13px;
+  font-weight: 560;
+  letter-spacing: -0.02em;
+}
+
+.topbar__workspace {
+  color: var(--muted-soft);
+}
+
+.topbar__session {
+  color: var(--muted-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__separator {
+  color: var(--muted-soft);
+}
+
+.topbar__actions,
+.empty-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar__actions,
+.topbar__actions * {
+  -webkit-app-region: no-drag;
+}
+
+.shortcut-tooltip-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.topbar__icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  color: var(--muted-soft);
+}
+
+.shortcut-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(-2px);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 520;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.shortcut-tooltip kbd {
+  min-width: 28px;
+  padding: 1px 5px 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.shortcut-tooltip-wrap:hover .shortcut-tooltip,
+.shortcut-tooltip-wrap:focus-within .shortcut-tooltip {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+
+.sidebar-toggle {
+  -webkit-app-region: no-drag;
+  position: absolute;
+  top: 11px;
+  left: var(--titlebar-toggle-left);
+  z-index: 80;
+}
+
+.sidebar-toggle__button {
+  width: var(--titlebar-toggle-size);
+  height: var(--titlebar-toggle-size);
+  border-radius: var(--radius-lg);
+  color: var(--muted-soft);
+  background: var(--surface-overlay-muted);
+}
+
+.shell--sidebar-collapsed .topbar {
+  margin-left: var(--titlebar-collapsed-main-padding-left);
+  padding-left: 0;
+}

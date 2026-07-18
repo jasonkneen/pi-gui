@@ -287,8 +287,8 @@ function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1480,
     height: 980,
-    minWidth: 1200,
-    minHeight: 760,
+    minWidth: 560,
+    minHeight: 600,
     transparent: enableTransparency,
     vibrancy: process.platform === "darwin" && enableTransparency ? "under-window" : undefined,
     titleBarStyle: "hiddenInset",
@@ -1186,11 +1186,17 @@ app.whenReady().then(async () => {
   ipcMain.handle(desktopIpc.selectSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.selectSession(target)),
   );
+  ipcMain.handle(desktopIpc.renameSession, (event, target: WorkspaceSessionTarget, title: string) =>
+    runWindowScopedForEvent(event, () => store.renameSession(target, title)),
+  );
   ipcMain.handle(desktopIpc.archiveSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.archiveSession(target)),
   );
   ipcMain.handle(desktopIpc.unarchiveSession, (event, target: WorkspaceSessionTarget) =>
     runWindowScopedForEvent(event, () => store.unarchiveSession(target)),
+  );
+  ipcMain.handle(desktopIpc.markSessionRead, (event, target: WorkspaceSessionTarget) =>
+    runWindowScopedForEvent(event, () => store.markSessionRead(target)),
   );
   ipcMain.handle(desktopIpc.setSessionPinned, (event, target: WorkspaceSessionTarget, pinned: boolean) =>
     runWindowScopedForEvent(event, () => store.setSessionPinned(target, pinned)),

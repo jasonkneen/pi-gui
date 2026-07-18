@@ -121,6 +121,32 @@ export async function selectSession(store: AppStoreInternals, target: WorkspaceS
   return store.selectSessionFast(target);
 }
 
+export async function renameSession(
+  store: AppStoreInternals,
+  target: WorkspaceSessionTarget,
+  title: string,
+): Promise<DesktopAppState> {
+  await store.initialize();
+  const nextTitle = title.trim();
+  if (!nextTitle) {
+    return store.withError("Thread title cannot be empty.");
+  }
+
+  return store.withErrorHandling(async () => {
+    const sessionRef = toSessionRef(target);
+    if (!store.sessionFromState(sessionRef)) {
+      return store.withError(`Unknown session: ${target.workspaceId}:${target.sessionId}`);
+    }
+    store.clearPendingAutoTitle(sessionRef);
+    await store.driver.renameSession(sessionRef, nextTitle);
+    return store.refreshState({
+      selectedWorkspaceId: store.state.selectedWorkspaceId,
+      selectedSessionId: store.state.selectedSessionId,
+      clearLastError: true,
+    });
+  });
+}
+
 export async function archiveSession(
   store: AppStoreInternals,
   target: WorkspaceSessionTarget,

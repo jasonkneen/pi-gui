@@ -458,12 +458,34 @@ export class DesktopAppStore implements AppStoreInternals {
     });
   }
 
+  async renameSession(target: WorkspaceSessionTarget, title: string): Promise<DesktopAppState> {
+    return workspace.renameSession(this, target, title);
+  }
+
   async archiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
     return workspace.archiveSession(this, target);
   }
 
   async unarchiveSession(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
     return workspace.unarchiveSession(this, target);
+  }
+
+  async markSessionRead(target: WorkspaceSessionTarget): Promise<DesktopAppState> {
+    await this.initialize();
+    const sessionRef = toSessionRef(target);
+    if (!this.sessionFromState(sessionRef)) {
+      return this.withError(`Unknown session: ${target.workspaceId}:${target.sessionId}`);
+    }
+    if (!this.markSessionViewed(sessionRef)) {
+      return structuredClone(this.state);
+    }
+    this.state = {
+      ...this.state,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
+    await this.persistUiState();
+    return this.emit();
   }
 
   async setSessionPinned(target: WorkspaceSessionTarget, pinned: boolean): Promise<DesktopAppState> {
@@ -2126,6 +2148,15 @@ export class DesktopAppStore implements AppStoreInternals {
             clearLastError: true,
           });
           refreshedFollowedSession = shouldFollowSessionMutation;
+        } else {
+          // The compensating reload that would pull this unknown session into
+          // state is skipped while a refresh is already unwinding, and
+          // applySessionEventState then silently no-ops for the missing session —
+          // so the event (e.g. a rename) is dropped. Make that drop visible.
+          console.warn(
+            `[app-store] ${event.type} for unknown session ${key} skipped reload ` +
+              `(refreshStateDepth=${this.refreshStateDepth}); event state not applied`,
+          );
         }
       }
 
@@ -2561,7 +2592,9 @@ export class DesktopAppStore implements AppStoreInternals {
 
     this.persistUiStateTimer = setTimeout(() => {
       this.persistUiStateTimer = undefined;
-      void this.persistUiState();
+      void this.persistUiState().catch((error: unknown) => {
+        console.warn(`pi-gui: scheduled UI state persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 250);
   }
 

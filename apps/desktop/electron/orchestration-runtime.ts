@@ -22,6 +22,7 @@ export interface CreateChildThreadToolDetails {
   readonly childWorkspaceId?: string;
   readonly childSessionId?: string;
   readonly title?: string;
+  readonly deliveryStatus?: "running" | "responded";
   readonly error?: string;
 }
 

@@ -95,7 +95,6 @@ export function SettingsView({
       <div className="conversation settings-view">
         <header className="view-header">
           <div>
-            <div className="chat-header__eyebrow">Settings</div>
             <h1 className="view-header__title">{sectionTitle(section)}</h1>
             <p className="view-header__body">
               {sectionDescription(section, workspace?.name ?? "this workspace")}

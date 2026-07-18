@@ -1,8 +1,8 @@
 import type { SessionTranscriptMessage } from "@pi-gui/pi-sdk-driver";
-import type { TimelineActivity, TimelineToolCall, TimelineSummary, TranscriptMessage } from "./timeline-types";
+import type { DisplayTimelineItem, TimelineActivity, TimelineToolCall, TimelineSummary, TimelineTurnMarker } from "./timeline-types";
 import { MessageMarkdown } from "./message-markdown";
 import { InlineDiff, extractDiffFromOutput } from "./diff-inline";
-import { ChevronRightIcon, CopyIcon, DiffIcon, FileIcon, ForkIcon } from "./icons";
+import { ChevronRightIcon, CopyIcon, DiffIcon, FileIcon, ForkIcon, SparkIcon, TerminalIcon } from "./icons";
 import { extensionToLanguage } from "./syntax-highlight";
 
 export function TimelineItem({
@@ -13,7 +13,7 @@ export function TimelineItem({
   sourceMessageIndex,
   onForkFromMessage,
 }: {
-  readonly item: TranscriptMessage;
+  readonly item: DisplayTimelineItem;
   readonly expandedToolCallIds?: ReadonlySet<string>;
   readonly onToggleToolCall?: (callId: string) => void;
   readonly onViewFileInDiff?: (path: string) => void;
@@ -21,6 +21,8 @@ export function TimelineItem({
   readonly onForkFromMessage?: (messageIndex: number, preview?: string) => void;
 }) {
   switch (item.kind) {
+    case "turn-marker":
+      return <TimelineTurnMarkerItem item={item} />;
     case "message":
       return (
         <TimelineMessage
@@ -162,6 +164,9 @@ function TimelineToolCallItem({
   return (
     <article className={`timeline-tool timeline-tool--${item.status}`}>
       <div className="timeline-tool__header-row">
+        <span className="timeline-tool__glyph" aria-hidden="true">
+          {toolGlyph(item.toolName)}
+        </span>
         <button
           className="timeline-tool__header"
           type="button"
@@ -183,7 +188,10 @@ function TimelineToolCallItem({
               <span className="timeline-tool__stat-del">-{diffStats.removed}</span>
             </span>
           ) : null}
-          <span className="timeline-tool__meta-inline">{`${item.toolName} \u00b7 ${statusLabel(item.status)}`}</span>
+          <span className="timeline-tool__meta-inline">
+            <span className="timeline-tool__status-pip" aria-hidden="true" />
+            {`${item.toolName} \u00b7 ${statusLabel(item.status)}`}
+          </span>
         </button>
         {filePath && onViewFileInDiff ? (
           <button
@@ -238,6 +246,19 @@ function TimelineToolCallItem({
 
 function isWriteTool(toolName: string): boolean {
   return /write|edit|patch|apply/i.test(toolName);
+}
+
+function toolGlyph(toolName: string) {
+  if (isWriteTool(toolName)) {
+    return <DiffIcon />;
+  }
+  if (/bash|shell|exec|terminal|command|run/i.test(toolName)) {
+    return <TerminalIcon />;
+  }
+  if (/read|view|cat|open|file|glob|grep|search|ls/i.test(toolName)) {
+    return <FileIcon />;
+  }
+  return <SparkIcon />;
 }
 
 function buildCompactLabel(item: TimelineToolCall, diffStats: { added: number; removed: number } | undefined): string {
@@ -298,6 +319,29 @@ function statusLabel(status: "running" | "success" | "error") {
   if (status === "running") return "running";
   if (status === "success") return "done";
   return "failed";
+}
+
+function TimelineTurnMarkerItem({ item }: { readonly item: TimelineTurnMarker }) {
+  return (
+    <div className="timeline-turn-marker" data-testid="timeline-turn-marker">
+      <span className="timeline-turn-marker__label">{`Worked for ${formatWorkedDuration(item.durationMs)}`}</span>
+    </div>
+  );
+}
+
+function formatWorkedDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes > 0 ? `${hours}h ${remMinutes}m` : `${hours}h`;
 }
 
 function TimelineSummaryItem({ item }: { readonly item: TimelineSummary }) {

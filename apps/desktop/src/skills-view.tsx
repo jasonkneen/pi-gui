@@ -56,7 +56,6 @@ export function SkillsView({
       <div className="conversation skills-view">
         <header className="view-header">
           <div>
-            <div className="chat-header__eyebrow">Skills</div>
             <h1 className="view-header__title">Skills</h1>
             <p className="view-header__body">
               Give pi workspace-specific capabilities and reusable workflows.

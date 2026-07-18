@@ -39,3 +39,17 @@ export interface TimelineSummary {
 }
 
 export type TranscriptMessage = SessionTranscriptMessage | TimelineActivity | TimelineToolCall | TimelineSummary;
+
+/**
+ * A derived, view-only marker inserted between turns to show how long the agent
+ * worked on the preceding user prompt. Never persisted or produced by the store;
+ * the timeline computes it from real message/tool timestamps at render time, so
+ * it is kept out of {@link TranscriptMessage} to avoid leaking into store code.
+ */
+export interface TimelineTurnMarker {
+  readonly kind: "turn-marker";
+  readonly id: string;
+  readonly durationMs: number;
+}
+
+export type DisplayTimelineItem = TranscriptMessage | TimelineTurnMarker;
