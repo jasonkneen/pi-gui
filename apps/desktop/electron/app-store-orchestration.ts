@@ -45,6 +45,8 @@ import type {
 const CHILD_TITLE_LIMIT = 56;
 const MAX_CHILD_TRANSCRIPT_MESSAGES = 40;
 const MAX_READ_THREAD_MESSAGES = 60;
+const MAX_READ_THREAD_MESSAGE_CHARS = 2_000;
+const MAX_READ_THREAD_RESULT_CHARS = 24_000;
 const MAX_EVIDENCE_RECORDS_PER_CHILD = 80;
 const DEFAULT_SUPERVISION_INTERVAL_MS = 60_000;
 const MIN_SUPERVISION_INTERVAL_MS = 250;
@@ -1440,9 +1442,29 @@ function formatThreadReadResult(result: {
   if (result.messages.length === 0) {
     lines.push("- No transcript messages loaded.");
   } else {
-    lines.push(...result.messages.map((message) => `- ${message.role}: ${message.text}`));
+    let remainingBudget = MAX_READ_THREAD_RESULT_CHARS;
+    let omittedCount = 0;
+    for (const message of result.messages) {
+      const line = `- ${message.role}: ${truncateReadThreadText(message.text)}`;
+      if (line.length > remainingBudget) {
+        omittedCount += 1;
+        continue;
+      }
+      lines.push(line);
+      remainingBudget -= line.length;
+    }
+    if (omittedCount > 0) {
+      lines.push(`- … ${omittedCount} transcript message(s) omitted: read_thread output limit reached.`);
+    }
   }
   return lines.join("\n");
+}
+
+function truncateReadThreadText(text: string): string {
+  if (text.length <= MAX_READ_THREAD_MESSAGE_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_READ_THREAD_MESSAGE_CHARS)}… [truncated ${text.length - MAX_READ_THREAD_MESSAGE_CHARS} chars]`;
 }
 
 function formatCreateChildThreadResult(result: CreateChildThreadToolDetails): string {

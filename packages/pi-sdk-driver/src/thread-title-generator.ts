@@ -109,13 +109,15 @@ function createThreadTitleResourceLoader(): ResourceLoader {
   };
 }
 
-function buildTitlePrompt(prompt: string): string {
+const MAX_TITLE_SOURCE_CHARS = 4_000;
+
+export function buildTitlePrompt(prompt: string): string {
   return [
     "Generate a short UI thread title for the user's first message.",
     "Return only the title.",
     "",
     "<user_message>",
-    prompt,
+    prompt.slice(0, MAX_TITLE_SOURCE_CHARS),
     "</user_message>",
   ].join("\n");
 }

@@ -2592,7 +2592,9 @@ export class DesktopAppStore implements AppStoreInternals {
 
     this.persistUiStateTimer = setTimeout(() => {
       this.persistUiStateTimer = undefined;
-      void this.persistUiState();
+      void this.persistUiState().catch((error: unknown) => {
+        console.warn(`pi-gui: scheduled UI state persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 250);
   }
 

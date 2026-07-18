@@ -1,9 +1,12 @@
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { launchDesktop, makeUserDataDir, makeWorkspace, openNewThread, writeTextFile } from "../helpers/electron-app";
+import { getRealAuthConfig, launchDesktop, makeUserDataDir, makeWorkspace, openNewThread, writeTextFile } from "../helpers/electron-app";
 
 test("attached files reach the real runtime as usable context", async () => {
   test.setTimeout(180_000);
+  const realAuth = getRealAuthConfig();
+  test.skip(!realAuth.enabled, realAuth.skipReason);
+
   const userDataDir = await makeUserDataDir();
   const workspacePath = await makeWorkspace("live-file-attachments");
   const sentinel = `FILE-SENTINEL-${Date.now()}`;
@@ -13,6 +16,7 @@ test("attached files reach the real runtime as usable context", async () => {
   const harness = await launchDesktop(userDataDir, {
     initialWorkspaces: [workspacePath],
     testMode: "background",
+    realAuthSourceDir: realAuth.sourceDir,
   });
 
   try {

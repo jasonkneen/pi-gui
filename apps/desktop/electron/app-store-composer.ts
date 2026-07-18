@@ -643,7 +643,8 @@ function finishComposerCommand(
   options: { readonly sessionTitle?: string } = {},
 ): DesktopAppState {
   store.sessionState.composerDraftsBySession.delete(key);
-  store.sessionState.composerAttachmentsBySession.delete(key);
+  // Slash commands do not consume pending attachments: keep them in memory so the
+  // composer matches the persisted attachment store (persistence.spec.ts pins this).
   appendLocalActivity(store, sessionRef, label);
   const transcript = store.sessionState.transcriptCache.get(key) ?? [];
   const preview = previewFromTranscript(transcript);
@@ -669,7 +670,6 @@ function finishComposerCommand(
     composerDraft: "",
     composerDraftSyncSource: "command",
     composerDraftSyncNonce: store.allocateComposerDraftSyncNonce(),
-    composerAttachments: [],
     lastError: undefined,
     revision: store.state.revision + 1,
   };
