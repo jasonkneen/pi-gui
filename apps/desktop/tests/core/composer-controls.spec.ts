@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createNamedThread,
@@ -35,12 +36,26 @@ function contrastRatio(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+async function seedFuzzyStatusSkill(workspacePath: string): Promise<void> {
+  const skillDir = join(workspacePath, ".agents", "skills", "observe-state");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, "SKILL.md"),
+    `# Observe State
+
+Inspect the current application state.
+`,
+    "utf8",
+  );
+}
+
 test("supports keyboard shortcuts, slash menus, and topbar controls through the user surface", async () => {
   test.setTimeout(60_000);
   const userDataDir = await makeUserDataDir();
   const agentDir = join(userDataDir, "agent");
   const workspacePath = await makeWorkspace("controls-workspace");
   await seedAgentDir(agentDir);
+  await seedFuzzyStatusSkill(workspacePath);
   const harness = await launchDesktop(userDataDir, {
     agentDir,
     initialWorkspaces: [workspacePath],
@@ -50,7 +65,7 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
   try {
     const window = await harness.firstWindow();
     await createNamedThread(window, "Controls session");
-    await expect(window.locator(".topbar__session")).toHaveText("Controls session");
+    await expect(window.locator(".chat-header__title")).toHaveText("Controls session");
 
     const composer = window.getByTestId("composer");
 
@@ -58,7 +73,7 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await expect(window.getByTestId("settings-surface")).toBeVisible();
     await expect(window.locator(".view-header__title")).toContainText("General");
 
-    await window.keyboard.press(desktopShortcut("Shift+O"));
+    await window.keyboard.press(desktopShortcut("N"));
     await expect(window.getByTestId("new-thread-composer")).toBeVisible();
     await expect(window.getByTestId("new-thread-composer")).toBeFocused();
 
@@ -69,11 +84,16 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     const slashMenu = window.getByTestId("slash-menu");
     await expect(slashMenu).toBeVisible();
     await expect(slashMenu).toContainText("Status");
+    await expect(slashMenu).toContainText("Observe State");
+    await expect(slashMenu).toContainText("/skill:observe-state");
+    await expect(slashMenu.locator(".slash-menu__item").first()).toContainText("/status");
     const slashMenuBox = await slashMenu.boundingBox();
     const composerBox = await composer.boundingBox();
     expect(slashMenuBox).not.toBeNull();
     expect(composerBox).not.toBeNull();
-    expect((slashMenuBox?.y ?? 0) + (slashMenuBox?.height ?? 0)).toBeLessThanOrEqual((composerBox?.y ?? 0) + 2);
+    expect((slashMenuBox?.y ?? 0) + (slashMenuBox?.height ?? 0)).toBeLessThanOrEqual(
+      (composerBox?.y ?? 0) + 2,
+    );
 
     await composer.press("Tab");
     await expect(slashMenu).toHaveCount(0);
@@ -102,7 +122,9 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await composer.press("Enter");
     await expect(optionsMenu).toHaveCount(0);
     await expect(window.getByTestId("transcript")).toContainText("Thinking set to max");
-    await expect(window.locator(".composer__hint")).toContainText("max");
+    await expect(
+      window.locator(".composer").getByRole("button", { name: "max", exact: true }),
+    ).toBeVisible();
 
     await composer.fill("Keep the draft /thinking");
     await expect(optionsMenu).toBeVisible();
@@ -113,13 +135,16 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
 
     const selectedWorkspaceId = (await getDesktopState(window)).selectedWorkspaceId;
     expect(selectedWorkspaceId).toBeTruthy();
-    await window.evaluate(async ({ workspaceId }) => {
-      const app = window.piApp;
-      if (!app) {
-        throw new Error("piApp IPC bridge is unavailable");
-      }
-      await app.setScopedModelPatterns(workspaceId, ["fake-provider/fake-model"]);
-    }, { workspaceId: selectedWorkspaceId });
+    await window.evaluate(
+      async ({ workspaceId }) => {
+        const app = globalThis.window.piApp;
+        if (!app) {
+          throw new Error("piApp IPC bridge is unavailable");
+        }
+        await app.setScopedModelPatterns(workspaceId, ["fake-provider/fake-model"]);
+      },
+      { workspaceId: selectedWorkspaceId },
+    );
 
     await composer.fill("/model");
     await expect(optionsMenu).toBeVisible();
@@ -144,7 +169,9 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
       const actionButton = document.querySelector<HTMLElement>(".topbar__actions button");
       return {
         topbar: topbar ? getComputedStyle(topbar).getPropertyValue("-webkit-app-region") : "",
-        actionButton: actionButton ? getComputedStyle(actionButton).getPropertyValue("-webkit-app-region") : "",
+        actionButton: actionButton
+          ? getComputedStyle(actionButton).getPropertyValue("-webkit-app-region")
+          : "",
       };
     });
     expect(appRegions.topbar).toBe("drag");
@@ -156,7 +183,9 @@ test("supports keyboard shortcuts, slash menus, and topbar controls through the 
     await window.getByTestId("topbar").dblclick({ position: { x: 140, y: 12 } });
     await expect
       .poll(() =>
-        harness.electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isMaximized() ?? false),
+        harness.electronApp.evaluate(
+          ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isMaximized() ?? false,
+        ),
       )
       .toBe(!maximizedBefore);
   } finally {
@@ -185,7 +214,7 @@ test("dark mode keeps the send button visible before and after typing", async ()
     await expect(settingsSurface).toBeVisible();
     await settingsSurface.getByRole("button", { name: "Appearance", exact: true }).click();
     await expect(window.locator(".view-header__title")).toHaveText("Appearance");
-    await settingsSurface.locator(".settings-row", { hasText: "Dark" }).locator('input[type="radio"]').click();
+    await settingsSurface.getByRole("radio", { name: "Dark", exact: true }).click();
     await expect
       .poll(() => window.evaluate(() => document.documentElement.classList.contains("dark")))
       .toBe(true);

@@ -1,5 +1,8 @@
 export type {
   AssistantDeltaEvent,
+  AssistantMessageEndedEvent,
+  AssistantMessagePersistedEvent,
+  TranscriptItemAppendedEvent,
   CreateSessionOptions,
   ForkPosition,
   ForkSessionOptions,
@@ -29,6 +32,7 @@ export type {
   SessionQueuedMessage,
   SessionRef,
   SessionSnapshot,
+  SessionSchemaInfo,
   SessionStatus,
   SessionTreeNodeKind,
   SessionTreeNodeSnapshot,
@@ -62,3 +66,30 @@ export type {
   RuntimeSourceScope,
   RuntimeSnapshot,
 } from "./runtime-types.js";
+
+export type {
+  SessionTranscriptImageAttachment,
+  SessionTranscriptFileAttachment,
+  SessionTranscriptAttachment,
+  SessionTranscriptCustomMessage,
+  SessionTranscriptItem,
+  SessionTranscriptMessage,
+  SessionTranscriptRole,
+  SessionTranscriptToolCall,
+} from "./transcript.js";
+
+export { sessionKey } from "./identity.js";
+export type {
+  TurnCaptureOpening,
+  TurnCaptureClosing,
+  TurnCaptureBoundary,
+  TurnCaptureObserver,
+} from "./turn-capture.js";
+export type {
+  SessionContextUsage,
+  SessionPlanLimit,
+  SessionPlanLimits,
+  SessionPromptCache,
+  SessionTokenCounts,
+  SessionUsageSnapshot,
+} from "./usage.js";

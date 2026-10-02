@@ -25,10 +25,14 @@ test("renders a real tool call item that expands and collapses from the transcri
     await createNamedThread(window, "Tool test");
 
     const composer = window.getByTestId("composer");
-    await composer.fill("Use your bash or shell tool to run `pwd` before answering. After the tool finishes, reply with exactly TOOL_OK.");
+    await composer.fill(
+      "Use your bash or shell tool to run `pwd` before answering. After the tool finishes, reply with exactly TOOL_OK.",
+    );
     await composer.press("Enter");
 
-    await expect(window.getByTestId("transcript")).toContainText("TOOL_OK", { timeout: 150_000 });
+    await expect(
+      window.locator(".timeline-item--assistant .message__content").last(),
+    ).toContainText("TOOL_OK", { timeout: 150_000 });
     await expect
       .poll(async () => window.locator(".timeline-tool").count(), { timeout: 120_000 })
       .toBeGreaterThan(0);

@@ -1,24 +1,21 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
-import type { AppView, DesktopAppState, WorkspaceRecord } from "../desktop-state";
+import type { AppView, DesktopAppState, WorkspaceRecord } from "../../contracts/desktop-state";
 import { updateSnapshot } from "./desktop-app-state";
-import { getEffectiveModelRuntime } from "../model-settings";
+import { getEffectiveModelRuntime } from "../features/settings/model-settings";
 import {
   type CustomProviderConfig,
   type DesktopNotificationPermissionStatus,
-} from "../ipc";
-import { SkillsView } from "../skills-view";
-import { ExtensionsView } from "../extensions-view";
-import { SettingsView, type SettingsSection } from "../settings-view";
-import { SecondarySurface } from "../secondary-surface";
-
-const settingsNav = [
-  { id: "appearance", label: "Appearance" },
-  { id: "general", label: "General" },
-  { id: "providers", label: "Providers" },
-  { id: "models", label: "Models" },
-  { id: "notifications", label: "Notifications" },
-] as const;
+} from "../../contracts/ipc";
+import { CustomizePage } from "../features/extensions/customize-page";
+import { SettingsView, type SettingsSection } from "../features/settings/settings-view";
+import {
+  CUSTOMIZE_SECTION_ID,
+  SETTINGS_NAV_ITEMS,
+  SETTINGS_SECTIONS,
+} from "../features/settings/settings-sections";
+import { SettingsSelect } from "../features/settings/settings-controls";
+import { SecondarySurface } from "./secondary-surface";
 
 interface SecondarySurfacesProps {
   readonly api: NonNullable<typeof window.piApp>;
@@ -35,6 +32,8 @@ interface SecondarySurfacesProps {
   readonly extensionsWorkspaceId: string;
   readonly onSelectExtensionsWorkspace: (workspaceId: string) => void;
   readonly onBack: () => void;
+  /** Settings and the Skills and extensions page are separate app views. */
+  readonly onSelectView: (view: Extract<AppView, "settings" | "skills" | "extensions">) => void;
   readonly onTrySkill: (command: string) => void;
 }
 
@@ -53,6 +52,7 @@ export function SecondarySurfaces({
   extensionsWorkspaceId,
   onSelectExtensionsWorkspace,
   onBack,
+  onSelectView,
   onTrySkill,
 }: SecondarySurfacesProps) {
   const [notificationPermissionStatus, setNotificationPermissionStatus] =
@@ -68,12 +68,18 @@ export function SecondarySurfaces({
   const extensionsWorkspace = extensionsWorkspaceId
     ? rootWorkspaceOptions.find((workspace) => workspace.id === extensionsWorkspaceId)
     : undefined;
-  const settingsRuntime = settingsWorkspace ? snapshot.runtimeByWorkspace[settingsWorkspace.id] : undefined;
+  const settingsRuntime = settingsWorkspace
+    ? snapshot.runtimeByWorkspace[settingsWorkspace.id]
+    : undefined;
   const settingsModelRuntime = getEffectiveModelRuntime(snapshot, settingsWorkspace);
-  const skillsRuntime = skillsWorkspace ? snapshot.runtimeByWorkspace[skillsWorkspace.id] : undefined;
-  const extensionsRuntime = extensionsWorkspace ? snapshot.runtimeByWorkspace[extensionsWorkspace.id] : undefined;
+  const skillsRuntime = skillsWorkspace
+    ? snapshot.runtimeByWorkspace[skillsWorkspace.id]
+    : undefined;
+  const extensionsRuntime = extensionsWorkspace
+    ? snapshot.runtimeByWorkspace[extensionsWorkspace.id]
+    : undefined;
   const extensionsCommandCompatibility = extensionsWorkspace
-    ? snapshot.extensionCommandCompatibilityByWorkspace[extensionsWorkspace.id] ?? []
+    ? (snapshot.extensionCommandCompatibilityByWorkspace[extensionsWorkspace.id] ?? [])
     : [];
 
   useEffect(() => {
@@ -100,60 +106,95 @@ export function SecondarySurfaces({
     if (activeView !== "settings" || settingsSection !== "notifications") {
       return;
     }
-    void refreshNotificationPermissionStatus();
+    void refreshNotificationPermissionStatus().catch((error: unknown) => {
+      console.error("[renderer] refreshNotificationPermissionStatus failed", error);
+    });
   }, [activeView, refreshNotificationPermissionStatus, settingsSection]);
 
   const handleSetDefaultModel = (provider: string, modelId: string) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setDefaultModel(settingsWorkspace.id, provider, modelId));
+    void updateSnapshot(setSnapshot, () =>
+      api.setDefaultModel(settingsWorkspace.id, provider, modelId),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setDefaultModel failed", error);
+    });
   };
 
-  const handleSetThinkingLevel = (thinkingLevel: RuntimeSnapshot["settings"]["defaultThinkingLevel"]) => {
+  const handleSetThinkingLevel = (
+    thinkingLevel: RuntimeSnapshot["settings"]["defaultThinkingLevel"],
+  ) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setDefaultThinkingLevel(settingsWorkspace.id, thinkingLevel));
+    void updateSnapshot(setSnapshot, () =>
+      api.setDefaultThinkingLevel(settingsWorkspace.id, thinkingLevel),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setDefaultThinkingLevel failed", error);
+    });
   };
 
   const handleToggleSkillCommands = (enabled: boolean) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setEnableSkillCommands(settingsWorkspace.id, enabled));
+    void updateSnapshot(setSnapshot, () =>
+      api.setEnableSkillCommands(settingsWorkspace.id, enabled),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setEnableSkillCommands failed", error);
+    });
   };
 
   const handleSetScopedModelPatterns = (patterns: readonly string[]) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setScopedModelPatterns(settingsWorkspace.id, patterns));
+    void updateSnapshot(setSnapshot, () =>
+      api.setScopedModelPatterns(settingsWorkspace.id, patterns),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setScopedModelPatterns failed", error);
+    });
   };
 
   const handleSetModelSettingsScopeMode = (mode: "app-global" | "per-repo") => {
-    void updateSnapshot(api, setSnapshot, () => api.setModelSettingsScopeMode(mode));
+    void updateSnapshot(setSnapshot, () => api.setModelSettingsScopeMode(mode)).catch(
+      (error: unknown) => {
+        console.error("[renderer] setModelSettingsScopeMode failed", error);
+      },
+    );
   };
 
   const handleLoginProvider = (providerId: string) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.loginProvider(settingsWorkspace.id, providerId));
+    void updateSnapshot(setSnapshot, () =>
+      api.loginProvider(settingsWorkspace.id, providerId),
+    ).catch((error: unknown) => {
+      console.error("[renderer] loginProvider failed", error);
+    });
   };
 
   const handleLogoutProvider = (providerId: string) => {
     if (!settingsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.logoutProvider(settingsWorkspace.id, providerId));
+    void updateSnapshot(setSnapshot, () =>
+      api.logoutProvider(settingsWorkspace.id, providerId),
+    ).catch((error: unknown) => {
+      console.error("[renderer] logoutProvider failed", error);
+    });
   };
 
-  const handleSetProviderApiKey = async (providerId: string, apiKey: string): Promise<string | undefined> => {
+  const handleSetProviderApiKey = async (
+    providerId: string,
+    apiKey: string,
+  ): Promise<string | undefined> => {
     if (!settingsWorkspace) {
       return "Select a workspace first.";
     }
-    const state = await updateSnapshot(api, setSnapshot, () =>
+    const state = await updateSnapshot(setSnapshot, () =>
       api.setProviderApiKey(settingsWorkspace.id, providerId, apiKey),
     );
     return state.lastError;
@@ -163,15 +204,21 @@ export function SecondarySurfaces({
     if (!settingsWorkspace) {
       return "Select a workspace first.";
     }
-    const state = await updateSnapshot(api, setSnapshot, () => api.logoutProvider(settingsWorkspace.id, providerId));
+    const state = await updateSnapshot(setSnapshot, () =>
+      api.logoutProvider(settingsWorkspace.id, providerId),
+    );
     return state.lastError;
   };
 
-  const handleSaveCustomProvider = async (config: CustomProviderConfig): Promise<string | undefined> => {
+  const handleSaveCustomProvider = async (
+    config: CustomProviderConfig,
+  ): Promise<string | undefined> => {
     if (!settingsWorkspace) {
       return "Select a workspace first.";
     }
-    const state = await updateSnapshot(api, setSnapshot, () => api.setCustomProvider(settingsWorkspace.id, config));
+    const state = await updateSnapshot(setSnapshot, () =>
+      api.setCustomProvider(settingsWorkspace.id, config),
+    );
     return state.lastError;
   };
 
@@ -179,7 +226,7 @@ export function SecondarySurfaces({
     if (!settingsWorkspace) {
       return "Select a workspace first.";
     }
-    const state = await updateSnapshot(api, setSnapshot, () =>
+    const state = await updateSnapshot(setSnapshot, () =>
       api.deleteCustomProvider(settingsWorkspace.id, providerId),
     );
     return state.lastError;
@@ -189,44 +236,72 @@ export function SecondarySurfaces({
     if (!skillsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setSkillEnabled(skillsWorkspace.id, filePath, enabled));
+    void updateSnapshot(setSnapshot, () =>
+      api.setSkillEnabled(skillsWorkspace.id, filePath, enabled),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setSkillEnabled failed", error);
+    });
   };
 
   const handleOpenSkillFolder = (filePath: string) => {
     if (!skillsWorkspace) {
       return;
     }
-    void api.openSkillInFinder(skillsWorkspace.id, filePath);
+    void api.openSkillInFinder(skillsWorkspace.id, filePath).catch((error: unknown) => {
+      console.error("[renderer] openSkillInFinder failed", error);
+    });
   };
 
   const handleToggleExtension = (filePath: string, enabled: boolean) => {
     if (!extensionsWorkspace) {
       return;
     }
-    void updateSnapshot(api, setSnapshot, () => api.setExtensionEnabled(extensionsWorkspace.id, filePath, enabled));
+    void updateSnapshot(setSnapshot, () =>
+      api.setExtensionEnabled(extensionsWorkspace.id, filePath, enabled),
+    ).catch((error: unknown) => {
+      console.error("[renderer] setExtensionEnabled failed", error);
+    });
   };
 
   const handleOpenExtensionFolder = (filePath: string) => {
     if (!extensionsWorkspace) {
       return;
     }
-    void api.openExtensionInFinder(extensionsWorkspace.id, filePath);
+    void api.openExtensionInFinder(extensionsWorkspace.id, filePath).catch((error: unknown) => {
+      console.error("[renderer] openExtensionInFinder failed", error);
+    });
   };
 
   const handleSetThemeMode = (mode: "system" | "light" | "dark") => {
-    void updateSnapshot(api, setSnapshot, () => api.setThemeMode(mode));
+    void updateSnapshot(setSnapshot, () => api.setThemeMode(mode)).catch((error: unknown) => {
+      console.error("[renderer] setThemeMode failed", error);
+    });
   };
 
   const handleSetThemePresetId = (presetId: DesktopAppState["themePresetId"]) => {
-    void updateSnapshot(api, setSnapshot, () => api.setThemePresetId(presetId));
+    void updateSnapshot(setSnapshot, () => api.setThemePresetId(presetId)).catch(
+      (error: unknown) => {
+        console.error("[renderer] setThemePresetId failed", error);
+      },
+    );
   };
 
-  const handleSetNotificationPreferences = (preferences: Partial<DesktopAppState["notificationPreferences"]>) => {
-    void updateSnapshot(api, setSnapshot, () => api.setNotificationPreferences(preferences));
+  const handleSetNotificationPreferences = (
+    preferences: Partial<DesktopAppState["notificationPreferences"]>,
+  ) => {
+    void updateSnapshot(setSnapshot, () => api.setNotificationPreferences(preferences)).catch(
+      (error: unknown) => {
+        console.error("[renderer] setNotificationPreferences failed", error);
+      },
+    );
   };
 
   const handleSetIntegratedTerminalShell = (shellPath: string) => {
-    void updateSnapshot(api, setSnapshot, () => api.setIntegratedTerminalShell(shellPath));
+    void updateSnapshot(setSnapshot, () => api.setIntegratedTerminalShell(shellPath)).catch(
+      (error: unknown) => {
+        console.error("[renderer] setIntegratedTerminalShell failed", error);
+      },
+    );
   };
 
   const handleRequestNotificationPermission = () => {
@@ -241,6 +316,9 @@ export function SecondarySurfaces({
       })
       .finally(() => {
         setNotificationPermissionPending(false);
+      })
+      .catch((error: unknown) => {
+        console.error("[renderer] api failed", error);
       });
   };
 
@@ -249,147 +327,132 @@ export function SecondarySurfaces({
       return;
     }
     setNotificationPermissionPending(true);
-    void api.openSystemNotificationSettings().finally(() => {
-      setNotificationPermissionPending(false);
-    });
+    void api
+      .openSystemNotificationSettings()
+      .finally(() => {
+        setNotificationPermissionPending(false);
+      })
+      .catch((error: unknown) => {
+        console.error("[renderer] openSystemNotificationSettings failed", error);
+      });
   };
 
-  if (activeView === "skills") {
-    return (
-      <SecondarySurface onBack={onBack} testId="skills-surface" title="Skills">
-        <div className="surface-toolbar">
-          <label className="surface-toolbar__field">
-            <span>Workspace</span>
-            <select
-              value={skillsWorkspace?.id ?? ""}
-              onChange={(event) => onSelectSkillsWorkspace(event.target.value)}
-            >
-              {rootWorkspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <SkillsView
-          workspace={skillsWorkspace}
-          runtime={skillsRuntime}
-          onOpenSkillFolder={handleOpenSkillFolder}
-          onRefresh={() => {
-            if (!skillsWorkspace) {
-              return;
-            }
-            void updateSnapshot(api, setSnapshot, () => api.refreshRuntime(skillsWorkspace.id));
-          }}
-          onToggleSkill={handleToggleSkill}
-          onTrySkill={(skill) =>
-            onTrySkill(
-              skill.filePath
-                ? `${skill.slashCommand} `
-                : "Create a new skill for this workspace and explain which files you will add.",
-            )
-          }
-        />
-      </SecondarySurface>
-    );
-  }
-
-  if (activeView === "extensions") {
-    return (
-      <SecondarySurface onBack={onBack} testId="extensions-surface" title="Extensions">
-        <div className="surface-toolbar">
-          <label className="surface-toolbar__field">
-            <span>Workspace</span>
-            <select
-              value={extensionsWorkspace?.id ?? ""}
-              onChange={(event) => onSelectExtensionsWorkspace(event.target.value)}
-            >
-              {rootWorkspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <ExtensionsView
-          workspace={extensionsWorkspace}
-          runtime={extensionsRuntime}
-          commandCompatibility={extensionsCommandCompatibility}
-          onOpenExtensionFolder={handleOpenExtensionFolder}
-          onRefresh={() => {
-            if (!extensionsWorkspace) {
-              return;
-            }
-            void updateSnapshot(api, setSnapshot, () => api.refreshRuntime(extensionsWorkspace.id));
-          }}
-          onToggleExtension={handleToggleExtension}
-        />
-      </SecondarySurface>
-    );
-  }
+  const customizeTab = activeView === "settings" ? undefined : activeView;
+  const customizeWorkspace = customizeTab === "extensions" ? extensionsWorkspace : skillsWorkspace;
+  const workspacePicker = (
+    value: WorkspaceRecord | undefined,
+    onChange: (workspaceId: string) => void,
+  ) =>
+    rootWorkspaceOptions.length > 0 ? (
+      <SettingsSelect
+        label="Workspace"
+        options={rootWorkspaceOptions.map((workspace) => ({
+          value: workspace.id,
+          label: workspace.name,
+        }))}
+        value={value?.id}
+        onChange={onChange}
+      />
+    ) : null;
 
   return (
     <SecondarySurface
-      activeNavId={settingsSection}
-      navItems={settingsNav}
+      activeNavId={customizeTab ? CUSTOMIZE_SECTION_ID : settingsSection}
+      navItems={SETTINGS_NAV_ITEMS}
       onBack={onBack}
-      onSelectNav={(section) => onSelectSettingsSection(section as SettingsSection)}
-      testId="settings-surface"
+      onSelectNav={(id) => {
+        if (id === CUSTOMIZE_SECTION_ID) {
+          if (!customizeTab) onSelectView("skills");
+          return;
+        }
+        const section = SETTINGS_SECTIONS.find((definition) => definition.id === id);
+        if (!section) return;
+        onSelectSettingsSection(section.id);
+        if (customizeTab) onSelectView("settings");
+      }}
+      testId={customizeTab ? `${customizeTab}-surface` : "settings-surface"}
       title="Settings"
     >
-      {settingsSection === "providers" ||
-      (settingsSection === "models" && snapshot.modelSettingsScopeMode === "per-repo") ? (
-        <div className="surface-toolbar">
-          <label className="surface-toolbar__field">
-            <span>Workspace</span>
-            <select
-              value={settingsWorkspace?.id ?? ""}
-              onChange={(event) => onSelectSettingsWorkspace(event.target.value)}
-            >
-              {rootWorkspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      ) : null}
-      <SettingsView
-        workspace={settingsWorkspace}
-        runtime={settingsSection === "models" ? settingsModelRuntime : settingsRuntime}
-        section={settingsSection}
-        notificationPreferences={snapshot.notificationPreferences}
-        notificationPermissionStatus={notificationPermissionStatus}
-        notificationPermissionPending={notificationPermissionPending}
-        modelSettingsScopeMode={snapshot.modelSettingsScopeMode}
-        integratedTerminalShell={snapshot.integratedTerminalShell}
-        themeMode={snapshot.themeMode}
-        themePresetId={snapshot.themePresetId}
-        enableTransparency={snapshot.enableTransparency}
-        onLoginProvider={handleLoginProvider}
-        onLogoutProvider={handleLogoutProvider}
-        onSetProviderApiKey={handleSetProviderApiKey}
-        onRemoveProviderApiKey={handleRemoveProviderApiKey}
-        onSaveCustomProvider={handleSaveCustomProvider}
-        onDeleteCustomProvider={handleDeleteCustomProvider}
-        onSetModelSettingsScopeMode={handleSetModelSettingsScopeMode}
-        onSetDefaultModel={handleSetDefaultModel}
-        onSetNotificationPreferences={handleSetNotificationPreferences}
-        onSetIntegratedTerminalShell={handleSetIntegratedTerminalShell}
-        onRequestNotificationPermission={handleRequestNotificationPermission}
-        onOpenSystemNotificationSettings={handleOpenSystemNotificationSettings}
-        onSetScopedModelPatterns={handleSetScopedModelPatterns}
-        onSetThemeMode={handleSetThemeMode}
-        onSetThemePresetId={handleSetThemePresetId}
-        onSetThinkingLevel={handleSetThinkingLevel}
-        onToggleSkillCommands={handleToggleSkillCommands}
-        onSetEnableTransparency={(enabled) => {
-          void updateSnapshot(api, setSnapshot, () => api.setEnableTransparency(enabled));
-        }}
-      />
+      {customizeTab ? (
+        <CustomizePage
+          commandCompatibility={extensionsCommandCompatibility}
+          extensionsRuntime={extensionsRuntime}
+          skillsRuntime={skillsRuntime}
+          tab={customizeTab}
+          workspace={customizeWorkspace}
+          workspacePicker={
+            customizeTab === "extensions"
+              ? workspacePicker(extensionsWorkspace, onSelectExtensionsWorkspace)
+              : workspacePicker(skillsWorkspace, onSelectSkillsWorkspace)
+          }
+          onOpenExtensionFolder={handleOpenExtensionFolder}
+          onOpenSkillFolder={handleOpenSkillFolder}
+          onRefresh={() => {
+            if (!customizeWorkspace) return;
+            void updateSnapshot(setSnapshot, () => api.refreshRuntime(customizeWorkspace.id)).catch(
+              (error: unknown) => {
+                console.error("[renderer] refreshRuntime failed", error);
+              },
+            );
+          }}
+          onSelectTab={onSelectView}
+          onToggleExtension={handleToggleExtension}
+          onToggleSkill={handleToggleSkill}
+          onTryCommand={onTrySkill}
+        />
+      ) : (
+        <SettingsView
+          workspace={settingsWorkspace}
+          runtime={
+            // Providers reads the default model to flag its provider, so it needs the same
+            // effective model settings as the Models page.
+            settingsSection === "models" || settingsSection === "providers"
+              ? settingsModelRuntime
+              : settingsRuntime
+          }
+          platform={api.platform}
+          headerAccessory={
+            settingsSection === "providers" ||
+            (settingsSection === "models" && snapshot.modelSettingsScopeMode === "per-repo")
+              ? workspacePicker(settingsWorkspace, onSelectSettingsWorkspace)
+              : undefined
+          }
+          section={settingsSection}
+          notificationPreferences={snapshot.notificationPreferences}
+          notificationPermissionStatus={notificationPermissionStatus}
+          notificationPermissionPending={notificationPermissionPending}
+          modelSettingsScopeMode={snapshot.modelSettingsScopeMode}
+          integratedTerminalShell={snapshot.integratedTerminalShell}
+          themeMode={snapshot.themeMode}
+          themePresetId={snapshot.themePresetId}
+          enableTransparency={snapshot.enableTransparency}
+          onLoginProvider={handleLoginProvider}
+          onSelectSection={onSelectSettingsSection}
+          onLogoutProvider={handleLogoutProvider}
+          onSetProviderApiKey={handleSetProviderApiKey}
+          onRemoveProviderApiKey={handleRemoveProviderApiKey}
+          onSaveCustomProvider={handleSaveCustomProvider}
+          onDeleteCustomProvider={handleDeleteCustomProvider}
+          onSetModelSettingsScopeMode={handleSetModelSettingsScopeMode}
+          onSetDefaultModel={handleSetDefaultModel}
+          onSetNotificationPreferences={handleSetNotificationPreferences}
+          onSetIntegratedTerminalShell={handleSetIntegratedTerminalShell}
+          onRequestNotificationPermission={handleRequestNotificationPermission}
+          onOpenSystemNotificationSettings={handleOpenSystemNotificationSettings}
+          onSetScopedModelPatterns={handleSetScopedModelPatterns}
+          onSetThemeMode={handleSetThemeMode}
+          onSetThemePresetId={handleSetThemePresetId}
+          onSetThinkingLevel={handleSetThinkingLevel}
+          onToggleSkillCommands={handleToggleSkillCommands}
+          onSetEnableTransparency={(enabled) => {
+            void updateSnapshot(setSnapshot, () => api.setEnableTransparency(enabled)).catch(
+              (error: unknown) => {
+                console.error("[renderer] setEnableTransparency failed", error);
+              },
+            );
+          }}
+        />
+      )}
     </SecondarySurface>
   );
 }

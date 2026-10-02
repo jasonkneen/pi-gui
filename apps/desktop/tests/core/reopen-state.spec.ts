@@ -68,22 +68,25 @@ test("reopens persisted folders and thread state while a saved running session k
     const window = await secondRun.firstWindow();
     await waitForWorkspaceByPath(window, workspacePath);
     await expect
-      .poll(async () => {
-        const state = await getDesktopState(window);
-        const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-        const session = workspace?.sessions.find((entry) => entry.id === sessionId);
-        return {
-          selectedWorkspaceId: state.selectedWorkspaceId,
-          selectedSessionId: state.selectedSessionId,
-          sessionTitle: session?.title ?? "",
-        };
-      }, { timeout: 15_000 })
+      .poll(
+        async () => {
+          const state = await getDesktopState(window);
+          const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
+          const session = workspace?.sessions.find((entry) => entry.id === sessionId);
+          return {
+            selectedWorkspaceId: state.selectedWorkspaceId,
+            selectedSessionId: state.selectedSessionId,
+            sessionTitle: session?.title ?? "",
+          };
+        },
+        { timeout: 15_000 },
+      )
       .toMatchObject({
         selectedWorkspaceId: workspaceId,
         selectedSessionId: sessionId,
         sessionTitle: "Reopen reliability session",
       });
-    await expect(window.locator(".topbar__session")).toHaveText("Reopen reliability session");
+    await expect(window.locator(".chat-header__title")).toHaveText("Reopen reliability session");
 
     await emitTestSessionEvent(secondRun, {
       type: "sessionUpdated",
@@ -134,9 +137,11 @@ test("reopens persisted folders and thread state while a saved running session k
       });
 
     await secondRun.electronApp.evaluate(({ BrowserWindow }) => {
-      const contents = BrowserWindow.getAllWindows()[0]?.webContents as {
-        forcefullyCrashRenderer?: () => void;
-      } | undefined;
+      const contents = BrowserWindow.getAllWindows()[0]?.webContents as
+        | {
+            forcefullyCrashRenderer?: () => void;
+          }
+        | undefined;
       contents?.forcefullyCrashRenderer?.();
     });
 

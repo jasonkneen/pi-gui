@@ -19,46 +19,50 @@ import {
 } from "../helpers/electron-app";
 import { appendMessagesToSessionFile, sessionFilePathFromCatalog } from "../helpers/session-file";
 
-const multilineDraft = [
-  "line 1",
-  "line 2",
-  "line 3",
-  "line 4",
-  "line 5",
-  "line 6",
-].join("\n");
+const multilineDraft = ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"].join("\n");
 
 const TIMELINE_NEAR_BOTTOM_PX = 32;
 
-async function expectRowVisibleAboveComposer(window: Page, row: Locator, composerShell: Locator): Promise<void> {
-  await expect.poll(async () => {
-    const [rowBox, composerBox, paneBox] = await Promise.all([
-      row.boundingBox(),
-      composerShell.boundingBox(),
-      window.getByTestId("timeline-pane").boundingBox(),
-    ]);
-    if (!rowBox || !composerBox || !paneBox) {
-      return { gapToComposer: -999, fullyVisibleWithinPane: false };
-    }
-    const rowTop = rowBox.y;
-    const rowBottom = rowBox.y + rowBox.height;
-    const paneTop = paneBox.y;
-    const paneBottom = paneBox.y + paneBox.height;
-    return {
-      gapToComposer: composerBox.y - rowBottom,
-      fullyVisibleWithinPane: rowTop >= paneTop - 1 && rowBottom <= paneBottom + 1,
-    };
-  }).toMatchObject({
-    gapToComposer: expect.any(Number),
-    fullyVisibleWithinPane: true,
-  });
-  await expect.poll(async () => {
-    const [rowBox, composerBox] = await Promise.all([row.boundingBox(), composerShell.boundingBox()]);
-    if (!rowBox || !composerBox) {
-      return -999;
-    }
-    return composerBox.y - (rowBox.y + rowBox.height);
-  }).toBeGreaterThanOrEqual(-1);
+async function expectRowVisibleAboveComposer(
+  window: Page,
+  row: Locator,
+  composerShell: Locator,
+): Promise<void> {
+  await expect
+    .poll(async () => {
+      const [rowBox, composerBox, paneBox] = await Promise.all([
+        row.boundingBox(),
+        composerShell.boundingBox(),
+        window.getByTestId("timeline-pane").boundingBox(),
+      ]);
+      if (!rowBox || !composerBox || !paneBox) {
+        return { gapToComposer: -999, fullyVisibleWithinPane: false };
+      }
+      const rowTop = rowBox.y;
+      const rowBottom = rowBox.y + rowBox.height;
+      const paneTop = paneBox.y;
+      const paneBottom = paneBox.y + paneBox.height;
+      return {
+        gapToComposer: composerBox.y - rowBottom,
+        fullyVisibleWithinPane: rowTop >= paneTop - 1 && rowBottom <= paneBottom + 1,
+      };
+    })
+    .toMatchObject({
+      gapToComposer: expect.any(Number),
+      fullyVisibleWithinPane: true,
+    });
+  await expect
+    .poll(async () => {
+      const [rowBox, composerBox] = await Promise.all([
+        row.boundingBox(),
+        composerShell.boundingBox(),
+      ]);
+      if (!rowBox || !composerBox) {
+        return -999;
+      }
+      return composerBox.y - (rowBox.y + rowBox.height);
+    })
+    .toBeGreaterThanOrEqual(-1);
 }
 
 interface TimelineStabilitySample {
@@ -69,7 +73,10 @@ interface TimelineStabilitySample {
   readonly sentinelVisible: boolean;
 }
 
-async function sampleTimelineStability(window: Page, sentinelRow: Locator): Promise<TimelineStabilitySample> {
+async function sampleTimelineStability(
+  window: Page,
+  sentinelRow: Locator,
+): Promise<TimelineStabilitySample> {
   const [rowBox, paneBox, renderMetrics, scrollMetrics] = await Promise.all([
     sentinelRow.boundingBox(),
     window.getByTestId("timeline-pane").boundingBox(),
@@ -86,9 +93,9 @@ async function sampleTimelineStability(window: Page, sentinelRow: Locator): Prom
 
   const sentinelVisible = Boolean(
     rowBox &&
-      paneBox &&
-      rowBox.y >= paneBox.y - 1 &&
-      rowBox.y + rowBox.height <= paneBox.y + paneBox.height + 1,
+    paneBox &&
+    rowBox.y >= paneBox.y - 1 &&
+    rowBox.y + rowBox.height <= paneBox.y + paneBox.height + 1,
   );
 
   return {
@@ -117,10 +124,10 @@ async function sampleTimelineCollapseWindow(
           resolve();
           return;
         }
-        window.requestAnimationFrame(captureFrame);
+        globalThis.window.requestAnimationFrame(captureFrame);
       };
 
-      window.requestAnimationFrame(captureFrame);
+      globalThis.window.requestAnimationFrame(captureFrame);
     });
 
     return samples.reduce(
@@ -147,7 +154,11 @@ async function waitForStableVirtualizedBottom(
   for (let index = 0; index < 150; index += 1) {
     const sample = await sampleTimelineStability(window, sentinelRow);
     lastSample = sample;
-    if (sample.virtualized && sample.remainingFromBottom < TIMELINE_NEAR_BOTTOM_PX && sample.sentinelVisible) {
+    if (
+      sample.virtualized &&
+      sample.remainingFromBottom < TIMELINE_NEAR_BOTTOM_PX &&
+      sample.sentinelVisible
+    ) {
       consecutiveStableSamples += 1;
       baselineSample = sample;
       if (consecutiveStableSamples >= 5 && baselineSample) {
@@ -201,7 +212,7 @@ async function expectNoTimelineCollapseWindow(
 
 async function setDesktopActiveView(window: Page, view: "threads" | "settings"): Promise<void> {
   await window.evaluate(async (nextView) => {
-    const app = window.piApp;
+    const app = globalThis.window.piApp;
     if (!app) {
       throw new Error("piApp IPC bridge is unavailable");
     }
@@ -209,41 +220,58 @@ async function setDesktopActiveView(window: Page, view: "threads" | "settings"):
   }, view);
 }
 
-async function createTimelineSession(window: Parameters<typeof getDesktopState>[0], title: string): Promise<void> {
+async function createTimelineSession(
+  window: Parameters<typeof getDesktopState>[0],
+  title: string,
+): Promise<void> {
   const state = await getDesktopState(window);
   const workspaceId = state.selectedWorkspaceId || state.workspaces[0]?.id;
   if (!workspaceId) {
     throw new Error("No selected workspace available for timeline pinning test");
   }
 
-  await window.evaluate(async ({ targetTitle, targetWorkspaceId }) => {
-    const app = window.piApp;
-    if (!app) {
-      throw new Error("piApp IPC bridge is unavailable");
-    }
+  await window.evaluate(
+    async ({ targetTitle, targetWorkspaceId }) => {
+      const app = globalThis.window.piApp;
+      if (!app) {
+        throw new Error("piApp IPC bridge is unavailable");
+      }
 
-    const beforeState = await app.getState();
-    const beforeWorkspace = beforeState.workspaces.find((workspace) => workspace.id === targetWorkspaceId);
-    const beforeIds = new Set(beforeWorkspace?.sessions.map((session) => session.id) ?? []);
-    const nextState = await app.createSession({ workspaceId: targetWorkspaceId, title: targetTitle });
-    const nextWorkspace = nextState.workspaces.find((workspace) => workspace.id === targetWorkspaceId);
-    const session = nextWorkspace?.sessions.find((entry) => !beforeIds.has(entry.id) && entry.title === targetTitle)
-      ?? nextWorkspace?.sessions.find((entry) => entry.title === targetTitle);
-    if (!session) {
-      throw new Error(`Session not found after createSession: ${targetTitle}`);
-    }
+      const beforeState = await app.getState();
+      const beforeWorkspace = beforeState.workspaces.find(
+        (workspace) => workspace.id === targetWorkspaceId,
+      );
+      const beforeIds = new Set(beforeWorkspace?.sessions.map((session) => session.id) ?? []);
+      const nextState = await app.createSession({
+        workspaceId: targetWorkspaceId,
+        title: targetTitle,
+      });
+      const nextWorkspace = nextState.workspaces.find(
+        (workspace) => workspace.id === targetWorkspaceId,
+      );
+      const session =
+        nextWorkspace?.sessions.find(
+          (entry) => !beforeIds.has(entry.id) && entry.title === targetTitle,
+        ) ?? nextWorkspace?.sessions.find((entry) => entry.title === targetTitle);
+      if (!session) {
+        throw new Error(`Session not found after createSession: ${targetTitle}`);
+      }
 
-    await app.selectSession({ workspaceId: targetWorkspaceId, sessionId: session.id });
-    await app.setActiveView("threads");
-  }, { targetTitle: title, targetWorkspaceId: workspaceId });
+      await app.selectSession({ workspaceId: targetWorkspaceId, sessionId: session.id });
+      await app.setActiveView("threads");
+    },
+    { targetTitle: title, targetWorkspaceId: workspaceId },
+  );
 
-  await expect.poll(async () => {
-    const nextState = await getDesktopState(window);
-    return {
-      activeView: nextState.activeView,
-      selectedSessionId: nextState.selectedSessionId,
-    };
-  }).toMatchObject({ activeView: "threads" });
+  await expect
+    .poll(async () => {
+      const nextState = await getDesktopState(window);
+      return {
+        activeView: nextState.activeView,
+        selectedSessionId: nextState.selectedSessionId,
+      };
+    })
+    .toMatchObject({ activeView: "threads" });
   await expect(window.getByTestId("composer")).toBeVisible({ timeout: 15_000 });
 }
 
@@ -263,6 +291,7 @@ test("keeps the latest assistant content visible when the composer grows at the 
   try {
     const window = await harness.firstWindow();
     await createTimelineSession(window, "Bottom pinning session");
+    await expect(window.getByTestId("workbench")).toHaveCount(0);
 
     const finalMarker = "PIN_FINAL_ROW";
     const finalText = `${finalMarker} ${"visible above composer with width reflow ".repeat(10)}`;
@@ -273,22 +302,28 @@ test("keeps the latest assistant content visible when the composer grows at the 
     await expect(window.getByTestId("transcript")).toContainText(messages.at(-1) ?? finalText);
 
     await jumpTimelineToBottom(window);
-    await expect.poll(() => getTimelineScrollMetrics(window)).toMatchObject({
-      remainingFromBottom: expect.any(Number),
-    });
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return {
-        overflowed: metrics.scrollHeight > metrics.clientHeight + 32,
-        scrolled: metrics.scrollTop > 0,
-        remaining: metrics.remainingFromBottom,
-      };
-    }).toMatchObject({
-      overflowed: true,
-      scrolled: true,
-      remaining: expect.any(Number),
-    });
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(() => getTimelineScrollMetrics(window))
+      .toMatchObject({
+        remainingFromBottom: expect.any(Number),
+      });
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return {
+          overflowed: metrics.scrollHeight > metrics.clientHeight + 32,
+          scrolled: metrics.scrollTop > 0,
+          remaining: metrics.remainingFromBottom,
+        };
+      })
+      .toMatchObject({
+        overflowed: true,
+        scrolled: true,
+        remaining: expect.any(Number),
+      });
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     const composer = window.getByTestId("composer");
     const composerShell = window.locator(".composer");
@@ -304,16 +339,20 @@ test("keeps the latest assistant content visible when the composer grows at the 
       .toBeGreaterThan(40);
 
     await expectRowVisibleAboveComposer(window, finalRow, composerShell);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     const diffPanel = window.locator(".diff-panel");
-    await window.keyboard.press(desktopShortcut("D"));
+    await window.keyboard.press(desktopShortcut("R"));
     await expect(diffPanel).toBeVisible();
     await expect(diffPanel.locator(".diff-panel__file-name")).toContainText("README.md");
     await expect(window.getByTestId("timeline-pane")).toBeVisible();
     await expect(composerShell).toBeVisible();
     await expectRowVisibleAboveComposer(window, finalRow, composerShell);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(32);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(32);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
   } finally {
     await harness.close();
@@ -342,7 +381,9 @@ test("restores bottom pinning after leaving and returning to the thread surface"
     await expect(window.getByTestId("transcript")).toContainText(finalMarker);
 
     await jumpTimelineToBottom(window);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     const composer = window.getByTestId("composer");
     const composerShell = window.locator(".composer");
@@ -361,7 +402,9 @@ test("restores bottom pinning after leaving and returning to the thread surface"
     await expect(window.getByTestId("timeline-pane")).toBeVisible();
     await expect(window.getByTestId("composer")).toBeVisible();
     await expectRowVisibleAboveComposer(window, finalRow, composerShell);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
   } finally {
     await harness.close();
@@ -407,17 +450,23 @@ test("restores the true bottom when reopening a virtualized thread with oversize
 
     harness = await launchDesktop(userDataDir, { testMode: "background" });
     window = await harness.firstWindow();
-    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
-    await expect(window.locator(".timeline-item--assistant", { hasText: finalMarker })).toBeVisible();
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect(window.locator(".chat-header__title")).toHaveText(targetTitle);
+    await expect(
+      window.locator(".timeline-item--assistant", { hasText: finalMarker }),
+    ).toBeVisible();
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     await createTimelineSession(window, "Neighbor session");
-    await expect(window.locator(".topbar__session")).toHaveText("Neighbor session");
+    await expect(window.locator(".chat-header__title")).toHaveText("Neighbor session");
 
     await selectSession(window, targetTitle);
     const finalRow = window.locator(".timeline-item--assistant", { hasText: finalMarker });
     await expect(finalRow).toBeVisible();
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
   } finally {
     await harness.close();
   }
@@ -453,11 +502,13 @@ test("keeps a virtualized thread off-bottom after switching sessions", async () 
     expect(preReopenMetrics.remainingFromBottom).toBeGreaterThan(500);
 
     await createTimelineSession(window, "Neighbor session");
-    await expect(window.locator(".topbar__session")).toHaveText("Neighbor session");
+    await expect(window.locator(".chat-header__title")).toHaveText("Neighbor session");
 
     await selectSession(window, targetTitle);
-    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(500);
+    await expect(window.locator(".chat-header__title")).toHaveText(targetTitle);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(500);
   } finally {
     await harness.close();
   }
@@ -478,9 +529,9 @@ test("restores a thread's saved off-bottom scroll position after switching sessi
     const neighborTitle = "Saved scroll neighbor";
     await createTimelineSession(window, targetTitle);
     await createTimelineSession(window, neighborTitle);
-    await expect(window.locator(".topbar__session")).toHaveText(neighborTitle);
+    await expect(window.locator(".chat-header__title")).toHaveText(neighborTitle);
     await selectSession(window, targetTitle);
-    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
+    await expect(window.locator(".chat-header__title")).toHaveText(targetTitle);
 
     const finalMarker = "SESSION_SWITCH_SCROLL_FINAL_ROW";
     await seedTranscriptMessages(harness, window, {
@@ -494,40 +545,53 @@ test("restores a thread's saved off-bottom scroll position after switching sessi
     });
 
     await jumpTimelineToBottom(window);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return metrics.scrollHeight - metrics.clientHeight;
-    }).toBeGreaterThan(700);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return metrics.scrollHeight - metrics.clientHeight;
+      })
+      .toBeGreaterThan(700);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
     await window.waitForTimeout(800);
 
     await window.getByTestId("timeline-pane").hover();
-    await expect.poll(async () => {
-      await window.mouse.wheel(0, -520);
-      return (await getTimelineScrollMetrics(window)).remainingFromBottom;
-    }).toBeGreaterThan(700);
+    await expect
+      .poll(async () => {
+        await window.mouse.wheel(0, -520);
+        return (await getTimelineScrollMetrics(window)).remainingFromBottom;
+      })
+      .toBeGreaterThan(700);
     const savedMetrics = await getTimelineScrollMetrics(window);
     expect(savedMetrics.remainingFromBottom).toBeGreaterThan(700);
     await window.waitForTimeout(250);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(700);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(700);
 
     await selectSession(window, neighborTitle);
-    await expect(window.locator(".topbar__session")).toHaveText(neighborTitle);
+    await expect(window.locator(".chat-header__title")).toHaveText(neighborTitle);
 
     await selectSession(window, targetTitle);
-    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(300);
+    await expect(window.locator(".chat-header__title")).toHaveText(targetTitle);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(300);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
 
     const restoredRemaining = (await getTimelineScrollMetrics(window)).remainingFromBottom;
     await window.getByTestId("timeline-pane").hover();
-    await expect.poll(async () => {
-      await window.mouse.wheel(0, 520);
-      return restoredRemaining - (await getTimelineScrollMetrics(window)).remainingFromBottom;
-    }).toBeGreaterThan(120);
+    await expect
+      .poll(async () => {
+        await window.mouse.wheel(0, 520);
+        return restoredRemaining - (await getTimelineScrollMetrics(window)).remainingFromBottom;
+      })
+      .toBeGreaterThan(120);
     const userAdjustedRemaining = (await getTimelineScrollMetrics(window)).remainingFromBottom;
     await window.waitForTimeout(2_300);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
       .toBeLessThanOrEqual(userAdjustedRemaining + 80);
   } finally {
     await harness.close();
@@ -558,16 +622,20 @@ test("lands a reopened bottom-pinned thread without a smooth scroll from the top
     });
 
     await jumpTimelineToBottom(window);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     await createTimelineSession(window, "Open no smooth neighbor");
-    await expect(window.locator(".topbar__session")).toHaveText("Open no smooth neighbor");
+    await expect(window.locator(".chat-header__title")).toHaveText("Open no smooth neighbor");
     await selectSession(window, targetTitle);
     await expect(window.getByTestId("transcript")).toContainText(finalMarker);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return metrics.scrollHeight > metrics.clientHeight + 32;
-    }).toBe(true);
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return metrics.scrollHeight > metrics.clientHeight + 32;
+      })
+      .toBe(true);
 
     const samples: number[] = [];
     for (let index = 0; index < 12; index += 1) {
@@ -580,8 +648,12 @@ test("lands a reopened bottom-pinned thread without a smooth scroll from the top
       `remaining-from-bottom samples after reopen: ${samples.join(", ")}`,
     ).toBeLessThan(60);
 
-    await expect(window.locator(".timeline-item--assistant", { hasText: finalMarker })).toBeVisible();
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect(
+      window.locator(".timeline-item--assistant", { hasText: finalMarker }),
+    ).toBeVisible();
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
   } finally {
     await harness.close();
   }
@@ -622,7 +694,7 @@ test("keeps a reopened virtualized long transcript stable", async () => {
 
     harness = await launchDesktop(userDataDir, { testMode: "background" });
     window = await harness.firstWindow();
-    await expect(window.locator(".topbar__session")).toHaveText(targetTitle);
+    await expect(window.locator(".chat-header__title")).toHaveText(targetTitle);
     const reopenedFinalRow = window.locator(".timeline-item--assistant", { hasText: finalMarker });
 
     await expectNoTimelineCollapseWindow(window, preReopenBaseline);
@@ -641,11 +713,12 @@ test("keeps a reopened virtualized long transcript stable", async () => {
       "VIRTUALIZED_REOPEN_STREAM_B ",
       "VIRTUALIZED_REOPEN_STREAM_C",
     ]);
-    const streamedRow = window.locator(".timeline-item--assistant", { hasText: pinnedStream.fullText });
+    const streamedRow = window.locator(".timeline-item--assistant", {
+      hasText: pinnedStream.fullText,
+    });
     await expect(streamedRow).toBeVisible();
-    const streamedCompletionRow = window.locator(".timeline-summary", { hasText: "Worked for" }).last();
-    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedCompletionRow);
-    await expectStableTimelineWindow(window, streamedCompletionRow, streamedBaseline);
+    const streamedBaseline = await waitForStableVirtualizedBottom(window, streamedRow);
+    await expectStableTimelineWindow(window, streamedRow, streamedBaseline);
   } finally {
     await harness.close();
   }
@@ -667,6 +740,7 @@ test("keeps the mid-thread viewport stable when the composer grows away from the
   try {
     const window = await harness.firstWindow();
     await createTimelineSession(window, "Mid-thread pinning session");
+    await expect(window.getByTestId("workbench")).toHaveCount(0);
 
     const sentinelMarker = "MID_SENTINEL_ROW";
     const sentinelText = `${sentinelMarker} ${"should stay put during width reflow ".repeat(10)}`;
@@ -682,10 +756,14 @@ test("keeps the mid-thread viewport stable when the composer grows away from the
     await expect(window.getByTestId("transcript")).toContainText(finalText);
 
     await jumpTimelineToBottom(window);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     await scrollTimelineAwayFromBottom(window, 220);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(100);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(100);
 
     const composer = window.getByTestId("composer");
     const composerShell = window.locator(".composer");
@@ -702,31 +780,71 @@ test("keeps the mid-thread viewport stable when the composer grows away from the
       .poll(async () => ((await composerShell.boundingBox())?.height ?? 0) - beforeComposerHeight)
       .toBeGreaterThan(40);
 
-    await expect.poll(async () => {
-      const rowBox = await sentinelRow.boundingBox();
-      return rowBox ? Math.abs(rowBox.y - beforeSentinelY) : Number.POSITIVE_INFINITY;
-    }).toBeLessThanOrEqual(12);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return Math.abs(metrics.scrollTop - beforeScrollTop);
-    }).toBeLessThanOrEqual(12);
+    await expect
+      .poll(async () => {
+        const rowBox = await sentinelRow.boundingBox();
+        return rowBox ? Math.abs(rowBox.y - beforeSentinelY) : Number.POSITIVE_INFINITY;
+      })
+      .toBeLessThanOrEqual(12);
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return Math.abs(metrics.scrollTop - beforeScrollTop);
+      })
+      .toBeLessThanOrEqual(12);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
 
     const diffPanel = window.locator(".diff-panel");
     const beforeDiffSentinelY = (await sentinelRow.boundingBox())?.y ?? 0;
-    const beforeDiffScrollTop = (await getTimelineScrollMetrics(window)).scrollTop;
-    await window.keyboard.press(desktopShortcut("D"));
+    const beforeDiffMetrics = await getTimelineScrollMetrics(window);
+    const pane = window.getByTestId("timeline-pane");
+    const beforeDiffWidth = await pane.evaluate((element) => element.clientWidth);
+    await window.keyboard.press(desktopShortcut("R"));
     await expect(diffPanel).toBeVisible();
     await expect(diffPanel.locator(".diff-panel__file-name")).toContainText("README.md");
-    await expect.poll(async () => {
-      const rowBox = await sentinelRow.boundingBox();
-      return rowBox ? Math.abs(rowBox.y - beforeDiffSentinelY) : Number.POSITIVE_INFINITY;
-    }).toBeLessThanOrEqual(12);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return Math.abs(metrics.scrollTop - beforeDiffScrollTop);
-    }).toBeLessThanOrEqual(12);
+    await expect
+      .poll(async () => {
+        const rowBox = await sentinelRow.boundingBox();
+        return rowBox ? Math.abs(rowBox.y - beforeDiffSentinelY) : Number.POSITIVE_INFINITY;
+      })
+      .toBeLessThanOrEqual(12);
+    // Width reflow changes row heights above the reader. The owner must adjust
+    // scrollTop to preserve the visible sentinel, not preserve the old offset.
+    await expect
+      .poll(() => pane.evaluate((element) => element.clientWidth))
+      .toBeLessThan(beforeDiffWidth);
+    await test.info().attach("width-reflow", {
+      body: JSON.stringify({
+        before: { ...beforeDiffMetrics, width: beforeDiffWidth, sentinelY: beforeDiffSentinelY },
+        after: {
+          ...(await getTimelineScrollMetrics(window)),
+          width: await pane.evaluate((element) => element.clientWidth),
+          sentinelY: (await sentinelRow.boundingBox())?.y,
+        },
+      }),
+      contentType: "application/json",
+    });
     await expect(window.getByTestId("timeline-jump")).toHaveCount(0);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(100);
+    await streamAssistantDeltas(harness, window, ["WIDTH_REFLOW_NEW_ACTIVITY"]);
+    await expect(window.getByTestId("timeline-jump")).toBeVisible();
+    await expect
+      .poll(() =>
+        sentinelRow.evaluate(async (row, expectedY) => {
+          let maximumDrift = 0;
+          for (let frame = 0; frame < 8; frame++) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            maximumDrift = Math.max(
+              maximumDrift,
+              Math.abs(row.getBoundingClientRect().y - expectedY),
+            );
+          }
+          return maximumDrift;
+        }, beforeDiffSentinelY),
+      )
+      .toBeLessThanOrEqual(12);
   } finally {
     await harness.close();
   }
@@ -753,19 +871,23 @@ test("keeps transcript pinning semantics while assistant deltas stream into the 
     await expect(window.getByTestId("transcript")).toContainText(finalSeedMarker);
 
     await jumpTimelineToBottom(window);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return {
-        overflowed: metrics.scrollHeight > metrics.clientHeight + 32,
-        scrolled: metrics.scrollTop > 0,
-        remaining: metrics.remainingFromBottom,
-      };
-    }).toMatchObject({
-      overflowed: true,
-      scrolled: true,
-      remaining: expect.any(Number),
-    });
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return {
+          overflowed: metrics.scrollHeight > metrics.clientHeight + 32,
+          scrolled: metrics.scrollTop > 0,
+          remaining: metrics.remainingFromBottom,
+        };
+      })
+      .toMatchObject({
+        overflowed: true,
+        scrolled: true,
+        remaining: expect.any(Number),
+      });
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     const pinnedStream = await streamAssistantDeltas(harness, window, [
       "PINNED_STREAM_CHUNK_A ",
@@ -773,10 +895,14 @@ test("keeps transcript pinning semantics while assistant deltas stream into the 
       "PINNED_STREAM_CHUNK_C",
     ]);
     await expect(window.getByTestId("transcript")).toContainText(pinnedStream.fullText);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeLessThanOrEqual(16);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeLessThanOrEqual(16);
 
     await scrollTimelineAwayFromBottom(window, 220);
-    await expect.poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom).toBeGreaterThan(100);
+    await expect
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom)
+      .toBeGreaterThan(100);
     const beforeScrollTop = (await getTimelineScrollMetrics(window)).scrollTop;
 
     const awayStream = await streamAssistantDeltas(harness, window, [
@@ -785,10 +911,12 @@ test("keeps transcript pinning semantics while assistant deltas stream into the 
       "AWAY_STREAM_CHUNK_C",
     ]);
     await expect(window.getByTestId("transcript")).toContainText(awayStream.fullText);
-    await expect.poll(async () => {
-      const metrics = await getTimelineScrollMetrics(window);
-      return Math.abs(metrics.scrollTop - beforeScrollTop);
-    }).toBeLessThanOrEqual(12);
+    await expect
+      .poll(async () => {
+        const metrics = await getTimelineScrollMetrics(window);
+        return Math.abs(metrics.scrollTop - beforeScrollTop);
+      })
+      .toBeLessThanOrEqual(12);
     await expect(window.getByTestId("timeline-jump")).toHaveCount(1);
   } finally {
     await harness.close();
@@ -841,9 +969,13 @@ test("lands an opened thread at the bottom without a smooth scroll from the top"
       `scroll samples after open: ${samples.join(", ")} (max ${maxSample})`,
     ).toBeLessThan(60);
 
-    await expect(window.locator(".timeline-item--assistant", { hasText: finalMarker })).toBeVisible();
+    await expect(
+      window.locator(".timeline-item--assistant", { hasText: finalMarker }),
+    ).toBeVisible();
     await expect
-      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom, { timeout: 5_000 })
+      .poll(async () => (await getTimelineScrollMetrics(window)).remainingFromBottom, {
+        timeout: 5_000,
+      })
       .toBeLessThanOrEqual(16);
   } finally {
     await harness.close();

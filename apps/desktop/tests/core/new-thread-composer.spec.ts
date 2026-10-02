@@ -33,7 +33,10 @@ test("new thread reuses composer behaviors for slash commands, image previews, a
     await expect(window.getByTestId("new-thread-logo")).toBeVisible();
     await expect(window.getByRole("heading", { name: "Let's build" })).toBeVisible();
     await expect(composer).toBeFocused();
-    await expect(composer).toHaveAttribute("placeholder", "Ask pi anything, use / for commands and skills");
+    await expect(composer).toHaveAttribute(
+      "placeholder",
+      "Ask pi anything, use / for commands and skills",
+    );
 
     const modelBadge = window.locator(".new-thread__hint .model-selector__badge").first();
     await expect(modelBadge).toBeVisible();
@@ -58,23 +61,35 @@ test("new thread reuses composer behaviors for slash commands, image previews, a
     await pasteTinyPng(window, "new-thread-image.png", "new-thread-composer");
     const chip = window.locator(".composer-attachment");
     await expect(chip).toBeVisible();
-    await expect(chip.locator(".composer-attachment__preview")).toBeVisible();
-    await expect(chip.locator(".composer-attachment__name")).toContainText("new-thread-image.png");
+    await expect(chip.locator(".composer-attachment__preview")).toHaveAttribute(
+      "title",
+      "new-thread-image.png",
+    );
+    await expect(chip.locator(".composer-attachment__name")).toHaveCount(0);
 
     await window.getByRole("button", { name: "Start thread" }).click();
 
     await expect(window.getByTestId("composer")).toBeVisible({ timeout: 15_000 });
     await expect
-      .poll(async () => {
-        const transcript = await getSelectedTranscript(window);
-        const userMessage = transcript?.transcript.find(
-          (entry) => entry.kind === "message" && "role" in entry && entry.role === "user",
-        );
-        return userMessage?.attachments?.map((attachment) => attachment.kind).join(",") ?? "";
-      }, { timeout: 15_000 })
+      .poll(
+        async () => {
+          const transcript = await getSelectedTranscript(window);
+          const userMessage = transcript?.transcript.find(
+            (entry): entry is Extract<typeof entry, { kind: "message" }> =>
+              entry.kind === "message" && entry.role === "user",
+          );
+          return userMessage?.attachments?.map((attachment) => attachment.kind).join(",") ?? "";
+        },
+        { timeout: 15_000 },
+      )
       .toBe("image");
-    await expect(window.locator(".timeline-item__attachment")).toBeVisible({ timeout: 15_000 });
+    const sentImage = window.getByRole("button", { name: "View new-thread-image.png" });
+    await expect(sentImage).toBeVisible({ timeout: 15_000 });
     await expect(window.locator(".composer-attachment")).toHaveCount(0);
+    await sentImage.click();
+    await expect(window.getByTestId("image-viewer")).toBeVisible();
+    await window.keyboard.press("Escape");
+    await expect(window.getByTestId("image-viewer")).toHaveCount(0);
   } finally {
     await harness.close();
   }
@@ -155,13 +170,16 @@ test("new thread routes disabled-model recovery to settings models", async () =>
     const selectedWorkspaceId = (await getDesktopState(window)).selectedWorkspaceId;
     expect(selectedWorkspaceId).toBeTruthy();
 
-    await window.evaluate(async ({ workspaceId }) => {
-      const app = window.piApp;
-      if (!app) {
-        throw new Error("piApp IPC bridge is unavailable");
-      }
-      await app.setScopedModelPatterns(workspaceId, ["fake-provider/fake-model"]);
-    }, { workspaceId: selectedWorkspaceId });
+    await window.evaluate(
+      async ({ workspaceId }) => {
+        const app = globalThis.window.piApp;
+        if (!app) {
+          throw new Error("piApp IPC bridge is unavailable");
+        }
+        await app.setScopedModelPatterns(workspaceId, ["fake-provider/fake-model"]);
+      },
+      { workspaceId: selectedWorkspaceId },
+    );
 
     await window.getByTestId("new-thread-composer").fill("try to start with all models disabled");
     const modelBadge = window.locator(".new-thread__hint .model-selector__badge").first();
@@ -176,7 +194,10 @@ test("new thread routes disabled-model recovery to settings models", async () =>
     await expect(dropdown).toContainText("No models available");
     await expect(dropdown).not.toContainText("Open Settings > Models");
 
-    await window.getByTestId("model-onboarding-notice").getByRole("button", { name: "Open Settings > Models" }).click();
+    await window
+      .getByTestId("model-onboarding-notice")
+      .getByRole("button", { name: "Open Settings > Models" })
+      .click();
     await expect(window.getByTestId("settings-surface")).toBeVisible();
     await expect(window.locator(".view-header__title")).toHaveText("Models");
   } finally {
@@ -220,13 +241,16 @@ test("refreshing after a provider becomes available auto-enables that provider's
 
     const selectedWorkspaceId = (await getDesktopState(window)).selectedWorkspaceId;
     expect(selectedWorkspaceId).toBeTruthy();
-    await window.evaluate(async ({ workspaceId }) => {
-      const app = window.piApp;
-      if (!app) {
-        throw new Error("piApp IPC bridge is unavailable");
-      }
-      await app.refreshRuntime(workspaceId);
-    }, { workspaceId: selectedWorkspaceId });
+    await window.evaluate(
+      async ({ workspaceId }) => {
+        const app = globalThis.window.piApp;
+        if (!app) {
+          throw new Error("piApp IPC bridge is unavailable");
+        }
+        await app.refreshRuntime(workspaceId);
+      },
+      { workspaceId: selectedWorkspaceId },
+    );
 
     await expect(modelBadge).toHaveText("Pick a model");
     await expect(notice).toContainText("No default model set");
@@ -262,7 +286,9 @@ test("settings do not show stale enabled-model pills when no providers are conne
     await openNewThread(window);
 
     await window.getByTestId("new-thread-composer").fill("check no provider settings");
-    await expect(window.getByTestId("model-onboarding-notice")).toContainText("Open Settings > Providers");
+    await expect(window.getByTestId("model-onboarding-notice")).toContainText(
+      "Open Settings > Providers",
+    );
 
     await window.keyboard.press(desktopShortcut(","));
     await expect(window.getByTestId("settings-surface")).toBeVisible();
@@ -275,7 +301,50 @@ test("settings do not show stale enabled-model pills when no providers are conne
     await expect(enabledModelsSection).toContainText("No connected models available yet.");
     await expect(enabledModelsSection).not.toContainText("openai/gpt-5");
     await expect(enabledModelsSection).not.toContainText("openai/gpt-4o");
-    await expect(enabledModelsSection.locator(".settings-disclosure__summary")).toContainText("0");
+    await expect(enabledModelsSection.locator(".settings-section__title")).toContainText("0 of 0");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("new thread starts once when Enter is pressed twice before it opens", async () => {
+  test.setTimeout(60_000);
+  const userDataDir = await makeUserDataDir();
+  const agentDir = join(userDataDir, "agent");
+  const workspacePath = await makeWorkspace("new-thread-double-submit-workspace");
+  await seedAgentDir(agentDir);
+  const harness = await launchDesktop(userDataDir, {
+    agentDir,
+    initialWorkspaces: [workspacePath],
+    testMode: "background",
+  });
+
+  try {
+    const window = await harness.firstWindow();
+    const sessionCount = async () =>
+      (await getDesktopState(window)).workspaces.reduce(
+        (count, workspace) => count + workspace.sessions.length,
+        0,
+      );
+    const before = await sessionCount();
+    await openNewThread(window);
+
+    const composer = window.getByTestId("new-thread-composer");
+    await composer.fill("start exactly one thread");
+    // Both key presses land before the first start returns, as a fast double Enter does.
+    await composer.evaluate((element) => {
+      for (let press = 0; press < 2; press += 1) {
+        element.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      }
+    });
+
+    await expect(window.getByTestId("composer")).toBeVisible({ timeout: 15_000 });
+    await expect.poll(sessionCount, { timeout: 5_000 }).toBe(before + 1);
+    // Give a late second start time to land before asserting it never did.
+    await window.waitForTimeout(1_000);
+    expect(await sessionCount()).toBe(before + 1);
   } finally {
     await harness.close();
   }

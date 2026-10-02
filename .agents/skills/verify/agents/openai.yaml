@@ -1,4 +1,0 @@
-interface:
-  display_name: "Verify"
-  short_description: "Repo verification workflow"
-  default_prompt: "Use $verify to choose the right verification surface and prove the change works."

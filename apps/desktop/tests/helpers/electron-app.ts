@@ -1,24 +1,35 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, delimiter, dirname, extname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
 import type { SessionDriverEvent, SessionRef } from "@pi-gui/session-driver";
-import type { PiDesktopApi } from "../../src/ipc";
+import type { PiDesktopApi } from "../../contracts/ipc";
 import type {
   DesktopAppState,
   NewThreadEnvironment,
   SelectedTranscriptRecord,
   SessionRecord,
   WorkspaceRecord,
-} from "../../src/desktop-state";
+} from "../../contracts/desktop-state";
+import { resolvePackagedAppExecutable } from "./packaged-app";
+import { TINY_PNG_BASE64 } from "./native-input";
+
+export {
+  copyAppBundle,
+  extractAppBundleFromReleaseZip,
+  extractPackagedReleaseZipAppBundle,
+  resolveAppBundleExecutable,
+  resolvePackagedAppBundle,
+  resolvePackagedAppExecutable,
+  resolvePackagedReleaseZip,
+} from "./packaged-app";
+export * from "./native-input";
 
 const desktopDir = resolve(__dirname, "..", "..");
-const packagedReleaseDir = join(desktopDir, "release");
-const nativeClipboardImagePath = resolve(__dirname, "..", "..", "..", "website", "public", "og.png");
 const execFileAsync = promisify(execFile);
 const require = createRequire(__filename);
 const electronExecutablePath = require("electron") as string;
@@ -45,14 +56,12 @@ const NON_API_KEY_PROVIDER_ENV_VARS = [
 // machines that export keys the hardcoded list happened to miss. Scrub the full
 // class instead: every `*_API_KEY` var plus the documented non-suffixed ones.
 function isProviderAuthEnvVar(key: string): boolean {
-  return key.endsWith("_API_KEY") || (NON_API_KEY_PROVIDER_ENV_VARS as readonly string[]).includes(key);
+  return (
+    key.endsWith("_API_KEY") || (NON_API_KEY_PROVIDER_ENV_VARS as readonly string[]).includes(key)
+  );
 }
-export const TINY_PNG_BASE64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZfXQAAAAASUVORK5CYII=";
-
 export type PiAppWindow = Window & { piApp?: PiDesktopApi };
 export type DesktopTestMode = "foreground" | "background";
-const desktopModifierKey = process.platform === "darwin" ? "Meta" : "Control";
 
 export interface DesktopHarness {
   electronApp: ElectronApplication;
@@ -109,25 +118,52 @@ export function getRealAuthConfig(): RealAuthConfig {
   };
 }
 
+function isWorkspacePaths(
+  options: readonly string[] | LaunchDesktopOptions,
+): options is readonly string[] {
+  return Array.isArray(options);
+}
+
+function normalizeLaunchOptions(
+  options: readonly string[] | LaunchDesktopOptions,
+): LaunchDesktopOptions {
+  return isWorkspacePaths(options) ? { initialWorkspaces: options } : options;
+}
+
+function electronCliArgs(entry?: string): string[] {
+  const args = entry ? [entry] : [];
+  if (process.platform === "linux") {
+    // A never-shown X11 window draws ~1.5 frames/s, which starves rAF-driven layout
+    // and native wheel scrolling in background test mode.
+    args.push("--disable-gpu", "--no-sandbox", "--disable-frame-rate-limit");
+  }
+  return args;
+}
+
 export async function launchDesktop(
   userDataDir: string,
   options: readonly string[] | LaunchDesktopOptions = [],
 ): Promise<DesktopHarness> {
-  const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
+  const normalized = normalizeLaunchOptions(options);
   const agentDir = await prepareAgentDir(userDataDir, normalized);
   const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
-  const electronApp = await electron.launch({
-    args: [desktopDir],
-    cwd: desktopDir,
-    env,
-    ...(normalized.recordVideoDir
+  // Playwright's Electron video recorder can stall loadURL on Linux, leaving a
+  // placeholder BrowserWindow whose URL never leaves empty. Skip it there;
+  // callers still capture screenshots and traces.
+  const recordVideo =
+    normalized.recordVideoDir && process.platform !== "linux"
       ? {
           recordVideo: {
             dir: normalized.recordVideoDir,
             ...(normalized.recordVideoSize ? { size: normalized.recordVideoSize } : {}),
           },
         }
-      : {}),
+      : {};
+  const electronApp = await electron.launch({
+    args: electronCliArgs(desktopDir),
+    cwd: desktopDir,
+    env,
+    ...recordVideo,
   });
 
   return createDesktopHarness(electronApp);
@@ -137,10 +173,10 @@ export async function spawnDesktopProcess(
   userDataDir: string,
   options: readonly string[] | LaunchDesktopOptions = [],
 ): Promise<ChildProcess> {
-  const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
+  const normalized = normalizeLaunchOptions(options);
   const agentDir = await prepareAgentDir(userDataDir, normalized);
   const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
-  return spawn(electronExecutablePath, [desktopDir], {
+  return spawn(electronExecutablePath, electronCliArgs(desktopDir), {
     cwd: desktopDir,
     env,
     stdio: "ignore",
@@ -151,7 +187,7 @@ export async function launchPackagedDesktop(
   userDataDir: string,
   options: readonly string[] | LaunchDesktopOptions = [],
 ): Promise<DesktopHarness> {
-  const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
+  const normalized = normalizeLaunchOptions(options);
   const agentDir = await prepareAgentDir(userDataDir, normalized);
   const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
   const releaseDir = resolvePackagedReleaseDir(process.env.PI_APP_TEST_RELEASE_DIR);
@@ -164,7 +200,7 @@ export async function launchDesktopByExecutable(
   userDataDir: string,
   options: readonly string[] | LaunchDesktopOptions = [],
 ): Promise<DesktopHarness> {
-  const normalized = Array.isArray(options) ? { initialWorkspaces: options } : options;
+  const normalized = normalizeLaunchOptions(options);
   const agentDir = await prepareAgentDir(userDataDir, normalized);
   const env = buildDesktopLaunchEnv(userDataDir, agentDir, normalized);
   return launchDesktopExecutable(executablePath, env);
@@ -176,7 +212,7 @@ async function launchDesktopExecutable(
 ): Promise<DesktopHarness> {
   const electronApp = await electron.launch({
     executablePath,
-    args: [],
+    args: electronCliArgs(),
     cwd: dirname(executablePath),
     env,
   });
@@ -184,14 +220,48 @@ async function launchDesktopExecutable(
   return createDesktopHarness(electronApp);
 }
 
+function isPlaceholderElectronPage(page: Page): boolean {
+  const url = page.url();
+  return url === "" || url === "about:blank";
+}
+
+async function waitForDesktopRendererPage(
+  electronApp: ElectronApplication,
+  timeoutMs = 30_000,
+): Promise<Page> {
+  const deadline = Date.now() + timeoutMs;
+  const pick = () =>
+    electronApp.windows().find((candidate) => !isPlaceholderElectronPage(candidate));
+  const existing = pick();
+  if (existing) {
+    return existing;
+  }
+
+  while (Date.now() < deadline) {
+    const found = pick();
+    if (found) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  const urls = electronApp.windows().map((candidate) => candidate.url() || "<empty>");
+  throw new Error(
+    `Timed out waiting for desktop renderer window (urls: ${urls.join(", ") || "<none>"})`,
+  );
+}
+
 function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness {
   let page: Page | undefined;
 
   async function getWindow(): Promise<Page> {
     if (!page) {
-      page = await electronApp.firstWindow();
+      // Playwright's Electron video recorder can expose an empty page before the
+      // real BrowserWindow finishes loadURL. firstWindow() would attach to that
+      // placeholder and hang on domcontentloaded.
+      page = await waitForDesktopRendererPage(electronApp);
       await page.waitForLoadState("domcontentloaded");
-      await page.waitForFunction(() => Boolean((window as PiAppWindow).piApp), undefined, {
+      await page.waitForFunction(() => Boolean(globalThis.window.piApp), undefined, {
         timeout: 15_000,
       });
     }
@@ -202,6 +272,7 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
     electronApp,
     firstWindow: () => getWindow(),
     focusWindow: async () => {
+      const appPage = await getWindow();
       await electronApp.evaluate(({ BrowserWindow, app }) => {
         const window = BrowserWindow.getAllWindows()[0];
         window?.restore();
@@ -217,7 +288,6 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
         app.focus({ steal: true });
         window?.focus();
       });
-      const appPage = await getWindow();
       await appPage.bringToFront();
       await expect
         .poll(
@@ -243,6 +313,19 @@ function createDesktopHarness(electronApp: ElectronApplication): DesktopHarness 
 
 async function focusElectronAppProcess(electronApp: ElectronApplication): Promise<void> {
   const pid = await electronApp.evaluate(() => process.pid);
+  const electronAppBundle = resolve(electronExecutablePath, "..", "..");
+  try {
+    await execFileAsync("open", ["-a", electronAppBundle], { timeout: 5_000 });
+  } catch {
+    // The bundle activate path is best-effort; continue with AppleScript/Electron focus.
+  }
+  try {
+    await execFileAsync("osascript", ["-e", 'tell application "Electron" to activate'], {
+      timeout: 5_000,
+    });
+  } catch {
+    // Fall through to System Events when the Electron app name is unavailable.
+  }
   try {
     await execFileAsync(
       "osascript",
@@ -254,7 +337,7 @@ async function focusElectronAppProcess(electronApp: ElectronApplication): Promis
           return name of targetProcess
         end tell`,
       ],
-      { timeout: 5_000 },
+      { timeout: 2_000 },
     );
   } catch {
     // Fall back to Electron/Playwright focus APIs when System Events access is unavailable.
@@ -266,14 +349,21 @@ function buildDesktopLaunchEnv(
   agentDir: string,
   options: LaunchDesktopOptions,
 ): NodeJS.ProcessEnv {
-  const baseEnv = options.inheritParentEnv === false ? {} : process.env;
+  const baseEnv = options.inheritParentEnv === false ? {} : { ...process.env };
+  // Ambient provider credentials must never turn a fixture test into a real request.
+  // Explicit envOverrides remain available for tests of environment configuration.
+  for (const key of Object.keys(baseEnv)) {
+    if (isProviderAuthEnvVar(key)) delete baseEnv[key];
+  }
   const env = {
     ...baseEnv,
     PI_APP_USER_DATA_DIR: userDataDir,
     PI_APP_INITIAL_WORKSPACES: (options.initialWorkspaces ?? []).join(delimiter),
     PI_APP_TEST_MODE: options.testMode ?? process.env.PI_APP_TEST_MODE ?? "foreground",
     PI_CODING_AGENT_DIR: agentDir,
-    ...(options.notificationLogPath ? { PI_APP_NOTIFICATION_LOG_PATH: options.notificationLogPath } : {}),
+    ...(options.notificationLogPath
+      ? { PI_APP_NOTIFICATION_LOG_PATH: options.notificationLogPath }
+      : {}),
     PI_APP_OPEN_DEVTOOLS: "0",
     ...(options.envOverrides ?? {}),
   };
@@ -306,8 +396,13 @@ async function prepareAgentDir(
   userDataDir: string,
   options: LaunchDesktopOptions,
 ): Promise<string> {
+  if (process.env.PI_APP_TEST_LANE === "core" && options.realAuthSourceDir) {
+    throw new Error("Core tests must not use real provider credentials; use the live lane.");
+  }
   if (options.agentDir && options.realAuthSourceDir) {
-    throw new Error("Pass either agentDir or realAuthSourceDir to the desktop launch helper, not both.");
+    throw new Error(
+      "Pass either agentDir or realAuthSourceDir to the desktop launch helper, not both.",
+    );
   }
 
   if (options.agentDir) {
@@ -363,7 +458,10 @@ async function copyAgentFile(
   }
 }
 
-async function writeAgentEnabledModels(agentDir: string, enabledModels: readonly string[] | undefined): Promise<void> {
+async function writeAgentEnabledModels(
+  agentDir: string,
+  enabledModels: readonly string[] | undefined,
+): Promise<void> {
   if (!enabledModels) {
     return;
   }
@@ -394,8 +492,10 @@ async function writeAgentEnabledModels(agentDir: string, enabledModels: readonly
 
 async function readJsonObject(filePath: string): Promise<Record<string, unknown>> {
   try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8"));
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
+    const parsed: unknown = JSON.parse(await readFile(filePath, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? Object.fromEntries(Object.entries(parsed))
+      : {};
   } catch (error) {
     if (isMissingPathError(error)) {
       return {};
@@ -415,118 +515,6 @@ function splitModelPattern(pattern: string): { provider: string; modelId: string
   };
 }
 
-export async function resolvePackagedAppBundle(releaseDir = packagedReleaseDir): Promise<string> {
-  let appBundles: string[];
-  try {
-    appBundles = await findAppBundles(releaseDir);
-  } catch (error) {
-    if (isMissingPathError(error)) {
-      throw new Error(
-        `Packaged release directory not found: ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package:dir first.`,
-      );
-    }
-    throw error;
-  }
-
-  const appBundle = appBundles.find((candidate) => basename(candidate) === "pi-gui.app") ?? appBundles[0];
-  if (!appBundle) {
-    throw new Error(`No .app bundle found under ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package:dir first.`);
-  }
-
-  return appBundle;
-}
-
-export async function resolvePackagedAppExecutable(releaseDir = packagedReleaseDir): Promise<string> {
-  return resolveAppBundleExecutable(await resolvePackagedAppBundle(releaseDir));
-}
-
-export async function resolveAppBundleExecutable(appBundle: string): Promise<string> {
-  const macOsDir = join(appBundle, "Contents", "MacOS");
-  const entries = await readdir(macOsDir, { withFileTypes: true });
-  const expectedExecutableName = basename(appBundle, ".app");
-  const executableEntry =
-    entries.find((entry) => entry.isFile() && entry.name === expectedExecutableName) ??
-    entries.find((entry) => entry.isFile());
-
-  if (!executableEntry) {
-    throw new Error(`No packaged executable found under ${macOsDir}.`);
-  }
-
-  return join(macOsDir, executableEntry.name);
-}
-
-export async function resolvePackagedReleaseZip(releaseDir = packagedReleaseDir): Promise<string> {
-  const entries = await readdir(releaseDir, { withFileTypes: true });
-  const zipEntry =
-    entries.find((entry) => entry.isFile() && entry.name.endsWith("-arm64.zip")) ??
-    entries.find((entry) => entry.isFile() && entry.name.endsWith("-mac.zip")) ??
-    entries.find((entry) => entry.isFile() && entry.name.endsWith(".zip"));
-
-  if (!zipEntry) {
-    throw new Error(`No packaged macOS release zip found under ${releaseDir}. Run pnpm --filter @pi-gui/desktop run package first.`);
-  }
-
-  return join(releaseDir, zipEntry.name);
-}
-
-export async function extractPackagedReleaseZipAppBundle(
-  releaseDir = packagedReleaseDir,
-  appName = "pi-gui 2.app",
-): Promise<string> {
-  const zipPath = await resolvePackagedReleaseZip(releaseDir);
-  return extractAppBundleFromReleaseZip(zipPath, appName);
-}
-
-export async function extractAppBundleFromReleaseZip(
-  zipPath: string,
-  appName = "pi-gui 2.app",
-): Promise<string> {
-  const extractionDir = await mkdtemp(join(tmpdir(), "pi-gui-release-zip-"));
-  await execFileAsync("ditto", ["-x", "-k", zipPath, extractionDir]);
-
-  const extractedAppBundle = await resolvePackagedAppBundle(extractionDir);
-  const renamedBundle = join(extractionDir, appName);
-
-  if (extractedAppBundle !== renamedBundle) {
-    try {
-      await rename(extractedAppBundle, renamedBundle);
-    } catch (error) {
-      if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EXDEV") {
-        throw error;
-      }
-
-      await cp(extractedAppBundle, renamedBundle, { recursive: true });
-    }
-  }
-
-  return realpath(renamedBundle);
-}
-
-export async function copyAppBundle(sourceAppBundle: string, targetAppBundle: string): Promise<void> {
-  await execFileAsync("ditto", [sourceAppBundle, targetAppBundle]);
-}
-
-async function findAppBundles(rootDir: string): Promise<string[]> {
-  const entries = await readdir(rootDir, { withFileTypes: true });
-  const bundles: string[] = [];
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-
-    const fullPath = join(rootDir, entry.name);
-    if (entry.name.endsWith(".app")) {
-      bundles.push(fullPath);
-      continue;
-    }
-
-    bundles.push(...(await findAppBundles(fullPath)));
-  }
-
-  return bundles;
-}
-
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
@@ -535,7 +523,10 @@ export async function makeUserDataDir(prefix = "pi-gui-user-data-"): Promise<str
   return mkdtemp(join(tmpdir(), prefix));
 }
 
-export async function seedAgentDir(agentDir: string, options: SeedAgentDirOptions = {}): Promise<void> {
+export async function seedAgentDir(
+  agentDir: string,
+  options: SeedAgentDirOptions = {},
+): Promise<void> {
   const {
     withOpenAiAuth = true,
     withDefaultModel = true,
@@ -580,7 +571,11 @@ export async function seedBranchedTreeSessionFixture(
   const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
-        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendMessage(message: {
+          role: "user" | "assistant";
+          content: string;
+          timestamp: number;
+        }): string;
         appendModelChange(provider: string, modelId: string): string;
         appendSessionInfo(name: string): string;
         appendThinkingLevelChange(thinkingLevel: string): string;
@@ -639,6 +634,85 @@ export async function seedBranchedTreeSessionFixture(
   });
 }
 
+/**
+ * A long compacted-style session shaped like a real user report: 11 branches, each forking
+ * off the previous one, about 3,450 entries, and a deepest root-to-leaf path of 518 entries.
+ */
+export async function seedLargeBranchedTreeSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+): Promise<{
+  readonly sessionId: string;
+  readonly title: "Large tree fixture session";
+  readonly entryCount: number;
+  readonly deepestPath: number;
+}> {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendMessage(message: {
+          role: "user" | "assistant";
+          content: string;
+          timestamp: number;
+        }): string;
+        appendSessionInfo(name: string): string;
+        branch(entryId: string): void;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  // [root-to-leaf length, depth on the previous branch where this one forks off]
+  const branches: readonly (readonly [number, number])[] = [
+    [164, 0],
+    [518, 18],
+    [372, 22],
+    [433, 26],
+    [448, 30],
+    [378, 34],
+    [367, 38],
+    [325, 42],
+    [290, 46],
+    [471, 50],
+    [58, 54],
+  ];
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    let entryCount = 0;
+    let previousPath: string[] = [];
+    for (const [length, forkDepth] of branches) {
+      const path = previousPath.slice(0, forkDepth);
+      const forkId = path.at(-1);
+      if (forkId) {
+        sessionManager.branch(forkId);
+      }
+      while (path.length < length) {
+        const index = path.length;
+        timestamp += 1_000;
+        path.push(
+          sessionManager.appendMessage({
+            role: index % 2 === 0 ? "user" : "assistant",
+            content: `Step ${index} on branch ${length}`,
+            timestamp,
+          }),
+        );
+        entryCount += 1;
+      }
+      previousPath = path;
+    }
+    sessionManager.appendSessionInfo("Large tree fixture session");
+
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: "Large tree fixture session",
+      entryCount,
+      deepestPath: Math.max(...branches.map(([length]) => length)),
+    };
+  });
+}
+
 export async function seedExternalLinkSessionFixture(
   agentDir: string,
   workspacePath: string,
@@ -649,7 +723,11 @@ export async function seedExternalLinkSessionFixture(
   const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
-        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendMessage(message: {
+          role: "user" | "assistant";
+          content: string;
+          timestamp: number;
+        }): string;
         appendSessionInfo(name: string): string;
         getSessionId(): string;
       };
@@ -680,6 +758,57 @@ export async function seedExternalLinkSessionFixture(
     return {
       sessionId: sessionManager.getSessionId(),
       title: "External link fixture session",
+    };
+  });
+}
+
+export async function seedNamedTextSessionFixture(
+  agentDir: string,
+  workspacePath: string,
+  session: {
+    readonly title: string;
+    readonly userText: string;
+    readonly assistantText: string;
+  },
+): Promise<{
+  readonly sessionId: string;
+  readonly title: string;
+}> {
+  const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
+    SessionManager: {
+      create(cwd: string): {
+        appendMessage(message: {
+          role: "user" | "assistant";
+          content: string;
+          timestamp: number;
+        }): string;
+        appendSessionInfo(name: string): string;
+        getSessionId(): string;
+      };
+    };
+  };
+
+  return withAgentDirEnv(agentDir, async () => {
+    const sessionManager = SessionManager.create(workspacePath);
+    let timestamp = Date.now();
+    const nextTimestamp = () => {
+      timestamp += 1_000;
+      return timestamp;
+    };
+    sessionManager.appendMessage({
+      role: "user",
+      content: session.userText,
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendMessage({
+      role: "assistant",
+      content: session.assistantText,
+      timestamp: nextTimestamp(),
+    });
+    sessionManager.appendSessionInfo(session.title);
+    return {
+      sessionId: sessionManager.getSessionId(),
+      title: session.title,
     };
   });
 }
@@ -802,7 +931,11 @@ export async function seedForkSessionFixture(
   const { SessionManager } = (await import("@earendil-works/pi-coding-agent")) as {
     SessionManager: {
       create(cwd: string): {
-        appendMessage(message: { role: "user" | "assistant"; content: string; timestamp: number }): string;
+        appendMessage(message: {
+          role: "user" | "assistant";
+          content: string;
+          timestamp: number;
+        }): string;
         appendModelChange(provider: string, modelId: string): string;
         appendSessionInfo(name: string): string;
         appendThinkingLevelChange(thinkingLevel: string): string;
@@ -885,7 +1018,9 @@ export async function writeProjectExtension(
 export async function initGitRepo(workspacePath: string): Promise<void> {
   await execFileAsync("git", ["init", "-b", "main"], { cwd: workspacePath });
   await execFileAsync("git", ["config", "user.name", "Pi App Tests"], { cwd: workspacePath });
-  await execFileAsync("git", ["config", "user.email", "pi-gui-tests@example.com"], { cwd: workspacePath });
+  await execFileAsync("git", ["config", "user.email", "pi-gui-tests@example.com"], {
+    cwd: workspacePath,
+  });
 }
 
 export async function commitAllInGitRepo(workspacePath: string, message: string): Promise<void> {
@@ -901,258 +1036,9 @@ export async function writeTextFile(filePath: string, contents: string): Promise
   await writeFile(filePath, contents, "utf8");
 }
 
-export function desktopShortcut(keyChord: string): string {
-  return `${desktopModifierKey}+${keyChord}`;
-}
-
-export async function pasteTinyPngViaClipboard(
-  harness: DesktopHarness,
-  window: Page,
-  composerTestId = "composer",
-): Promise<void> {
-  const composer = window.getByTestId(composerTestId);
-  await composer.click();
-  await expect(composer).toBeFocused();
-  await harness.electronApp.evaluate(({ clipboard, nativeImage }, imagePath) => {
-    clipboard.writeImage(nativeImage.createFromPath(imagePath));
-  }, nativeClipboardImagePath);
-  await composer.press(desktopShortcut("V"));
-  await expect(window.locator(".composer-attachment")).toBeVisible();
-}
-
-export async function pasteTinyPngFromClipboardFiles(
-  window: Page,
-  fileName = "screenshot.png",
-  composerTestId = "composer",
-): Promise<void> {
-  await dispatchTinyPngPaste(window, fileName, composerTestId, "files");
-}
-
-export async function pasteTinyPng(
-  window: Page,
-  fileName = "screenshot.png",
-  composerTestId = "composer",
-): Promise<void> {
-  await dispatchTinyPngPaste(window, fileName, composerTestId, "data-transfer");
-}
-
-export async function dragFilesOverComposer(
-  window: Page,
-  filePaths: readonly string[],
-  composerSurfaceTestId = "composer-surface",
-): Promise<void> {
-  const files = await Promise.all(filePaths.map(loadComposerDragFile));
-  await dispatchComposerDragEvent(window, "dragenter", files, composerSurfaceTestId);
-  await dispatchComposerDragEvent(window, "dragover", files, composerSurfaceTestId);
-}
-
-export async function dropFilesOnComposer(
-  window: Page,
-  filePaths: readonly string[],
-  composerSurfaceTestId = "composer-surface",
-): Promise<void> {
-  const files = await Promise.all(filePaths.map(loadComposerDragFile));
-  await dispatchComposerDragEvent(window, "drop", files, composerSurfaceTestId);
-}
-
-async function dispatchTinyPngPaste(
-  window: Page,
-  fileName: string,
-  composerTestId: string,
-  mode: "files" | "data-transfer",
-): Promise<void> {
-  await window.evaluate(({ encodedPng, name, testId, clipboardMode }) => {
-    const composer = document.querySelector<HTMLTextAreaElement>(`[data-testid='${testId}']`);
-    if (!composer) {
-      throw new Error(`Composer was unavailable for test id: ${testId}`);
-    }
-
-    const bytes = Uint8Array.from(atob(encodedPng), (char) => char.charCodeAt(0));
-    const file = new File([bytes], name, { type: "image/png" });
-    const event = new Event("paste", { bubbles: true, cancelable: true });
-    const clipboardData =
-      clipboardMode === "files"
-        ? {
-            items: [],
-            files: [file],
-            types: ["Files"],
-          }
-        : (() => {
-            const transfer = new DataTransfer();
-            transfer.items.add(file);
-            return transfer;
-          })();
-
-    Object.defineProperty(event, "clipboardData", {
-      configurable: true,
-      value: clipboardData,
-    });
-
-    composer.focus();
-    composer.dispatchEvent(event);
-  }, { encodedPng: TINY_PNG_BASE64, name: fileName, testId: composerTestId, clipboardMode: mode });
-}
-
-async function dispatchComposerDragEvent(
-  window: Page,
-  eventType: "dragenter" | "dragover" | "drop",
-  files: readonly {
-    readonly encoded: string;
-    readonly mimeType: string;
-    readonly name: string;
-    readonly path: string;
-  }[],
-  composerSurfaceTestId: string,
-): Promise<void> {
-  await window.evaluate(({ eventName, entries, surfaceTestId }) => {
-    const surface = document.querySelector<HTMLElement>(`[data-testid='${surfaceTestId}']`);
-    if (!surface) {
-      throw new Error(`Composer surface was unavailable for test id: ${surfaceTestId}`);
-    }
-
-    const transfer = new DataTransfer();
-    for (const entry of entries) {
-      const bytes = Uint8Array.from(atob(entry.encoded), (char) => char.charCodeAt(0));
-      const file = new File([bytes], entry.name, { type: entry.mimeType });
-      Object.defineProperty(file, "path", {
-        configurable: true,
-        value: entry.path,
-      });
-      transfer.items.add(file);
-    }
-
-    const event = new Event(eventName, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", {
-      configurable: true,
-      value: transfer,
-    });
-    surface.dispatchEvent(event);
-  }, { eventName: eventType, entries: files, surfaceTestId: composerSurfaceTestId });
-}
-
-async function loadComposerDragFile(filePath: string): Promise<{
-  readonly encoded: string;
-  readonly mimeType: string;
-  readonly name: string;
-  readonly path: string;
-}> {
-  const buffer = await readFile(filePath);
-  return {
-    encoded: buffer.toString("base64"),
-    mimeType: mimeTypeForTestFile(filePath),
-    name: basename(filePath),
-    path: filePath,
-  };
-}
-
-function mimeTypeForTestFile(filePath: string): string {
-  switch (extname(filePath).toLowerCase()) {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".webp":
-      return "image/webp";
-    case ".txt":
-    case ".md":
-      return "text/plain";
-    case ".json":
-      return "application/json";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-export async function stubNextOpenDialogResult(
-  harness: DesktopHarness,
-  result: { readonly canceled: boolean; readonly filePaths: readonly string[] },
-): Promise<void> {
-  await harness.electronApp.evaluate(({ dialog }, nextResult) => {
-    const original = dialog.showOpenDialog;
-    (globalThis as { __PI_TEST_OPEN_DIALOG_COUNT?: number }).__PI_TEST_OPEN_DIALOG_COUNT = 0;
-    dialog.showOpenDialog = async (...args: Parameters<typeof dialog.showOpenDialog>) => {
-      dialog.showOpenDialog = original;
-      const globals = globalThis as { __PI_TEST_OPEN_DIALOG_COUNT?: number };
-      globals.__PI_TEST_OPEN_DIALOG_COUNT = (globals.__PI_TEST_OPEN_DIALOG_COUNT ?? 0) + 1;
-      return { canceled: nextResult.canceled, filePaths: [...nextResult.filePaths] };
-    };
-  }, result);
-}
-
-export async function stubNextOpenDialog(
-  harness: DesktopHarness,
-  filePaths: readonly string[],
-): Promise<void> {
-  await stubNextOpenDialogResult(harness, { canceled: false, filePaths });
-}
-
-export async function getOpenDialogInvocationCount(harness: DesktopHarness): Promise<number> {
-  return harness.electronApp.evaluate(() => {
-    return (globalThis as { __PI_TEST_OPEN_DIALOG_COUNT?: number }).__PI_TEST_OPEN_DIALOG_COUNT ?? 0;
-  });
-}
-
-export async function triggerNativeOpenFolderShortcut(harness: DesktopHarness): Promise<void> {
-  await harness.electronApp.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.webContents.sendInputEvent({
-      type: "keyDown",
-      keyCode: "o",
-      modifiers: ["meta"],
-    });
-  });
-}
-
-export async function getApplicationMenuItemInfo(
-  harness: DesktopHarness,
-  menuItemId: string,
-): Promise<{ id: string; label: string; accelerator: string; parentLabel: string | null } | null> {
-  return harness.electronApp.evaluate(({ Menu }, targetId) => {
-    const menu = Menu.getApplicationMenu();
-    if (!menu) {
-      return null;
-    }
-
-    const stack = menu.items.map((item) => ({ item, parentLabel: item.label ?? null }));
-    while (stack.length > 0) {
-      const entry = stack.shift();
-      if (!entry) {
-        continue;
-      }
-      const { item, parentLabel } = entry;
-      if (item.id === targetId) {
-        return {
-          id: item.id,
-          label: item.label,
-          accelerator: item.accelerator ? String(item.accelerator) : "",
-          parentLabel,
-        };
-      }
-      for (const child of item.submenu?.items ?? []) {
-        stack.push({ item: child, parentLabel: item.label || parentLabel });
-      }
-    }
-
-    return null;
-  }, menuItemId);
-}
-
-export async function triggerApplicationMenuItem(harness: DesktopHarness, menuItemId: string): Promise<boolean> {
-  return harness.electronApp.evaluate(({ BrowserWindow, Menu }, targetId) => {
-    const item = Menu.getApplicationMenu()?.getMenuItemById(targetId);
-    if (!item?.click) {
-      return false;
-    }
-    item.click(item, BrowserWindow.getFocusedWindow() ?? undefined, {} as never);
-    return true;
-  }, menuItemId);
-}
-
 export async function getDesktopState(window: Page): Promise<DesktopAppState> {
   const state = await window.evaluate(() => {
-    const app = (window as PiAppWindow).piApp;
+    const app = globalThis.window.piApp;
     if (!app) {
       throw new Error("piApp IPC bridge is unavailable");
     }
@@ -1166,14 +1052,97 @@ export async function getDesktopState(window: Page): Promise<DesktopAppState> {
   return state;
 }
 
-export async function getSelectedTranscript(window: Page): Promise<SelectedTranscriptRecord | null> {
+export async function getSelectedTranscript(
+  window: Page,
+): Promise<SelectedTranscriptRecord | null> {
   return window.evaluate(async () => {
-    const app = (window as PiAppWindow).piApp;
+    const app = globalThis.window.piApp;
     if (!app) {
       throw new Error("piApp IPC bridge is unavailable");
     }
     return app.getSelectedTranscript();
   });
+}
+
+export async function waitForSelectedSessionReady(
+  window: Page,
+  target: {
+    readonly sessionId: string;
+    readonly workspaceId?: string;
+  },
+  timeout = 15_000,
+): Promise<void> {
+  let expectedComposerDraft = "";
+  let expectedTitle = "";
+
+  await expect
+    .poll(
+      async () => {
+        const [state, selectedTranscript] = await Promise.all([
+          getDesktopState(window),
+          getSelectedTranscript(window),
+        ]);
+        const workspace = state.workspaces.find(
+          (entry) =>
+            (!target.workspaceId || entry.id === target.workspaceId) &&
+            entry.sessions.some((session) => session.id === target.sessionId),
+        );
+        const session = workspace?.sessions.find((entry) => entry.id === target.sessionId);
+        if (
+          !workspace ||
+          !session ||
+          !state.runtimeByWorkspace[workspace.id] ||
+          state.selectedWorkspaceId !== workspace.id ||
+          state.selectedSessionId !== session.id ||
+          selectedTranscript?.workspaceId !== workspace.id ||
+          selectedTranscript.sessionId !== session.id
+        ) {
+          return false;
+        }
+        expectedComposerDraft = state.composerDraft;
+        expectedTitle = session.title;
+        return true;
+      },
+      {
+        intervals: [50, 100, 250, 500],
+        message: `wait for selected session ${target.sessionId} to finish hydrating`,
+        timeout,
+      },
+    )
+    .toBe(true);
+
+  await expect(window.locator(".chat-header__title")).toHaveText(expectedTitle, { timeout });
+  await expect(window.getByTestId("transcript-skeleton")).toHaveCount(0, { timeout });
+  await expect(window.getByTestId("composer")).toHaveValue(expectedComposerDraft, { timeout });
+
+  let previousLayout = "";
+  await expect
+    .poll(
+      async () => {
+        const layout = await window.evaluate(() => {
+          const composer = document.querySelector<HTMLElement>('[data-testid="composer-surface"]');
+          const timeline = document.querySelector<HTMLElement>('[data-testid="timeline-pane"]');
+          if (!composer || !timeline) {
+            return "";
+          }
+          return [
+            composer.getBoundingClientRect().height,
+            timeline.getBoundingClientRect().height,
+            timeline.clientHeight,
+            timeline.scrollHeight,
+          ].join(":");
+        });
+        const stable = Boolean(layout) && layout === previousLayout;
+        previousLayout = layout;
+        return stable;
+      },
+      {
+        intervals: [50, 100, 250],
+        message: `wait for selected session ${target.sessionId} layout to settle`,
+        timeout,
+      },
+    )
+    .toBe(true);
 }
 
 export interface TimelineScrollMetrics {
@@ -1214,27 +1183,32 @@ export async function scrollTimelineAwayFromBottom(window: Page, pixels = 160): 
   const minimumRemainingFromBottom = Math.min(500, Math.max(1, pixels * 0.5));
   await expect
     .poll(async () =>
-      window.evaluate(async ({ distance, minimumRemaining }) => {
-        const pane = document.querySelector<HTMLDivElement>("[data-testid='timeline-pane']");
-        if (!pane) {
-          throw new Error("Timeline pane was unavailable");
-        }
+      window.evaluate(
+        async ({ distance, minimumRemaining }) => {
+          const pane = document.querySelector<HTMLDivElement>("[data-testid='timeline-pane']");
+          if (!pane) {
+            throw new Error("Timeline pane was unavailable");
+          }
 
-        const maxScrollTop = pane.scrollHeight - pane.clientHeight;
-        if (maxScrollTop <= minimumRemaining) {
-          return maxScrollTop;
-        }
+          const maxScrollTop = pane.scrollHeight - pane.clientHeight;
+          if (maxScrollTop <= minimumRemaining) {
+            return maxScrollTop;
+          }
 
-        pane.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -distance }));
-        pane.scrollTop = Math.max(0, maxScrollTop - distance);
-        pane.dispatchEvent(new Event("scroll", { bubbles: true }));
-        await new Promise<void>((resolve) => {
-          window.requestAnimationFrame(() => {
-            window.requestAnimationFrame(resolve);
+          pane.dispatchEvent(
+            new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -distance }),
+          );
+          pane.scrollTop = Math.max(0, maxScrollTop - distance);
+          pane.dispatchEvent(new Event("scroll", { bubbles: true }));
+          await new Promise<void>((resolve) => {
+            globalThis.window.requestAnimationFrame(() => {
+              globalThis.window.requestAnimationFrame(() => resolve());
+            });
           });
-        });
-        return pane.scrollHeight - pane.scrollTop - pane.clientHeight;
-      }, { distance: pixels, minimumRemaining: minimumRemainingFromBottom }),
+          return pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+        },
+        { distance: pixels, minimumRemaining: minimumRemainingFromBottom },
+      ),
     )
     .toBeGreaterThan(minimumRemainingFromBottom);
 }
@@ -1257,13 +1231,15 @@ export async function runOrchestrationRuntimeTool(
 ): Promise<OrchestrationRuntimeToolTestResult> {
   await harness.firstWindow();
   return harness.electronApp.evaluate(async (_, payload) => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: {
-        runOrchestrationRuntimeTool?: (
-          input: OrchestrationRuntimeToolTestInput,
-        ) => Promise<OrchestrationRuntimeToolTestResult>;
-      };
-    }).__PI_APP_TEST_HOOKS;
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: {
+          runOrchestrationRuntimeTool?: (
+            input: OrchestrationRuntimeToolTestInput,
+          ) => Promise<OrchestrationRuntimeToolTestResult>;
+        };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.runOrchestrationRuntimeTool) {
       throw new Error("Orchestration runtime-tool hook is unavailable");
     }
@@ -1271,19 +1247,72 @@ export async function runOrchestrationRuntimeTool(
   }, input);
 }
 
+export async function runScheduledTaskRuntimeTool(
+  harness: DesktopHarness,
+  input: OrchestrationRuntimeToolTestInput,
+): Promise<OrchestrationRuntimeToolTestResult> {
+  await harness.firstWindow();
+  return harness.electronApp.evaluate(async (_, payload) => {
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: {
+          runScheduledTaskRuntimeTool?: (
+            input: OrchestrationRuntimeToolTestInput,
+          ) => Promise<OrchestrationRuntimeToolTestResult>;
+        };
+      }
+    ).__PI_APP_TEST_HOOKS;
+    if (!hooks?.runScheduledTaskRuntimeTool) {
+      throw new Error("Scheduled-task runtime-tool hook is unavailable");
+    }
+    return hooks.runScheduledTaskRuntimeTool(payload);
+  }, input);
+}
+
+export async function fireDueScheduledTasks(
+  harness: DesktopHarness,
+  nowIso?: string,
+): Promise<DesktopAppState> {
+  await harness.firstWindow();
+  return harness.electronApp.evaluate(async (_, payload) => {
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: {
+          fireDueScheduledTasks?: (nowIso?: string) => Promise<DesktopAppState>;
+        };
+      }
+    ).__PI_APP_TEST_HOOKS;
+    if (!hooks?.fireDueScheduledTasks) {
+      throw new Error("Scheduled-task fire hook is unavailable");
+    }
+    return hooks.fireDueScheduledTasks(payload);
+  }, nowIso);
+}
+
 export async function emitTestSessionEvent(
   harness: DesktopHarness,
   event: SessionDriverEvent,
 ): Promise<void> {
-  await harness.electronApp.evaluate(async (_, payload) => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: { emitSessionEvent?: (event: SessionDriverEvent) => Promise<void> };
-    }).__PI_APP_TEST_HOOKS;
+  await emitTestSessionEvents(harness, [event]);
+}
+
+export async function emitTestSessionEvents(
+  harness: DesktopHarness,
+  events: readonly SessionDriverEvent[],
+): Promise<void> {
+  await harness.electronApp.evaluate(async (_, payloads) => {
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: { emitSessionEvent?: (event: SessionDriverEvent) => Promise<void> };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.emitSessionEvent) {
       throw new Error("Test session-event hook is unavailable");
     }
-    await hooks.emitSessionEvent(payload);
-  }, event);
+    for (const payload of payloads) {
+      await hooks.emitSessionEvent(payload);
+    }
+  }, events);
 }
 
 /**
@@ -1293,9 +1322,11 @@ export async function emitTestSessionEvent(
  */
 export async function triggerWindowActivation(harness: DesktopHarness): Promise<void> {
   await harness.electronApp.evaluate(async () => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: { handleWindowActivation?: () => void };
-    }).__PI_APP_TEST_HOOKS;
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: { handleWindowActivation?: () => void };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.handleWindowActivation) {
       throw new Error("Window-activation hook is unavailable");
     }
@@ -1305,9 +1336,11 @@ export async function triggerWindowActivation(harness: DesktopHarness): Promise<
 
 export async function setDeferredThreadTitleMode(harness: DesktopHarness): Promise<void> {
   await harness.electronApp.evaluate(async () => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: { setDeferredThreadTitleMode?: () => void };
-    }).__PI_APP_TEST_HOOKS;
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: { setDeferredThreadTitleMode?: () => void };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.setDeferredThreadTitleMode) {
       throw new Error("Deferred thread-title hook is unavailable");
     }
@@ -1323,9 +1356,11 @@ export async function waitForDeferredThreadTitleRequest(
     .poll(
       async () =>
         harness.electronApp.evaluate(async () => {
-          const hooks = (globalThis as {
-            __PI_APP_TEST_HOOKS?: { hasDeferredThreadTitle?: () => boolean };
-          }).__PI_APP_TEST_HOOKS;
+          const hooks = (
+            globalThis as {
+              __PI_APP_TEST_HOOKS?: { hasDeferredThreadTitle?: () => boolean };
+            }
+          ).__PI_APP_TEST_HOOKS;
           if (!hooks?.hasDeferredThreadTitle) {
             throw new Error("Deferred thread-title hook is unavailable");
           }
@@ -1364,11 +1399,16 @@ export async function resolveDeferredThreadTitleEventually(
     .toBe("resolved");
 }
 
-export async function resolveDeferredThreadTitle(harness: DesktopHarness, title: string): Promise<void> {
+export async function resolveDeferredThreadTitle(
+  harness: DesktopHarness,
+  title: string,
+): Promise<void> {
   await harness.electronApp.evaluate(async (_, nextTitle) => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: { resolveDeferredThreadTitle?: (title: string) => void };
-    }).__PI_APP_TEST_HOOKS;
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: { resolveDeferredThreadTitle?: (title: string) => void };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.resolveDeferredThreadTitle) {
       throw new Error("Deferred thread-title resolve hook is unavailable");
     }
@@ -1378,9 +1418,11 @@ export async function resolveDeferredThreadTitle(harness: DesktopHarness, title:
 
 export async function rejectDeferredThreadTitle(harness: DesktopHarness): Promise<void> {
   await harness.electronApp.evaluate(async () => {
-    const hooks = (globalThis as {
-      __PI_APP_TEST_HOOKS?: { rejectDeferredThreadTitle?: () => void };
-    }).__PI_APP_TEST_HOOKS;
+    const hooks = (
+      globalThis as {
+        __PI_APP_TEST_HOOKS?: { rejectDeferredThreadTitle?: () => void };
+      }
+    ).__PI_APP_TEST_HOOKS;
     if (!hooks?.rejectDeferredThreadTitle) {
       throw new Error("Deferred thread-title reject hook is unavailable");
     }
@@ -1397,8 +1439,12 @@ export async function seedTranscriptMessages(
   },
 ): Promise<{ readonly sessionRef: SessionRef; readonly messages: readonly string[] }> {
   const state = await getDesktopState(window);
-  const selectedWorkspace = state.workspaces.find((workspace) => workspace.id === state.selectedWorkspaceId);
-  const selectedSession = selectedWorkspace?.sessions.find((session) => session.id === state.selectedSessionId);
+  const selectedWorkspace = state.workspaces.find(
+    (workspace) => workspace.id === state.selectedWorkspaceId,
+  );
+  const selectedSession = selectedWorkspace?.sessions.find(
+    (session) => session.id === state.selectedSessionId,
+  );
   assertExists(selectedWorkspace, "Expected selected workspace while seeding transcript");
   assertExists(selectedSession, "Expected selected session while seeding transcript");
 
@@ -1462,8 +1508,12 @@ export async function streamAssistantDeltas(
   runId = `stream-run-${Date.now()}`,
 ): Promise<{ readonly sessionRef: SessionRef; readonly fullText: string }> {
   const state = await getDesktopState(window);
-  const selectedWorkspace = state.workspaces.find((workspace) => workspace.id === state.selectedWorkspaceId);
-  const selectedSession = selectedWorkspace?.sessions.find((session) => session.id === state.selectedSessionId);
+  const selectedWorkspace = state.workspaces.find(
+    (workspace) => workspace.id === state.selectedWorkspaceId,
+  );
+  const selectedSession = selectedWorkspace?.sessions.find(
+    (session) => session.id === state.selectedSessionId,
+  );
   assertExists(selectedWorkspace, "Expected selected workspace while streaming transcript");
   assertExists(selectedSession, "Expected selected session while streaming transcript");
 
@@ -1582,10 +1632,13 @@ export async function waitForWorkspaceByPath(
   timeout = 15_000,
 ): Promise<WorkspaceRecord> {
   await expect
-    .poll(async () => {
-      const state = await getDesktopState(window);
-      return state.workspaces.find((workspace) => workspace.path === workspacePath) ?? null;
-    }, { timeout })
+    .poll(
+      async () => {
+        const state = await getDesktopState(window);
+        return state.workspaces.find((workspace) => workspace.path === workspacePath) ?? null;
+      },
+      { timeout },
+    )
     .not.toBeNull();
 
   const state = await getDesktopState(window);
@@ -1596,7 +1649,7 @@ export async function waitForWorkspaceByPath(
 
 export async function addWorkspaceViaIpc(window: Page, workspacePath: string): Promise<void> {
   await window.evaluate(async (pathValue) => {
-    const app = (window as PiAppWindow).piApp;
+    const app = globalThis.window.piApp;
     if (!app) {
       throw new Error("piApp IPC bridge is unavailable");
     }
@@ -1611,11 +1664,14 @@ export async function waitForSessionByTitle(
   timeout = 15_000,
 ): Promise<SessionRecord> {
   await expect
-    .poll(async () => {
-      const state = await getDesktopState(window);
-      const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-      return workspace?.sessions.find((session) => session.title === title) ?? null;
-    }, { timeout })
+    .poll(
+      async () => {
+        const state = await getDesktopState(window);
+        const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
+        return workspace?.sessions.find((session) => session.title === title) ?? null;
+      },
+      { timeout },
+    )
     .not.toBeNull();
 
   const state = await getDesktopState(window);
@@ -1627,7 +1683,77 @@ export async function waitForSessionByTitle(
 
 export async function selectSession(window: Page, sessionTitle: string): Promise<void> {
   await clickSession(window, sessionTitle);
-  await expect(window.locator(".topbar__session")).toHaveText(sessionTitle);
+  await expect(window.locator(".chat-header__title")).toHaveText(sessionTitle);
+}
+
+/**
+ * Waits until transcript rows stop moving. Rows are placed from estimates and move once
+ * measured; a click whose press and release straddle that move is lost without an error.
+ * A resize (such as opening the side panel) reaches the timeline only after the next
+ * layout, so let one full frame run before reading the state.
+ */
+export async function waitForTimelineLayout(window: Page): Promise<void> {
+  await window.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(window.getByTestId("timeline-pane")).toHaveAttribute("data-layout", "settled");
+}
+
+export async function selectSidePanel(
+  window: Page,
+  choice: "Files" | "Review" | "Terminal",
+): Promise<void> {
+  const workbench = window.getByTestId("workbench");
+  if (!(await workbench.isVisible())) {
+    await window.getByTestId("toggle-side-panel").click();
+  }
+  const existing = workbench.getByRole("tab", { name: choice, exact: true });
+  if (await existing.count()) {
+    await existing.click();
+  } else {
+    const chooser = window.getByTestId("workbench-chooser");
+    if (!(await chooser.isVisible())) {
+      await window.getByTestId("workbench-add-tab").click();
+    }
+    await chooser.getByRole("button", { name: choice, exact: true }).click();
+  }
+  await expect(existing).toHaveAttribute("aria-selected", "true");
+}
+
+export type ReviewScopeLabel =
+  "Last Turn" | "Selected Turn" | "Uncommitted" | "Unstaged" | "Staged" | "Branch";
+
+/** Chooses a comparison from the Review panel's scope menu. */
+export async function chooseReviewScope(window: Page, scope: ReviewScopeLabel): Promise<void> {
+  await window.getByRole("button", { name: "Review scope", exact: true }).click();
+  await window
+    .getByRole("menu", { name: "Review scope", exact: true })
+    .getByRole("menuitemradio", { name: scope, exact: true })
+    .click();
+  await expect(reviewScopeButton(window)).toHaveText(scope);
+}
+
+/** Opens the Review "…" menu, which lists checkouts and the resolved comparison. */
+export async function openReviewOptions(window: Page) {
+  await window.getByRole("button", { name: "Review options", exact: true }).click();
+  return window.getByRole("menu", { name: "Review options", exact: true });
+}
+
+export async function chooseReviewCheckout(window: Page, checkoutId: string): Promise<void> {
+  const menu = await openReviewOptions(window);
+  await menu.locator(`[role="menuitemradio"][data-option-id="${checkoutId}"]`).click();
+}
+
+/** The resolved comparison shown at the top of the Review "…" menu; press Escape to close. */
+export async function reviewComparisonIdentity(window: Page) {
+  return (await openReviewOptions(window)).getByTestId("review-comparison-identity");
+}
+
+export function reviewScopeButton(window: Page) {
+  return window.getByRole("button", { name: "Review scope", exact: true });
 }
 
 export async function clickSession(window: Page, sessionTitle: string): Promise<void> {
@@ -1639,7 +1765,9 @@ export async function openNewThread(window: Page): Promise<void> {
   if (await composer.isVisible().catch(() => false)) {
     return;
   }
-  const button = window.locator(".sidebar").getByRole("button", { name: "New thread", exact: true });
+  const button = window
+    .locator(".sidebar")
+    .getByRole("button", { name: "New thread", exact: true });
   await expect(button).toBeVisible({ timeout: 15_000 });
   await expect(button).toBeEnabled({ timeout: 15_000 });
   await button.click();
@@ -1660,11 +1788,7 @@ export async function startThreadFromSurface(
     readonly workspaceName?: string;
   } = {},
 ): Promise<void> {
-  const {
-    environment = "local",
-    prompt = "Start thread",
-    workspaceName,
-  } = options;
+  const { environment = "local", prompt = "Start thread", workspaceName } = options;
 
   await openNewThread(window);
   if (workspaceName) {
@@ -1707,7 +1831,7 @@ export async function startThreadViaIpc(
 
   const rootWorkspaceId = await window.evaluate(
     async ({ requestedWorkspaceName }) => {
-      const app = (window as PiAppWindow).piApp;
+      const app = globalThis.window.piApp;
       if (!app) {
         throw new Error("piApp IPC bridge is unavailable");
       }
@@ -1729,8 +1853,15 @@ export async function startThreadViaIpc(
   );
 
   await window.evaluate(
-    async ({ rootWorkspaceId, nextEnvironment, nextPrompt, nextProvider, nextModelId, nextThinkingLevel }) => {
-      const app = (window as PiAppWindow).piApp;
+    async ({
+      rootWorkspaceId,
+      nextEnvironment,
+      nextPrompt,
+      nextProvider,
+      nextModelId,
+      nextThinkingLevel,
+    }) => {
+      const app = globalThis.window.piApp;
       if (!app) {
         throw new Error("piApp IPC bridge is unavailable");
       }
@@ -1775,13 +1906,15 @@ export async function createNamedThread(
 
   const targetWorkspaceId = await window.evaluate(
     ({ requestedWorkspaceName }) => {
-      const app = (window as PiAppWindow).piApp;
+      const app = globalThis.window.piApp;
       if (!app) {
         throw new Error("piApp IPC bridge is unavailable");
       }
       return app.getState().then((state) => {
         if (requestedWorkspaceName) {
-          const namedWorkspace = state.workspaces.find((workspace) => workspace.name === requestedWorkspaceName);
+          const namedWorkspace = state.workspaces.find(
+            (workspace) => workspace.name === requestedWorkspaceName,
+          );
           if (!namedWorkspace) {
             throw new Error(`Workspace not found: ${requestedWorkspaceName}`);
           }
@@ -1806,26 +1939,245 @@ export async function createNamedThread(
   await expect(composer).toBeFocused({ timeout: 15_000 });
 }
 
-export async function createSessionViaIpc(window: Page, workspaceIdOrPath: string, title: string): Promise<void> {
-  await window.evaluate(async ({ workspaceTarget, targetTitle }) => {
-    const app = (window as PiAppWindow).piApp;
-    if (!app) {
-      throw new Error("piApp IPC bridge is unavailable");
-    }
+export async function chooseThreadGrouping(
+  window: Page,
+  grouping: "time" | "workspace",
+): Promise<void> {
+  const label = grouping === "time" ? "Time" : "Workspace";
+  await window.getByRole("button", { name: "Customize Sidebar" }).click();
+  await window.getByRole("menuitem", { name: "Grouping" }).click();
+  await window.getByRole("menuitemradio", { name: label, exact: true }).click();
+  await expectThreadGrouping(window, grouping);
+}
 
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      const state = await app.getState();
-      const workspace = state.workspaces.find((entry) => entry.id === workspaceTarget || entry.path === workspaceTarget);
-      if (workspace) {
-        await app.createSession({ workspaceId: workspace.id, title: targetTitle });
+export async function expectThreadGrouping(
+  window: Page,
+  grouping: "time" | "workspace",
+): Promise<void> {
+  const label = grouping === "time" ? "Time" : "Workspace";
+  await window.getByRole("button", { name: "Customize Sidebar" }).click();
+  await window.getByRole("menuitem", { name: "Grouping" }).click();
+  await expect(window.getByRole("menuitemradio", { name: label, exact: true })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expectCompactGroupingMenu(window);
+  await window.keyboard.press("Escape");
+  await expect(window.getByRole("menu", { name: "Customize Sidebar" })).toBeHidden();
+}
+
+async function expectCompactGroupingMenu(window: Page): Promise<void> {
+  const viewportWidth = await window.evaluate(() => document.documentElement.clientWidth);
+  const submenu = window.getByRole("menu", { name: "Grouping" });
+  const submenuBox = await submenu.boundingBox();
+  const timeBox = await window
+    .getByRole("menuitemradio", { name: "Time", exact: true })
+    .boundingBox();
+  expect(submenuBox, "Grouping submenu should be visible").not.toBeNull();
+  expect(timeBox, "Time option should be visible").not.toBeNull();
+  expect(
+    submenuBox!.width,
+    `Grouping submenu is ${submenuBox!.width}px in a ${viewportWidth}px window`,
+  ).toBeLessThan(viewportWidth / 2);
+  expect(submenuBox!.width).toBeLessThan(240);
+  expect(timeBox!.width).toBeGreaterThan(submenuBox!.width * 0.7);
+}
+
+export async function createSessionViaIpc(
+  window: Page,
+  workspaceIdOrPath: string,
+  title: string,
+): Promise<void> {
+  await window.evaluate(
+    async ({ workspaceTarget, targetTitle }) => {
+      const app = globalThis.window.piApp;
+      if (!app) {
+        throw new Error("piApp IPC bridge is unavailable");
+      }
+
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const state = await app.getState();
+        const workspace = state.workspaces.find(
+          (entry) => entry.id === workspaceTarget || entry.path === workspaceTarget,
+        );
+        if (workspace) {
+          await app.createSession({ workspaceId: workspace.id, title: targetTitle });
+          return;
+        }
+        await new Promise((resolve) => globalThis.window.setTimeout(resolve, 100));
+      }
+
+      throw new Error(`Workspace not found: ${workspaceTarget}`);
+    },
+    { workspaceTarget: workspaceIdOrPath, targetTitle: title },
+  );
+
+  await expect(window.locator(".session-row__select", { hasText: title })).toBeVisible({
+    timeout: 15_000,
+  });
+}
+
+export const HYDRATE_TEST_SENTINEL = "hydrate-test-sentinel-token=/private/secret-path";
+
+export type IpcInvokeControlMode = "passthrough" | "reject" | "replace" | "record";
+
+export interface IpcInvokeControlSnapshot {
+  readonly mode: IpcInvokeControlMode;
+  readonly invokeCount: number;
+  readonly rejectCount: number;
+  readonly sentinel: string;
+}
+
+export async function installIpcInvokeControl(
+  harness: DesktopHarness,
+  channel: string,
+  options: {
+    readonly mode: IpcInvokeControlMode;
+    readonly sentinel?: string;
+    readonly replacement?: unknown;
+  },
+): Promise<void> {
+  await harness.electronApp.evaluate(
+    ({ ipcMain }, payload) => {
+      type InvokeHandler = (...args: unknown[]) => unknown;
+      type Control = {
+        mode: "passthrough" | "reject" | "replace" | "record";
+        invokeCount: number;
+        rejectCount: number;
+        sentinel: string;
+        replacement?: unknown;
+        original: InvokeHandler;
+      };
+      const invokeHandlers = (
+        ipcMain as typeof ipcMain & { readonly _invokeHandlers?: Map<string, InvokeHandler> }
+      )._invokeHandlers;
+      const originalHandler = invokeHandlers?.get(payload.channel);
+      if (!originalHandler) {
+        throw new Error(`No IPC handler registered for ${payload.channel}`);
+      }
+
+      const store = globalThis as typeof globalThis & {
+        __PI_TEST_IPC_INVOKE_CONTROL__?: Record<string, Control>;
+      };
+      store.__PI_TEST_IPC_INVOKE_CONTROL__ ??= {};
+      const existing = store.__PI_TEST_IPC_INVOKE_CONTROL__[payload.channel];
+      if (existing) {
+        existing.mode = payload.mode;
+        existing.sentinel = payload.sentinel;
+        existing.replacement = payload.replacement;
         return;
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 100));
+
+      const control: Control = {
+        mode: payload.mode,
+        invokeCount: 0,
+        rejectCount: 0,
+        sentinel: payload.sentinel,
+        replacement: payload.replacement,
+        original: originalHandler,
+      };
+      store.__PI_TEST_IPC_INVOKE_CONTROL__[payload.channel] = control;
+
+      ipcMain.removeHandler(payload.channel);
+      ipcMain.handle(payload.channel, async (...args) => {
+        control.invokeCount += 1;
+        if (control.mode === "reject") {
+          control.rejectCount += 1;
+          throw new Error(control.sentinel);
+        }
+        if (control.mode === "replace") {
+          return control.replacement;
+        }
+        if (control.mode === "record") {
+          return undefined;
+        }
+        return control.original(...args);
+      });
+    },
+    {
+      channel,
+      mode: options.mode,
+      sentinel: options.sentinel ?? HYDRATE_TEST_SENTINEL,
+      replacement: options.replacement,
+    },
+  );
+}
+
+export async function setIpcInvokeControl(
+  harness: DesktopHarness,
+  channel: string,
+  patch: {
+    readonly mode?: IpcInvokeControlMode;
+    readonly replacement?: unknown;
+  },
+): Promise<void> {
+  await harness.electronApp.evaluate(
+    (_electron, payload) => {
+      type Control = {
+        mode: "passthrough" | "reject" | "replace" | "record";
+        invokeCount: number;
+        rejectCount: number;
+        sentinel: string;
+        replacement?: unknown;
+      };
+      const store = globalThis as typeof globalThis & {
+        __PI_TEST_IPC_INVOKE_CONTROL__?: Record<string, Control>;
+      };
+      const control = store.__PI_TEST_IPC_INVOKE_CONTROL__?.[payload.channel];
+      if (!control) {
+        throw new Error(`No IPC invoke control installed for ${payload.channel}`);
+      }
+      if (payload.mode !== undefined) {
+        control.mode = payload.mode;
+      }
+      if (payload.replacement !== undefined) {
+        control.replacement = payload.replacement;
+      }
+    },
+    { channel, mode: patch.mode, replacement: patch.replacement },
+  );
+}
+
+export async function readIpcInvokeControl(
+  harness: DesktopHarness,
+  channel: string,
+): Promise<IpcInvokeControlSnapshot> {
+  return harness.electronApp.evaluate((_electron, targetChannel) => {
+    type Control = {
+      mode: "passthrough" | "reject" | "replace" | "record";
+      invokeCount: number;
+      rejectCount: number;
+      sentinel: string;
+    };
+    const store = globalThis as typeof globalThis & {
+      __PI_TEST_IPC_INVOKE_CONTROL__?: Record<string, Control>;
+    };
+    const control = store.__PI_TEST_IPC_INVOKE_CONTROL__?.[targetChannel];
+    if (!control) {
+      throw new Error(`No IPC invoke control installed for ${targetChannel}`);
     }
+    return {
+      mode: control.mode,
+      invokeCount: control.invokeCount,
+      rejectCount: control.rejectCount,
+      sentinel: control.sentinel,
+    };
+  }, channel);
+}
 
-    throw new Error(`Workspace not found: ${workspaceTarget}`);
-  }, { workspaceTarget: workspaceIdOrPath, targetTitle: title });
+export async function reloadDesktopRenderer(window: Page): Promise<void> {
+  await window.reload();
+  await window.waitForLoadState("domcontentloaded");
+  await window.waitForFunction(() => Boolean(globalThis.window.piApp), undefined, {
+    timeout: 15_000,
+  });
+}
 
-  await expect(window.locator(".session-row__select", { hasText: title })).toBeVisible({ timeout: 15_000 });
+export async function rejectIpcInvokes(
+  harness: DesktopHarness,
+  channel: string,
+  sentinel = HYDRATE_TEST_SENTINEL,
+): Promise<void> {
+  await installIpcInvokeControl(harness, channel, { mode: "reject", sentinel });
 }

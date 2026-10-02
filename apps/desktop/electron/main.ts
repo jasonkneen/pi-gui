@@ -3,80 +3,112 @@ import {
   BrowserWindow,
   clipboard,
   dialog,
-  ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   net,
+  protocol,
   shell,
-  type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
 } from "electron";
 import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
+import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { DesktopAppStore, type DesktopAppViewState } from "./app-store";
+import { augmentPosixPath } from "../scripts/augment-path.cjs";
+import { DesktopAppStore } from "./application/app-store";
+import { WindowOwner } from "./windows/window-owner";
+import { TurnCheckpointStore } from "./workbench/checkpoint-store";
+import {
+  DesktopExtensionViewOwner,
+  DESKTOP_EXTENSION_SCHEME,
+} from "./extensions/extension-view-owner";
+import { performExtensionViewHostAction } from "./extensions/extension-view-actions";
+import { extensionFrameDocument } from "./extensions/extension-frame-document";
+import { ReviewOwner } from "./workbench/review-owner";
+import { registerDesktopIpc } from "./ipc/register-desktop-ipc";
 import {
   createOrchestrationRuntimeExtension,
   createOrchestrationRuntimeTools,
   type OrchestrationRuntimeBridge,
-} from "./orchestration-runtime";
-import * as orchestrationTools from "./app-store-orchestration";
-import { getChangedFiles, getFileDiff, stageFile } from "./app-store-diff";
-import { listWorkspaceFiles, readWorkspaceFile } from "./app-store-files";
+} from "./orchestration/orchestration-runtime";
+import {
+  createScheduledTaskRuntimeExtension,
+  createScheduledTaskRuntimeTools,
+  type ScheduledTaskRuntimeBridge,
+} from "./scheduled-tasks/scheduled-task-runtime";
+import { getChangedFiles, getFileDiff, stageFile } from "./platform/files/app-store-diff";
+import { listWorkspaceFiles, readWorkspaceFile } from "./platform/files/app-store-files";
+import { resolveExistingWorkspacePath } from "./platform/files/workspace-paths";
 import { MAIN_DEV_RELOAD_MARKER } from "./dev-reload-main-probe";
-import { NotificationManager } from "./notification-manager";
+import { NotificationManager } from "./platform/notification-manager";
+import { NotificationPermissionService } from "./platform/notification-permission";
+import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./platform/update-checker";
+import { ThemeManager } from "./platform/theme-manager";
+import { windowBackgroundFor } from "../contracts/theme";
+import { TerminalService } from "./platform/terminal-service";
+import type { DesktopAppState, DesktopAppViewState } from "../contracts/desktop-state";
 import {
-  NotificationPermissionService,
-} from "./notification-permission";
-import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./update-checker";
-import { ThemeManager } from "./theme-manager";
-import { TerminalService } from "./terminal-service";
-import type { AppView, DesktopAppState, ThemeMode, ThemePresetId } from "../src/desktop-state";
-import {
+  desktopCommands,
   desktopIpc,
   getDesktopCommandFromShortcut,
-  type CustomProviderConfig,
+  isSinglePressCommand,
+  isCloseFocusedSurfaceShortcut,
+  getSidePanelTabCommand,
+  platformShortcutModifier,
   type CustomProviderProbeInput,
   type CustomProviderProbeResult,
-} from "../src/ipc";
-import { SUPPORTED_COMPOSER_IMAGE_TYPES } from "../src/composer-attachments";
+} from "../contracts/ipc";
+import {
+  assertComposerImageBytes,
+  assertComposerImageFileSizes,
+  assertComposerImagePixels,
+  SUPPORTED_COMPOSER_IMAGE_TYPES,
+  type ClipboardImageRead,
+} from "../contracts/composer-attachments";
 import type {
   ComposerAttachment,
   ComposerFileAttachment,
   ComposerImageAttachment,
-  CreateSessionInput,
-  CreateWorktreeInput,
-  ForkThreadInput,
-  RemoveWorktreeInput,
-  SendChildThreadFollowUpInput,
-  SetChildSupervisionLoopInput,
-  StartThreadInput,
-  WorkspaceSessionTarget,
-} from "../src/desktop-state";
+} from "../contracts/desktop-state";
 import type { SessionDriverEvent } from "@pi-gui/session-driver";
 import type { GenerateThreadTitleOptions } from "@pi-gui/pi-sdk-driver";
 import type { SessionRef, WorkspaceRef } from "@pi-gui/session-driver";
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: DESKTOP_EXTENSION_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+  },
+]);
+
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
-const windowTestMode = resolveWindowTestMode();
+const appTestMode = resolveAppTestMode(process.env.PI_APP_TEST_MODE);
+const windowTestMode = appTestMode ?? "foreground";
 const devReloadMarkersEnabled = process.env.PI_APP_DEV_RELOAD_MARKERS === "1";
+const TURN_CAPTURE_BACKSTOP_MS = 10_000;
 let store: DesktopAppStore;
+let extensionViewOwner: DesktopExtensionViewOwner | undefined;
+let windowOwner: WindowOwner;
 const themeManager = new ThemeManager();
 let mainWindow: BrowserWindow | null = null;
 let notificationManager: NotificationManager | undefined;
 let notificationPermissionService: NotificationPermissionService | undefined;
 let terminalService: TerminalService | undefined;
 let integratedTerminalShell = "";
+let applicationRelaunchRequested = false;
 
-interface WindowViewState {
-  readonly selectedWorkspaceId: string;
-  readonly selectedSessionId: string;
-  readonly activeView: AppView;
-  readonly sidebarCollapsed: boolean;
+function requestApplicationRelaunch(): void {
+  if (applicationRelaunchRequested) {
+    return;
+  }
+  applicationRelaunchRequested = true;
+  app.relaunch();
+  app.quit();
 }
 
 interface OrchestrationRuntimeToolTestInput {
@@ -86,43 +118,82 @@ interface OrchestrationRuntimeToolTestInput {
   readonly params: unknown;
 }
 
-const appWindows = new Set<BrowserWindow>();
-const windowViews = new Map<number, WindowViewState>();
-const stopPublishingStateByWebContentsId = new Map<number, () => void>();
-const stopPublishingSelectedTranscriptByWebContentsId = new Map<number, () => void>();
-const stopTrackingWindowActivationByWebContentsId = new Map<number, () => void>();
+interface ScheduledTaskRuntimeToolTestInput {
+  readonly toolName: string;
+  readonly toolCallId?: string;
+  readonly sessionRef: SessionRef;
+  readonly params: unknown;
+}
+
+function createStoreBackedScheduledTaskRuntimeBridge(): ScheduledTaskRuntimeBridge {
+  return {
+    createScheduledTask: async (ctx, input) => {
+      await store.initialize();
+      return store.createScheduledTaskToolResult(sessionRefFromExtensionContext(ctx), input);
+    },
+    listScheduledTasks: async () => {
+      await store.initialize();
+      return store.listScheduledTasksToolResult();
+    },
+    updateScheduledTask: async (_ctx, input) => {
+      await store.initialize();
+      return store.updateScheduledTaskToolResult(input);
+    },
+  };
+}
+
+async function runScheduledTaskRuntimeToolForTest(
+  bridge: ScheduledTaskRuntimeBridge,
+  input: ScheduledTaskRuntimeToolTestInput,
+): Promise<AgentToolResult<unknown>> {
+  await store.initialize();
+  const tool = createScheduledTaskRuntimeTools(bridge, () => input.sessionRef.workspaceId).find(
+    (entry) => entry.name === input.toolName,
+  );
+  if (!tool) {
+    throw new Error(`Unknown scheduled-task runtime tool: ${input.toolName}`);
+  }
+  return tool.execute(
+    input.toolCallId ?? `test-${input.toolName}`,
+    input.params,
+    undefined,
+    undefined,
+    createTestExtensionContext(input.sessionRef),
+  );
+}
+
 let stopNotifications: (() => void) | undefined;
 let stopUpdateChecker: (() => void) | undefined;
 let stopPruningTerminals: (() => void) | undefined;
 let retainedTerminalWorkspacePathSignature = "";
 const terminalFocusedWebContentsIds = new Set<number>();
+const sidePanelFocusedWebContentsIds = new Set<number>();
+const surfaceCloseShortcutIds = new Set<number>();
 let quittingAfterStoreFlush = false;
-let windowScopedActionQueue: Promise<void> = Promise.resolve();
-let currentComposerDraftPersistOriginWebContentsId: number | undefined;
-let currentWindowScopedWebContentsId: number | undefined;
-let deferredActivationWebContentsId: number | undefined;
 
 const SUPPORTED_IMAGE_TYPES = SUPPORTED_COMPOSER_IMAGE_TYPES;
-const SUPPORTED_IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_IMAGE_TYPES.map((type) => type.mimeType));
+const SUPPORTED_IMAGE_MIME_TYPES = new Set<string>(
+  SUPPORTED_IMAGE_TYPES.map((type) => type.mimeType),
+);
 const NEW_WINDOW_MENU_ITEM_ID = "file.new-window";
 
 function createStoreBackedOrchestrationRuntimeBridge(): OrchestrationRuntimeBridge {
   return {
     createChildThread: async (ctx, input) => {
       await store.initialize();
-      return orchestrationTools.createChildThreadToolResult(store, sessionRefFromExtensionContext(ctx), input);
+      return store.createChildThreadToolResult(sessionRefFromExtensionContext(ctx), input);
     },
     listThreads: async (ctx) => {
       await store.initialize();
-      return orchestrationTools.listThreadsToolResult(store, sessionRefFromExtensionContext(ctx));
+      return store.listThreadsToolResult(sessionRefFromExtensionContext(ctx));
     },
     readThread: async (ctx, threadId) => {
       await store.initialize();
-      return orchestrationTools.readThreadToolResult(store, sessionRefFromExtensionContext(ctx), threadId);
+      return store.readThreadToolResult(sessionRefFromExtensionContext(ctx), threadId);
     },
     sendMessageToThread: async (ctx, input) => {
       await store.initialize();
-      return orchestrationTools.sendMessageToThreadToolResult(store, sessionRefFromExtensionContext(ctx), input);
+      return store.sendMessageToThreadToolResult(sessionRefFromExtensionContext(ctx), input);
     },
   };
 }
@@ -130,16 +201,11 @@ function createStoreBackedOrchestrationRuntimeBridge(): OrchestrationRuntimeBrid
 function sessionRefFromExtensionContext(ctx: ExtensionContext): SessionRef {
   const sessionId = ctx.sessionManager.getSessionId();
   const cwd = path.resolve(ctx.sessionManager.getCwd?.() ?? ctx.cwd);
-  const workspace = store.state.workspaces.find(
-    (entry) => path.resolve(entry.path) === cwd && entry.sessions.some((session) => session.id === sessionId),
-  );
-  if (!workspace) {
+  const sessionRef = store.findSessionRefByCwdAndSessionId(cwd, sessionId);
+  if (!sessionRef) {
     throw new Error(`Unable to resolve orchestration session for ${cwd}:${sessionId}`);
   }
-  return {
-    workspaceId: workspace.id,
-    sessionId,
-  };
+  return sessionRef;
 }
 
 async function runOrchestrationRuntimeToolForTest(
@@ -147,7 +213,9 @@ async function runOrchestrationRuntimeToolForTest(
   input: OrchestrationRuntimeToolTestInput,
 ): Promise<AgentToolResult<unknown>> {
   await store.initialize();
-  const tool = createOrchestrationRuntimeTools(bridge).find((entry) => entry.name === input.toolName);
+  const tool = createOrchestrationRuntimeTools(bridge).find(
+    (entry) => entry.name === input.toolName,
+  );
   if (!tool) {
     throw new Error(`Unknown orchestration runtime tool: ${input.toolName}`);
   }
@@ -161,9 +229,13 @@ async function runOrchestrationRuntimeToolForTest(
 }
 
 function createTestExtensionContext(sessionRef: SessionRef): ExtensionContext {
-  const workspace = store.state.workspaces.find(
-    (entry) => entry.id === sessionRef.workspaceId && entry.sessions.some((session) => session.id === sessionRef.sessionId),
-  );
+  const workspace = store
+    .snapshot()
+    .workspaces.find(
+      (entry) =>
+        entry.id === sessionRef.workspaceId &&
+        entry.sessions.some((session) => session.id === sessionRef.sessionId),
+    );
   if (!workspace) {
     throw new Error(`Unknown test session: ${sessionRef.workspaceId}:${sessionRef.sessionId}`);
   }
@@ -178,6 +250,7 @@ function createTestExtensionContext(sessionRef: SessionRef): ExtensionContext {
     } as ExtensionContext["sessionManager"],
     ui: {} as ExtensionContext["ui"],
     modelRegistry: {} as ExtensionContext["modelRegistry"],
+    scopedModels: [],
     model: undefined,
     signal: undefined,
     isIdle: () => true,
@@ -193,8 +266,6 @@ function createTestExtensionContext(sessionRef: SessionRef): ExtensionContext {
 const OPEN_FOLDER_MENU_ITEM_ID = "file.open-folder";
 const CHECK_FOR_UPDATES_MENU_ITEM_ID = "app.check-for-updates";
 const QUIT_FLUSH_TIMEOUT_MS = 5_000;
-const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_CLIPBOARD_IMAGE_DIMENSION = 8_192;
 
 function getTerminalService(): TerminalService {
   if (!terminalService) {
@@ -256,34 +327,80 @@ function openExternalWebUrl(url: string): boolean {
   return true;
 }
 
-function readClipboardImageAttachment(): ComposerImageAttachment | null {
+function readClipboardImageAttachment(): ClipboardImageRead {
   const image = clipboard.readImage();
   if (image.isEmpty()) {
-    return null;
+    return { ok: false };
   }
 
   const size = image.getSize();
-  if (size.width > MAX_CLIPBOARD_IMAGE_DIMENSION || size.height > MAX_CLIPBOARD_IMAGE_DIMENSION) {
-    return null;
+  try {
+    assertComposerImagePixels(size.width, size.height);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 
   const png = image.toPNG();
-  if (png.length === 0 || png.length > MAX_CLIPBOARD_IMAGE_BYTES) {
-    return null;
+  if (png.length === 0) {
+    return { ok: false };
+  }
+  try {
+    assertComposerImageBytes(png.length);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 
   return {
-    id: randomUUID(),
-    kind: "image",
-    name: "pasted-image.png",
-    mimeType: "image/png",
-    data: png.toString("base64"),
+    ok: true,
+    attachment: {
+      id: randomUUID(),
+      kind: "image",
+      name: "pasted-image.png",
+      mimeType: "image/png",
+      data: png.toString("base64"),
+    },
   };
+}
+
+function dispatchCloseFocusedSurface(window: BrowserWindow, event: Electron.Event): void {
+  event.preventDefault();
+  const webContentsId = window.webContents.id;
+  surfaceCloseShortcutIds.add(webContentsId);
+  setImmediate(() => {
+    surfaceCloseShortcutIds.delete(webContentsId);
+  });
+  window.webContents.send(desktopIpc.appCommand, desktopCommands.closeFocusedSurface);
+}
+
+// The native window colour matches the renderer's theme, so load, reload and
+// resize never flash another theme's colour.
+function currentWindowBackground(): string {
+  return windowBackgroundFor(
+    store?.snapshot().themePresetId ?? "default",
+    themeManager.getResolvedTheme(),
+  );
+}
+
+// Windows created transparent keep their glass until the next launch.
+const opaqueAppWindows = new Set<BrowserWindow>();
+
+function refreshWindowBackgrounds(): void {
+  if (!store) return;
+  const color = currentWindowBackground();
+  for (const window of opaqueAppWindows) {
+    if (!window.isDestroyed()) window.setBackgroundColor(color);
+  }
 }
 
 function createWindow(): BrowserWindow {
   const backgroundTestMode = windowTestMode === "background";
-  const enableTransparency = store ? store.state.enableTransparency : false;
+  const enableTransparency = store ? store.snapshot().enableTransparency : false;
   const window = new BrowserWindow({
     width: 1480,
     height: 980,
@@ -292,7 +409,8 @@ function createWindow(): BrowserWindow {
     transparent: enableTransparency,
     vibrancy: process.platform === "darwin" && enableTransparency ? "under-window" : undefined,
     titleBarStyle: "hiddenInset",
-    backgroundColor: enableTransparency ? "#00000000" : "#f3f4f8",
+    autoHideMenuBar: process.platform !== "darwin",
+    backgroundColor: enableTransparency ? "#00000000" : currentWindowBackground(),
     trafficLightPosition: { x: 18, y: 18 },
     show: false,
     icon: appIcon,
@@ -312,6 +430,23 @@ function createWindow(): BrowserWindow {
     }
     return { action: "deny" };
   });
+  window.webContents.on("will-frame-navigate", (event) => {
+    if (event.isMainFrame) return;
+    try {
+      const url = new URL(event.url);
+      if (
+        url.protocol !== `${DESKTOP_EXTENSION_SCHEME}:` ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash
+      )
+        throw new Error("Unexpected frame navigation");
+      if (!extensionViewOwner) throw new Error("Extension host unavailable");
+      extensionViewOwner.getConnectionContext(url.hostname, window.webContents.id);
+    } catch {
+      event.preventDefault();
+    }
+  });
   window.webContents.on("will-navigate", (event, url) => {
     if (isInAppNavigationUrl(url)) {
       return;
@@ -320,6 +455,13 @@ function createWindow(): BrowserWindow {
     openExternalWebUrl(url);
   });
 
+  window.on("close", (event) => {
+    if (!surfaceCloseShortcutIds.has(window.webContents.id)) {
+      return;
+    }
+    event.preventDefault();
+    surfaceCloseShortcutIds.delete(window.webContents.id);
+  });
   window.once("ready-to-show", () => {
     if (!backgroundTestMode) {
       window.show();
@@ -330,390 +472,131 @@ function createWindow(): BrowserWindow {
       return;
     }
 
-    const lowerKey = input.key.toLowerCase();
-    const platformModifier = process.platform === "darwin" ? input.meta : input.control;
-    const terminalFocused = terminalFocusedWebContentsIds.has(window.webContents.id);
-    if (terminalFocused) {
+    // Side panel tab chords act from the terminal and extension views too. The
+    // key is not consumed: that would also swallow the modifier's keyup, leaving
+    // the tab hints up, and on Windows and Linux it would let the Alt release
+    // open the hidden menu bar. The page takes no default action for these keys,
+    // and the renderer's own handling of the same keydown is idempotent.
+    const sidePanelTabCommand = getSidePanelTabCommand(process.platform, input);
+    if (sidePanelTabCommand) {
+      if (!input.isAutoRepeat) window.webContents.send(desktopIpc.appCommand, sidePanelTabCommand);
       return;
     }
-    if (platformModifier && !input.shift && lowerKey === "n") {
+
+    const lowerKey = input.key.toLowerCase();
+    const platformModifier = platformShortcutModifier(process.platform, input);
+    const command = getDesktopCommandFromShortcut({
+      modifier: platformModifier,
+      alt: input.alt,
+      shift: input.shift,
+      key: input.key,
+      code: input.code,
+    });
+    const webContentsId = window.webContents.id;
+    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
+    const closeFocusedSurface =
+      isCloseFocusedSurfaceShortcut({
+        meta: input.meta,
+        control: input.control,
+        alt: input.alt,
+        shift: input.shift,
+        key: input.key,
+        code: input.code,
+        platform: process.platform,
+      }) &&
+      (terminalFocused || sidePanelFocusedWebContentsIds.has(webContentsId));
+    if (terminalFocused) {
+      // Control chords belong to the shell, so only macOS Command chords open
+      // a palette or act on the thread from the terminal.
+      if (process.platform === "darwin" && isSinglePressCommand(command)) {
+        event.preventDefault();
+        if (!input.isAutoRepeat) window.webContents.send(desktopIpc.appCommand, command);
+      } else if (command === desktopCommands.toggleSidePanel) {
+        event.preventDefault();
+        window.webContents.send(desktopIpc.appCommand, command);
+      } else if (closeFocusedSurface) {
+        dispatchCloseFocusedSurface(window, event);
+      }
+      return;
+    }
+    if (closeFocusedSurface) {
+      dispatchCloseFocusedSurface(window, event);
+      return;
+    }
+    if (platformModifier && input.shift && lowerKey === "n") {
       event.preventDefault();
-      createAppWindow(viewForWebContents(window.webContents.id));
+      createAppWindow(windowOwner.viewForWindow(window));
       return;
     }
 
     if (platformModifier && !input.shift && lowerKey === "o") {
       event.preventDefault();
-      void pickWorkspaceViaDialog(window);
+      void pickWorkspaceViaDialog(window).catch((error: unknown) => {
+        console.error("[main] pickWorkspaceViaDialog failed", error);
+      });
       return;
     }
 
     if (platformModifier && !input.shift && lowerKey === "v") {
       const clipboardImage = readClipboardImageAttachment();
-      if (clipboardImage) {
+      if (clipboardImage.ok || clipboardImage.message) {
         event.preventDefault();
         window.webContents.send(desktopIpc.clipboardImagePasted, clipboardImage);
         return;
       }
     }
 
-    const command = getDesktopCommandFromShortcut({
-      modifier: process.platform === "darwin" ? input.meta : input.control,
-      shift: input.shift,
-      key: input.key,
-      code: input.code,
-    });
     if (command) {
       event.preventDefault();
+      // Holding a palette chord would open and close it at the repeat rate.
+      if (isSinglePressCommand(command) && input.isAutoRepeat) {
+        return;
+      }
       window.webContents.send(desktopIpc.appCommand, command);
     }
   });
 
   if (isDev) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL as string);
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL as string).catch((error: unknown) => {
+      console.error("[main] loadURL failed", error);
+    });
     if (process.env.PI_APP_OPEN_DEVTOOLS !== "0") {
       window.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    void window.loadURL(appRendererUrl());
+    void window.loadURL(appRendererUrl()).catch((error: unknown) => {
+      console.error("[main] loadURL failed", error);
+    });
+  }
+
+  if (!enableTransparency) {
+    opaqueAppWindows.add(window);
+    window.once("closed", () => opaqueAppWindows.delete(window));
   }
 
   return window;
 }
 
-function viewFromState(state: DesktopAppState): WindowViewState {
-  return {
-    selectedWorkspaceId: state.selectedWorkspaceId,
-    selectedSessionId: state.selectedSessionId,
-    activeView: state.activeView,
-    sidebarCollapsed: state.sidebarCollapsed,
-  };
-}
-
-function resolveWindowView(sourceView?: DesktopAppViewState): WindowViewState {
-  return viewFromState(store.projectStateForView({ ...viewFromState(store.state), ...sourceView }, store.state));
-}
-
-function viewForWebContents(webContentsId: number): WindowViewState {
-  return windowViews.get(webContentsId) ?? viewFromState(store.state);
-}
-
-function rememberWindowView(webContentsId: number, state: DesktopAppState): void {
-  windowViews.set(webContentsId, viewFromState(state));
-}
-
-function applyWindowViewToStore(webContentsId: number): void {
-  store.state = store.projectStateForView(viewForWebContents(webContentsId), store.state);
-}
-
-function projectStateForWindow(
-  webContentsId: number,
-  state: DesktopAppState = store.state,
-  view: WindowViewState = viewForWebContents(webContentsId),
-  previousView: WindowViewState | undefined = windowViews.get(webContentsId),
-): DesktopAppState {
-  const projected = store.projectStateForView(view, state, previousView);
-  if (
-    projected.composerDraftSyncSource === "persist" &&
-    currentComposerDraftPersistOriginWebContentsId !== undefined &&
-    webContentsId !== currentComposerDraftPersistOriginWebContentsId
-  ) {
-    return {
-      ...projected,
-      composerDraftSyncSource: "remote-persist",
-    };
-  }
-  return projected;
-}
-
-function publishStateToWindow(window: BrowserWindow, state: DesktopAppState = store.state): void {
-  if (!canPublishToWindow(window)) {
-    return;
-  }
-  const webContentsId = window.webContents.id;
-  const view = webContentsId === currentWindowScopedWebContentsId ? viewFromState(state) : viewForWebContents(webContentsId);
-  const projected = projectStateForWindow(webContentsId, state, view);
-  rememberWindowView(webContentsId, projected);
-  window.webContents.send(desktopIpc.stateChanged, projected);
-}
-
-async function publishSelectedTranscriptToWindow(window: BrowserWindow): Promise<void> {
-  if (!canPublishToWindow(window)) {
-    return;
-  }
-  const webContentsId = window.webContents.id;
-  const payload = await store.getSelectedTranscriptForView(viewForWebContents(webContentsId));
-  if (canPublishToWindow(window)) {
-    const projected = projectStateForWindow(webContentsId);
-    if (payload) {
-      if (projected.selectedWorkspaceId !== payload.workspaceId || projected.selectedSessionId !== payload.sessionId) {
-        return;
-      }
-    } else if (projected.selectedSessionId) {
-      return;
-    }
-    window.webContents.send(desktopIpc.selectedTranscriptChanged, payload);
-  }
-}
-
-function setActiveWindow(window: BrowserWindow): void {
-  if (window.isDestroyed()) {
-    return;
-  }
-  mainWindow = window;
-  notificationManager?.trackWindow(window);
-  notificationPermissionService?.trackWindow(window);
-}
-
-function windowForWebContentsId(webContentsId: number): BrowserWindow | undefined {
-  return [...appWindows].find((window) => !window.isDestroyed() && window.webContents.id === webContentsId);
-}
-
-function applyWindowActivation(window: BrowserWindow): void {
-  const webContentsId = window.webContents.id;
-  setActiveWindow(window);
-  applyWindowViewToStore(webContentsId);
-  store.handleWindowActivation();
-  rememberWindowView(webContentsId, store.state);
-}
-
-function applyDeferredWindowActivation(): boolean {
-  const webContentsId = deferredActivationWebContentsId;
-  deferredActivationWebContentsId = undefined;
-  if (webContentsId === undefined) {
-    return false;
-  }
-  const window = windowForWebContentsId(webContentsId);
-  if (!window || !canPublishToWindow(window)) {
-    return false;
-  }
-  applyWindowActivation(window);
-  return true;
-}
-
-function getForegroundAppWindow(): BrowserWindow | null {
-  const focusedWindow = BrowserWindow.getFocusedWindow();
-  if (focusedWindow && windowViews.has(focusedWindow.webContents.id) && canPublishToWindow(focusedWindow)) {
-    return focusedWindow;
-  }
-  if (mainWindow && canPublishToWindow(mainWindow)) {
-    return mainWindow;
-  }
-  return [...appWindows].find((window) => canPublishToWindow(window)) ?? null;
-}
-
-function getForegroundAppView(): DesktopAppViewState | undefined {
-  const window = getForegroundAppWindow();
-  return window ? viewForWebContents(window.webContents.id) : undefined;
-}
-
-function restoreStoreToView(view: DesktopAppViewState | undefined): void {
-  if (!view) {
-    return;
-  }
-  store.state = store.projectStateForView(view, store.state);
-}
-
-function restoreStoreToViewAndEmit(view: DesktopAppViewState | undefined): void {
-  restoreStoreToView(view);
-  store.emit();
-}
-
-function restoreStoreToForegroundUnlessSender(senderWebContentsId: number | undefined): void {
-  const foregroundWindow = getForegroundAppWindow();
-  if (!foregroundWindow) {
-    return;
-  }
-  if (senderWebContentsId !== undefined && foregroundWindow.webContents.id === senderWebContentsId) {
-    return;
-  }
-  restoreStoreToViewAndEmit(viewForWebContents(foregroundWindow.webContents.id));
-}
-
-function isSessionVisibleInAnotherWindow(sessionRef: SessionRef): boolean {
-  for (const window of appWindows) {
-    if (!canPublishToWindow(window) || window.isMinimized() || !window.isVisible()) {
-      continue;
-    }
-    const webContentsId = window.webContents.id;
-    if (webContentsId === currentWindowScopedWebContentsId) {
-      continue;
-    }
-    const view = windowViews.get(webContentsId);
-    if (
-      view?.activeView === "threads" &&
-      view.selectedWorkspaceId === sessionRef.workspaceId &&
-      view.selectedSessionId === sessionRef.sessionId
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function enqueueWindowScopedAction<T>(action: () => Promise<T>): Promise<T> {
-  const run = windowScopedActionQueue.then(action, action);
-  windowScopedActionQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
-
-interface WindowScopedActionOptions {
-  readonly forceActiveWindow?: boolean;
-}
-
-async function runWindowScopedForWindow(
-  window: BrowserWindow | null | undefined,
-  action: () => Promise<DesktopAppState>,
-  options: WindowScopedActionOptions = {},
-): Promise<DesktopAppState> {
-  return enqueueWindowScopedAction(async () => {
-    const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
-    const foregroundWindow = getForegroundAppWindow();
-    const senderIsForeground =
-      Boolean(window && foregroundWindow && window.webContents.id === foregroundWindow.webContents.id);
-    const windowIsFocused =
-      Boolean(window && !window.isDestroyed() && window.isFocused()) ||
-      senderIsForeground ||
-      options.forceActiveWindow === true;
-    if (window && webContentsId !== undefined) {
-      if (windowIsFocused) {
-        setActiveWindow(window);
-      }
-      applyWindowViewToStore(webContentsId);
-    }
-
-    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
-    currentWindowScopedWebContentsId = webContentsId;
-    try {
-      const state = await action();
-      if (!window || webContentsId === undefined) {
-        return state;
-      }
-
-      const previousView = windowViews.get(webContentsId);
-      const projected = projectStateForWindow(webContentsId, state, viewFromState(state), previousView);
-      rememberWindowView(webContentsId, projected);
-      publishStateToWindow(window, projected);
-      void publishSelectedTranscriptToWindow(window);
-      return projected;
-    } finally {
-      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
-      if (!applyDeferredWindowActivation()) {
-        restoreStoreToForegroundUnlessSender(webContentsId);
-      }
-    }
-  });
-}
-
-function runWindowScopedForEvent(
-  event: IpcMainInvokeEvent,
-  action: () => Promise<DesktopAppState>,
-): Promise<DesktopAppState> {
-  return runWindowScopedForWindow(BrowserWindow.fromWebContents(event.sender), action);
-}
-
-async function runUnscopedStateResultForWindow(
-  window: BrowserWindow | null | undefined,
-  action: () => Promise<DesktopAppState>,
-): Promise<DesktopAppState> {
-  const state = await action();
-  if (!window || !canPublishToWindow(window)) {
-    return state;
-  }
-  const webContentsId = window.webContents.id;
-  const projected = projectStateForWindow(webContentsId, state);
-  rememberWindowView(webContentsId, projected);
-  return projected;
-}
-
-async function runImmediateStateResultForWindow(
-  window: BrowserWindow | null | undefined,
-  action: () => Promise<DesktopAppState>,
-): Promise<DesktopAppState> {
-  const state = await action();
-  if (!window || !canPublishToWindow(window)) {
-    return state;
-  }
-
-  const webContentsId = window.webContents.id;
-  const projected = projectStateForWindow(webContentsId, state);
-  rememberWindowView(webContentsId, projected);
-  window.webContents.send(desktopIpc.stateChanged, projected);
-  void publishSelectedTranscriptToWindow(window);
-  return projected;
-}
-
-async function runWindowScopedStateResult<T extends { readonly state: DesktopAppState }>(
-  window: BrowserWindow | null | undefined,
-  action: () => Promise<T>,
-  options: WindowScopedActionOptions = {},
-): Promise<T> {
-  return enqueueWindowScopedAction(async () => {
-    const webContentsId = window && !window.isDestroyed() ? window.webContents.id : undefined;
-    const foregroundWindow = getForegroundAppWindow();
-    const senderIsForeground =
-      Boolean(window && foregroundWindow && window.webContents.id === foregroundWindow.webContents.id);
-    const windowIsFocused =
-      Boolean(window && !window.isDestroyed() && window.isFocused()) ||
-      senderIsForeground ||
-      options.forceActiveWindow === true;
-    if (window && webContentsId !== undefined) {
-      if (windowIsFocused) {
-        setActiveWindow(window);
-      }
-      applyWindowViewToStore(webContentsId);
-    }
-
-    const previousWindowScopedWebContentsId = currentWindowScopedWebContentsId;
-    currentWindowScopedWebContentsId = webContentsId;
-    try {
-      const result = await action();
-      if (!window || webContentsId === undefined) {
-        return result;
-      }
-
-      const previousView = windowViews.get(webContentsId);
-      const projected = projectStateForWindow(webContentsId, result.state, viewFromState(result.state), previousView);
-      rememberWindowView(webContentsId, projected);
-      publishStateToWindow(window, projected);
-      void publishSelectedTranscriptToWindow(window);
-      return { ...result, state: projected };
-    } finally {
-      currentWindowScopedWebContentsId = previousWindowScopedWebContentsId;
-      if (!applyDeferredWindowActivation()) {
-        restoreStoreToForegroundUnlessSender(webContentsId);
-      }
-    }
-  });
-}
-
 function createAppWindow(sourceView?: DesktopAppViewState): BrowserWindow {
   const window = createWindow();
   const webContentsId = window.webContents.id;
-  appWindows.add(window);
-  windowViews.set(webContentsId, resolveWindowView(sourceView));
-  setActiveWindow(window);
+  windowOwner.add(window, sourceView);
   themeManager.trackWindow(window);
-  attachStatePublisher(window);
-  attachViewedSessionTracking(window);
 
   window.once("closed", () => {
-    appWindows.delete(window);
-    windowViews.delete(webContentsId);
+    windowOwner.remove(window);
     terminalFocusedWebContentsIds.delete(webContentsId);
+    sidePanelFocusedWebContentsIds.delete(webContentsId);
+    surfaceCloseShortcutIds.delete(webContentsId);
     terminalService?.disposeWebContents(webContentsId);
-    void store.cancelPendingDialogsWithoutVisibleWindow((sessionRef) => isSessionVisibleInAnotherWindow(sessionRef));
-    if (mainWindow === window) {
-      mainWindow = [...appWindows].find((candidate) => !candidate.isDestroyed()) ?? null;
-      if (mainWindow) {
-        setActiveWindow(mainWindow);
-        applyWindowViewToStore(mainWindow.webContents.id);
-      }
-    }
-    if (appWindows.size === 0) {
+    void store
+      .cancelPendingDialogsWithoutVisibleWindow((sessionRef) =>
+        windowOwner.isSessionVisibleInAnotherWindow(sessionRef),
+      )
+      .catch((error: unknown) => {
+        console.error("[main] cancelPendingDialogsWithoutVisibleWindow failed", error);
+      });
+    if (windowOwner.size() === 0) {
       terminalService?.dispose();
       terminalService = undefined;
     }
@@ -722,106 +605,35 @@ function createAppWindow(sourceView?: DesktopAppViewState): BrowserWindow {
   return window;
 }
 
-function attachStatePublisher(window: BrowserWindow): void {
-  const webContentsId = window.webContents.id;
-  const startPublishing = () => {
-    stopPublishingStateByWebContentsId.get(webContentsId)?.();
-    stopPublishingSelectedTranscriptByWebContentsId.get(webContentsId)?.();
-    const stopPublishingState = store.subscribe((state) => {
-      publishStateToWindow(window, state);
-      void publishSelectedTranscriptToWindow(window);
-    });
-    const stopPublishingSelectedTranscript = store.subscribeToSelectedTranscript(() => {
-      void publishSelectedTranscriptToWindow(window);
-    });
-    stopPublishingStateByWebContentsId.set(webContentsId, stopPublishingState);
-    stopPublishingSelectedTranscriptByWebContentsId.set(webContentsId, stopPublishingSelectedTranscript);
-  };
-  const stopPublishing = () => {
-    stopPublishingStateByWebContentsId.get(webContentsId)?.();
-    stopPublishingStateByWebContentsId.delete(webContentsId);
-    stopPublishingSelectedTranscriptByWebContentsId.get(webContentsId)?.();
-    stopPublishingSelectedTranscriptByWebContentsId.delete(webContentsId);
-  };
-
-  startPublishing();
-
-  // A renderer crash detaches the (now-dead) subscriptions, but View > Reload
-  // brings the same webContents back — re-subscribe on recovery so the reloaded
-  // window resumes live state pushes instead of going permanently stale.
-  let recovering = false;
-  window.webContents.on("render-process-gone", () => {
-    recovering = true;
-    stopPublishing();
-  });
-  window.webContents.on("did-finish-load", () => {
-    if (!recovering) {
-      return;
-    }
-    recovering = false;
-    startPublishing();
-    // Push the current state immediately so the reloaded UI is fresh.
-    publishStateToWindow(window);
-    void publishSelectedTranscriptToWindow(window);
-  });
-  window.once("closed", stopPublishing);
-}
-
-function attachViewedSessionTracking(window: BrowserWindow): void {
-  const webContentsId = window.webContents.id;
-  stopTrackingWindowActivationByWebContentsId.get(webContentsId)?.();
-
-  const handleActivation = () => {
-    if (currentWindowScopedWebContentsId !== undefined) {
-      deferredActivationWebContentsId = webContentsId;
-      return;
-    }
-    applyWindowActivation(window);
-  };
-  const clearTracking = () => {
-    stopTrackingWindowActivationByWebContentsId.get(webContentsId)?.();
-    stopTrackingWindowActivationByWebContentsId.delete(webContentsId);
-  };
-
-  window.on("focus", handleActivation);
-  window.on("show", handleActivation);
-  window.on("restore", handleActivation);
-  window.once("closed", clearTracking);
-
-  stopTrackingWindowActivationByWebContentsId.set(webContentsId, () => {
-    window.off("focus", handleActivation);
-    window.off("show", handleActivation);
-    window.off("restore", handleActivation);
-    window.off("closed", clearTracking);
-  });
-}
-
 function canPublishToWindow(window: BrowserWindow): boolean {
-  return !window.isDestroyed() && !window.webContents.isDestroyed() && !window.webContents.isCrashed();
+  return (
+    !window.isDestroyed() && !window.webContents.isDestroyed() && !window.webContents.isCrashed()
+  );
 }
 
-function resolveWindowTestMode(): "foreground" | "background" {
-  return process.env.PI_APP_TEST_MODE?.trim().toLowerCase() === "background" ? "background" : "foreground";
+function resolveAppTestMode(value: string | undefined): "foreground" | "background" | undefined {
+  return value === "foreground" || value === "background" ? value : undefined;
 }
 
 function resolveDialogWindow(parentWindow?: BrowserWindow | null): BrowserWindow | undefined {
-  if (parentWindow && canPublishToWindow(parentWindow)) {
-    return parentWindow;
-  }
-  if (mainWindow && canPublishToWindow(mainWindow)) {
-    return mainWindow;
-  }
-  return undefined;
+  return windowOwner.resolveDialogWindow(parentWindow);
 }
 
 async function stateForWindow(window?: BrowserWindow | null): Promise<DesktopAppState> {
-  if (window && canPublishToWindow(window)) {
-    return store.getStateForView(viewForWebContents(window.webContents.id));
-  }
-  return store.getState();
+  return windowOwner.stateForWindow(window);
 }
 
-async function pickWorkspacePathViaDialog(parentWindow?: BrowserWindow | null): Promise<string | undefined> {
+function runWindowScopedForWindow(
+  window: BrowserWindow | null | undefined,
+  action: () => Promise<DesktopAppState>,
+  options: { readonly forceActiveWindow?: boolean } = {},
+): Promise<DesktopAppState> {
+  return windowOwner.runStateAction(window, action, options);
+}
+
+async function pickWorkspacePathViaDialog(
+  parentWindow?: BrowserWindow | null,
+): Promise<string | undefined> {
   const window = resolveDialogWindow(parentWindow);
   const result = window
     ? await dialog.showOpenDialog(window, {
@@ -838,7 +650,10 @@ async function pickWorkspacePathViaDialog(parentWindow?: BrowserWindow | null): 
   return result.filePaths[0] as string;
 }
 
-async function addPickedWorkspace(window: BrowserWindow | null | undefined, workspacePath: string): Promise<DesktopAppState> {
+async function addPickedWorkspace(
+  window: BrowserWindow | null | undefined,
+  workspacePath: string,
+): Promise<DesktopAppState> {
   const nextState = await store.addWorkspace(workspacePath);
   if (!nextState.selectedWorkspaceId) {
     return nextState;
@@ -851,7 +666,9 @@ async function addPickedWorkspace(window: BrowserWindow | null | undefined, work
   return newThreadState;
 }
 
-async function pickWorkspaceViaDialog(parentWindow?: BrowserWindow | null): Promise<DesktopAppState> {
+async function pickWorkspaceViaDialog(
+  parentWindow?: BrowserWindow | null,
+): Promise<DesktopAppState> {
   const window = resolveDialogWindow(parentWindow);
   const workspacePath = await pickWorkspacePathViaDialog(window);
   if (!workspacePath) {
@@ -881,7 +698,7 @@ async function runManualUpdateCheck(): Promise<void> {
         cancelId: 1,
       });
       if (choice.response === 0) {
-        await openReleasesPage();
+        await openReleasesPage(result.releaseUrl);
       }
       return;
     }
@@ -930,7 +747,9 @@ function installApplicationMenu(): void {
           id: CHECK_FOR_UPDATES_MENU_ITEM_ID,
           label: "Check for Updates…",
           click: () => {
-            void runManualUpdateCheck();
+            void runManualUpdateCheck().catch((error: unknown) => {
+              console.error("[main] runManualUpdateCheck failed", error);
+            });
           },
         },
         { type: "separator" },
@@ -947,11 +766,19 @@ function installApplicationMenu(): void {
       label: "File",
       submenu: [
         {
-          id: NEW_WINDOW_MENU_ITEM_ID,
-          label: "New Window",
+          label: "New Thread",
           accelerator: "CommandOrControl+N",
           click: () => {
-            createAppWindow(getForegroundAppView());
+            const window = BrowserWindow.getFocusedWindow() ?? mainWindow;
+            window?.webContents.send(desktopIpc.appCommand, desktopCommands.openNewThread);
+          },
+        },
+        {
+          id: NEW_WINDOW_MENU_ITEM_ID,
+          label: "New Window",
+          accelerator: "CommandOrControl+Shift+N",
+          click: () => {
+            createAppWindow(windowOwner.foregroundView());
           },
         },
         { type: "separator" },
@@ -960,7 +787,9 @@ function installApplicationMenu(): void {
           label: "Open Folder…",
           accelerator: "Command+O",
           click: () => {
-            void pickWorkspaceViaDialog(mainWindow);
+            void pickWorkspaceViaDialog(mainWindow).catch((error: unknown) => {
+              console.error("[main] pickWorkspaceViaDialog failed", error);
+            });
           },
         },
         { type: "separator" },
@@ -968,24 +797,40 @@ function installApplicationMenu(): void {
       ],
     },
     { role: "editMenu" },
-    { role: "viewMenu" },
+    {
+      label: "View",
+      submenu: [
+        // Cmd+R toggles Review and Shift+Cmd+R renames the thread, so neither
+        // reload has a shortcut.
+        {
+          label: "Reload",
+          click: () => BrowserWindow.getFocusedWindow()?.webContents.reload(),
+        },
+        {
+          label: "Force Reload",
+          click: () => BrowserWindow.getFocusedWindow()?.webContents.reloadIgnoringCache(),
+        },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
     { role: "windowMenu" },
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-// Ensure npm (and other Homebrew/npm-global binaries) are available
-// even when pi-gui is launched via Finder/Dock (which has a minimal PATH).
-const extraBinPaths = [
-  "/opt/homebrew/bin",
-  "/usr/local/bin",
-  `${process.env.HOME}/.npm-global/bin`,
-].filter((p) => p);
-const currentPath = process.env.PATH ?? "";
-const missingPaths = extraBinPaths.filter((p) => !currentPath.split(":").includes(p));
-if (missingPaths.length > 0) {
-  process.env.PATH = [...missingPaths, currentPath].join(":");
+// Ensure npm (and other Homebrew/npm-global binaries) are available even when
+// pi-gui is launched via Finder/Dock (which hands the process a minimal PATH).
+// POSIX-only; on Windows the PATH is left untouched (see augmentPosixPath).
+const augmentedPath = augmentPosixPath();
+if (augmentedPath.changed) {
+  process.env.PATH = augmentedPath.path;
 }
 
 app.setName("pi");
@@ -995,11 +840,13 @@ app.setPath("userData", configuredUserDataDir);
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
-  app.quit();
+  // app.quit() before ready can leave a windowless macOS process alive.
+  // Duplicate instances have no store or windows, so exit immediately.
+  app.exit(0);
 }
 
 app.on("second-instance", () => {
-  const window = getForegroundAppWindow();
+  const window = windowOwner.foreground();
   if (!window) {
     return;
   }
@@ -1010,482 +857,320 @@ app.on("second-instance", () => {
   window.focus();
 });
 
-app.whenReady().then(async () => {
-  if (!hasSingleInstanceLock) {
-    return;
-  }
-
-  // On macOS, packaged builds already render the dock icon from `icon.icns`
-  // in the app bundle. In dev we override the generic Electron dock icon with
-  // the real PNG so the running app looks right end-to-end.
-  if (process.platform === "darwin" && !app.isPackaged) {
-    app.dock?.setIcon(appIcon);
-  }
-
-  let generateThreadTitleOverride:
-    | ((workspace: WorkspaceRef, options: GenerateThreadTitleOptions) => Promise<string | null | undefined>)
-    | undefined;
-  let deferredThreadTitle:
-    | {
-        resolve: (title: string | null) => void;
-        reject: (error: Error) => void;
-      }
-    | undefined;
-  const orchestrationRuntimeBridge = createStoreBackedOrchestrationRuntimeBridge();
-  const driverOptions = {
-    extensionFactories: [createOrchestrationRuntimeExtension(orchestrationRuntimeBridge)],
-    inlineExtensionMetadata: [
-      {
-        displayName: "Thread orchestration",
-        description: "Start child pi-gui threads from transcript tool calls",
-      },
-    ],
-  };
-  store = new DesktopAppStore({
-    userDataDir: configuredUserDataDir,
-    initialWorkspacePaths: resolveInitialWorkspacePaths(),
-    getWindow: () => mainWindow,
-    shouldKeepSessionDialogs: (sessionRef) => isSessionVisibleInAnotherWindow(sessionRef),
-    driverOptions,
-    generateThreadTitleOverride: async (workspace, options) => generateThreadTitleOverride?.(workspace, options),
-  });
-  await store.initialize();
-  themeManager.setMode(store.state.themeMode);
-  integratedTerminalShell = (await store.getState()).integratedTerminalShell;
-  stopPruningTerminals = store.subscribe((state) => {
-    integratedTerminalShell = state.integratedTerminalShell;
-    const workspacePaths = state.workspaces.map((workspace) => workspace.path);
-    const workspacePathSignature = workspacePaths.join("\0");
-    if (workspacePathSignature !== retainedTerminalWorkspacePathSignature) {
-      retainedTerminalWorkspacePathSignature = workspacePathSignature;
-      terminalService?.retainWorkspacePaths(workspacePaths);
+app
+  .whenReady()
+  .then(async () => {
+    if (!hasSingleInstanceLock) {
+      return;
     }
-  });
-  installApplicationMenu();
-  if (process.env.PI_APP_TEST_MODE) {
-    Object.assign(globalThis, {
-      __PI_APP_TEST_HOOKS: {
-        emitSessionEvent: (event: SessionDriverEvent) => store.emitTestSessionEvent(event),
-        handleWindowActivation: () => {
-          if (mainWindow) {
-            applyWindowActivation(mainWindow);
-          }
+
+    // On macOS, packaged builds already render the dock icon from `icon.icns`
+    // in the app bundle. In dev we override the generic Electron dock icon with
+    // the real PNG so the running app looks right end-to-end.
+    if (process.platform === "darwin" && !app.isPackaged) {
+      app.dock?.setIcon(appIcon);
+    }
+
+    let generateThreadTitleOverride:
+      | ((
+          workspace: WorkspaceRef,
+          options: GenerateThreadTitleOptions,
+        ) => Promise<string | null | undefined>)
+      | undefined;
+    let deferredThreadTitle:
+      | {
+          resolve: (title: string | null) => void;
+          reject: (error: Error) => void;
+        }
+      | undefined;
+    const orchestrationRuntimeBridge = createStoreBackedOrchestrationRuntimeBridge();
+    const scheduledTaskRuntimeBridge = createStoreBackedScheduledTaskRuntimeBridge();
+    const checkpoints = new TurnCheckpointStore(configuredUserDataDir);
+    const extensionViews: DesktopExtensionViewOwner = new DesktopExtensionViewOwner({
+      frameDocument: extensionFrameDocument,
+      hostAssets: {
+        "frame-bridge.js": {
+          body: await readFile(
+            createRequire(__filename).resolve("@pi-gui/extension-ui/frame-bridge"),
+            "utf8",
+          ),
+          contentType: "text/javascript; charset=utf-8",
         },
-        promptForText: (message: string, placeholder?: string, allowEmpty?: boolean) =>
-          promptForText(mainWindow, message, placeholder ?? "", allowEmpty ?? false),
-        runOrchestrationRuntimeTool: (input: OrchestrationRuntimeToolTestInput) =>
-          runOrchestrationRuntimeToolForTest(orchestrationRuntimeBridge, input),
-        setDeferredThreadTitleMode: () => {
-          generateThreadTitleOverride = () =>
-            new Promise<string | null>((resolve, reject) => {
-              deferredThreadTitle = { resolve, reject };
-            });
+      },
+      onHostAction: (context) =>
+        performExtensionViewHostAction(
+          { store, windows: windowOwner, views: extensionViews },
+          context,
+        ),
+      onDiagnostic: (target, source, message) =>
+        console.error("[extension-view]", target.sessionId, source, message),
+    });
+    extensionViewOwner = extensionViews;
+    protocol.handle(DESKTOP_EXTENSION_SCHEME, (request) =>
+      extensionViews.assetResponse(request.url),
+    );
+    const driverOptions: NonNullable<
+      ConstructorParameters<typeof DesktopAppStore>[0]["driverOptions"]
+    > = {
+      onTurnCaptureBoundary: (boundary, signal) => checkpoints.recordBoundary(boundary, signal),
+      // The store bounds each capture from when it starts; this only stops a stuck boundary,
+      // including one waiting behind another run's capture in the same checkout.
+      turnCaptureTimeoutMs: TURN_CAPTURE_BACKSTOP_MS,
+      desktopExtensions: {
+        onChanged: (runtime) => extensionViews.replaceRuntime(runtime),
+        onInvalidated: ({ target, generation }) =>
+          extensionViews.invalidateRuntime(target, generation),
+      },
+      builtinExtensions: [
+        {
+          name: "pi-gui-thread-orchestration",
+          displayName: "Thread orchestration",
+          description: "Lets pi start, read and message other pi-gui threads",
+          factory: createOrchestrationRuntimeExtension(orchestrationRuntimeBridge),
         },
-        hasDeferredThreadTitle: () => Boolean(deferredThreadTitle),
-        resolveDeferredThreadTitle: (title: string) => {
-          if (!deferredThreadTitle) {
-            throw new Error("Deferred thread-title request is unavailable");
-          }
-          const pending = deferredThreadTitle;
-          deferredThreadTitle = undefined;
-          pending.resolve(title);
+        {
+          name: "pi-gui-scheduled-tasks",
+          displayName: "Scheduled tasks",
+          description: "Lets pi create and update local pi-gui scheduled tasks",
+          factory: createScheduledTaskRuntimeExtension(scheduledTaskRuntimeBridge, (ctx) => {
+            try {
+              return sessionRefFromExtensionContext(ctx).workspaceId;
+            } catch {
+              return undefined;
+            }
+          }),
         },
-        rejectDeferredThreadTitle: () => {
-          if (!deferredThreadTitle) {
-            throw new Error("Deferred thread-title request is unavailable");
-          }
-          const pending = deferredThreadTitle;
-          deferredThreadTitle = undefined;
-          pending.reject(new Error("Deferred thread-title rejected by test"));
-        },
+      ],
+    };
+    store = new DesktopAppStore({
+      userDataDir: configuredUserDataDir,
+      initialWorkspacePaths: resolveInitialWorkspacePaths(),
+      getWindow: () => mainWindow,
+      shouldKeepSessionDialogs: (sessionRef) =>
+        windowOwner?.isSessionVisibleInAnotherWindow(sessionRef) ?? false,
+      driverOptions,
+      generateThreadTitleOverride: async (workspace, options) =>
+        generateThreadTitleOverride?.(workspace, options),
+    });
+    windowOwner = new WindowOwner(store, {
+      onActiveWindowChanged: (window) => {
+        mainWindow = window;
+        notificationManager?.trackWindow(window);
+        notificationPermissionService?.trackWindow(window);
       },
     });
-  }
-  notificationPermissionService = new NotificationPermissionService(() => mainWindow);
-  notificationPermissionService.subscribe((status) => {
-    for (const window of appWindows) {
-      if (canPublishToWindow(window)) {
-        window.webContents.send(desktopIpc.notificationPermissionStatusChanged, status);
+    await store.initialize();
+    themeManager.setMode(store.snapshot().themeMode);
+    integratedTerminalShell = (await store.getState()).integratedTerminalShell;
+    nativeTheme.on("updated", refreshWindowBackgrounds);
+    let windowBackgroundPresetId = store.snapshot().themePresetId;
+    stopPruningTerminals = store.subscribe((state) => {
+      integratedTerminalShell = state.integratedTerminalShell;
+      if (state.themePresetId !== windowBackgroundPresetId) {
+        windowBackgroundPresetId = state.themePresetId;
+        refreshWindowBackgrounds();
       }
+      const workspacePaths = state.workspaces.map((workspace) => workspace.path);
+      const workspacePathSignature = workspacePaths.join("\0");
+      if (workspacePathSignature !== retainedTerminalWorkspacePathSignature) {
+        retainedTerminalWorkspacePathSignature = workspacePathSignature;
+        terminalService?.retainWorkspacePaths(workspacePaths);
+      }
+    });
+    installApplicationMenu();
+    if (process.env.PI_APP_TEST_MODE) {
+      Object.assign(globalThis, {
+        __PI_APP_TEST_HOOKS: {
+          emitSessionEvent: (event: SessionDriverEvent) => store.emitTestSessionEvent(event),
+          handleWindowActivation: () => {
+            if (mainWindow) {
+              windowOwner.activate(mainWindow);
+            }
+          },
+          promptForText: (message: string, placeholder?: string, allowEmpty?: boolean) =>
+            promptForText(mainWindow, message, placeholder ?? "", allowEmpty ?? false),
+          runOrchestrationRuntimeTool: (input: OrchestrationRuntimeToolTestInput) =>
+            runOrchestrationRuntimeToolForTest(orchestrationRuntimeBridge, input),
+          runScheduledTaskRuntimeTool: (input: ScheduledTaskRuntimeToolTestInput) =>
+            runScheduledTaskRuntimeToolForTest(scheduledTaskRuntimeBridge, input),
+          fireDueScheduledTasks: (nowIso?: string) =>
+            store.fireDueScheduledTasks(nowIso ? new Date(nowIso) : undefined),
+          setDeferredThreadTitleMode: () => {
+            generateThreadTitleOverride = () =>
+              new Promise<string | null>((resolve, reject) => {
+                deferredThreadTitle = { resolve, reject };
+              });
+          },
+          hasDeferredThreadTitle: () => Boolean(deferredThreadTitle),
+          resolveDeferredThreadTitle: (title: string) => {
+            if (!deferredThreadTitle) {
+              throw new Error("Deferred thread-title request is unavailable");
+            }
+            const pending = deferredThreadTitle;
+            deferredThreadTitle = undefined;
+            pending.resolve(title);
+          },
+          rejectDeferredThreadTitle: () => {
+            if (!deferredThreadTitle) {
+              throw new Error("Deferred thread-title request is unavailable");
+            }
+            const pending = deferredThreadTitle;
+            deferredThreadTitle = undefined;
+            pending.reject(new Error("Deferred thread-title rejected by test"));
+          },
+        },
+      });
     }
-  });
-  notificationManager = new NotificationManager(
-    store,
-    () => mainWindow,
-    notificationPermissionService,
-    async (sessionRef) => {
-      const window = getForegroundAppWindow();
-      await runWindowScopedForWindow(window, () => store.selectSession(sessionRef), { forceActiveWindow: true });
-    },
-  );
-  stopNotifications = notificationManager.start();
-  if (!isDev) {
-    stopUpdateChecker = initUpdateChecker();
-  }
-
-  ipcMain.handle(desktopIpc.ping, () =>
-    devReloadMarkersEnabled ? `pi desktop ready:${MAIN_DEV_RELOAD_MARKER}` : "pi desktop ready",
-  );
-  ipcMain.handle(desktopIpc.getThemeMode, () => themeManager.getMode());
-  ipcMain.handle(desktopIpc.getResolvedTheme, () => themeManager.getResolvedTheme());
-  ipcMain.handle(desktopIpc.setThemeMode, (event, mode: ThemeMode) => {
-    themeManager.setMode(mode);
-    return runWindowScopedForEvent(event, () => store.setThemeMode(mode));
-  });
-  ipcMain.handle(desktopIpc.setThemePresetId, (event, presetId: ThemePresetId) =>
-    runWindowScopedForEvent(event, () => store.setThemePresetId(presetId)),
-  );
-  ipcMain.handle(desktopIpc.openExternal, (_event, url: string) => {
-    const parsed = parseExternalWebUrl(url);
-    if (!parsed) {
-      throw new Error(`Refusing to open unsupported URL: ${url}`);
-    }
-    return shell.openExternal(parsed.toString());
-  });
-  ipcMain.handle(desktopIpc.stateRequest, (event) => store.getStateForView(viewForWebContents(event.sender.id)));
-  ipcMain.handle(desktopIpc.selectedTranscriptRequest, (event) =>
-    store.getSelectedTranscriptForView(viewForWebContents(event.sender.id)),
-  );
-  ipcMain.handle(desktopIpc.addWorkspacePath, (event, workspacePath: string) =>
-    runWindowScopedForEvent(event, () => store.addWorkspace(workspacePath)),
-  );
-  ipcMain.handle(desktopIpc.pickWorkspace, (event) =>
-    pickWorkspaceViaDialog(BrowserWindow.fromWebContents(event.sender)),
-  );
-  ipcMain.handle(desktopIpc.selectWorkspace, (event, workspaceId: string) =>
-    runWindowScopedForEvent(event, () => store.selectWorkspace(workspaceId)),
-  );
-  ipcMain.handle(desktopIpc.renameWorkspace, (event, workspaceId: string, displayName: string) =>
-    runWindowScopedForEvent(event, () => store.renameWorkspace(workspaceId, displayName)),
-  );
-  ipcMain.handle(desktopIpc.removeWorkspace, (event, workspaceId: string) =>
-    runWindowScopedForEvent(event, () => store.removeWorkspace(workspaceId)),
-  );
-  ipcMain.handle(desktopIpc.reorderWorkspaces, (event, order: readonly string[]) =>
-    runWindowScopedForEvent(event, () => store.reorderWorkspaces(order)),
-  );
-  ipcMain.handle(desktopIpc.reorderPinnedSessions, (event, order: readonly string[]) =>
-    runWindowScopedForEvent(event, () => store.reorderPinnedSessions(order)),
-  );
-  ipcMain.handle(desktopIpc.openWorkspaceInFinder, async (_event, workspaceId: string) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      throw new Error(`Unknown workspace: ${workspaceId}`);
-    }
-    await shell.openPath(workspacePath);
-  });
-  ipcMain.handle(desktopIpc.createWorktree, (event, input: CreateWorktreeInput) =>
-    runWindowScopedForEvent(event, () => store.createWorktree(input)),
-  );
-  ipcMain.handle(desktopIpc.removeWorktree, (event, input: RemoveWorktreeInput) =>
-    runWindowScopedForEvent(event, () => store.removeWorktree(input)),
-  );
-  ipcMain.handle(desktopIpc.syncCurrentWorkspace, (event) =>
-    runWindowScopedForEvent(event, () => store.syncCurrentWorkspace()),
-  );
-  ipcMain.handle(desktopIpc.selectSession, (event, target: WorkspaceSessionTarget) =>
-    runWindowScopedForEvent(event, () => store.selectSession(target)),
-  );
-  ipcMain.handle(desktopIpc.renameSession, (event, target: WorkspaceSessionTarget, title: string) =>
-    runWindowScopedForEvent(event, () => store.renameSession(target, title)),
-  );
-  ipcMain.handle(desktopIpc.archiveSession, (event, target: WorkspaceSessionTarget) =>
-    runWindowScopedForEvent(event, () => store.archiveSession(target)),
-  );
-  ipcMain.handle(desktopIpc.unarchiveSession, (event, target: WorkspaceSessionTarget) =>
-    runWindowScopedForEvent(event, () => store.unarchiveSession(target)),
-  );
-  ipcMain.handle(desktopIpc.markSessionRead, (event, target: WorkspaceSessionTarget) =>
-    runWindowScopedForEvent(event, () => store.markSessionRead(target)),
-  );
-  ipcMain.handle(desktopIpc.setSessionPinned, (event, target: WorkspaceSessionTarget, pinned: boolean) =>
-    runWindowScopedForEvent(event, () => store.setSessionPinned(target, pinned)),
-  );
-  ipcMain.handle(desktopIpc.setActiveView, (event, activeView) =>
-    runWindowScopedForEvent(event, () => store.setActiveView(activeView)),
-  );
-  ipcMain.handle(desktopIpc.setSidebarCollapsed, (event, collapsed: boolean) =>
-    runWindowScopedForEvent(event, () => store.setSidebarCollapsed(collapsed)),
-  );
-  ipcMain.handle(desktopIpc.refreshRuntime, (event, workspaceId?: string) =>
-    runWindowScopedForEvent(event, () => store.refreshRuntime(workspaceId)),
-  );
-  ipcMain.handle(desktopIpc.setModelSettingsScopeMode, (event, mode) =>
-    runWindowScopedForEvent(event, () => store.setModelSettingsScopeMode(mode)),
-  );
-  ipcMain.handle(desktopIpc.setSessionModel, (event, workspaceId: string, sessionId: string, provider: string, modelId: string) =>
-    runWindowScopedForEvent(event, () => store.setSessionModel({ workspaceId, sessionId }, provider, modelId)),
-  );
-  ipcMain.handle(desktopIpc.setDefaultModel, (event, workspaceId: string, provider: string, modelId: string) =>
-    runWindowScopedForEvent(event, () => store.setDefaultModel(workspaceId, provider, modelId)),
-  );
-  ipcMain.handle(
-    desktopIpc.setDefaultThinkingLevel,
-    (event, workspaceId: string, thinkingLevel) =>
-      runWindowScopedForEvent(event, () => store.setDefaultThinkingLevel(workspaceId, thinkingLevel)),
-  );
-  ipcMain.handle(
-    desktopIpc.setSessionThinkingLevel,
-    (event, workspaceId: string, sessionId: string, thinkingLevel) =>
-      runWindowScopedForEvent(event, () => store.setSessionThinkingLevel({ workspaceId, sessionId }, thinkingLevel)),
-  );
-  ipcMain.handle(desktopIpc.loginProvider, (event, workspaceId: string, providerId: string) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    return runUnscopedStateResultForWindow(window, () =>
-      store.loginProvider(workspaceId, providerId, createRuntimeLoginCallbacks(window)),
+    notificationPermissionService = new NotificationPermissionService(() => mainWindow);
+    notificationPermissionService.subscribe((status) => {
+      for (const window of windowOwner.allWindows()) {
+        if (canPublishToWindow(window)) {
+          window.webContents.send(desktopIpc.notificationPermissionStatusChanged, status);
+        }
+      }
+    });
+    notificationManager = new NotificationManager(
+      store,
+      () => mainWindow,
+      notificationPermissionService,
+      async (sessionRef) => {
+        const window = windowOwner.foreground();
+        await runWindowScopedForWindow(window, () => store.selectSession(sessionRef), {
+          forceActiveWindow: true,
+        });
+      },
     );
-  });
-  ipcMain.handle(desktopIpc.logoutProvider, (event, workspaceId: string, providerId: string) =>
-    runWindowScopedForEvent(event, () => store.logoutProvider(workspaceId, providerId)),
-  );
-  ipcMain.handle(desktopIpc.setProviderApiKey, (event, workspaceId: string, providerId: string, apiKey: string) =>
-    runWindowScopedForEvent(event, () => store.setProviderApiKey(workspaceId, providerId, apiKey)),
-  );
-  ipcMain.handle(desktopIpc.setEnableSkillCommands, (event, workspaceId: string, enabled: boolean) =>
-    runWindowScopedForEvent(event, () => store.setEnableSkillCommands(workspaceId, enabled)),
-  );
-  ipcMain.handle(desktopIpc.listCustomProviders, () => store.listCustomProviders());
-  ipcMain.handle(desktopIpc.setCustomProvider, (event, workspaceId: string, config: CustomProviderConfig) =>
-    runWindowScopedForEvent(event, () => store.setCustomProvider(workspaceId, config)),
-  );
-  ipcMain.handle(desktopIpc.deleteCustomProvider, (event, workspaceId: string, providerId: string) =>
-    runWindowScopedForEvent(event, () => store.deleteCustomProvider(workspaceId, providerId)),
-  );
-  ipcMain.handle(desktopIpc.probeCustomProviderModels, (_event, input: CustomProviderProbeInput) =>
-    probeCustomProviderModels(input),
-  );
-  ipcMain.handle(desktopIpc.setScopedModelPatterns, (event, workspaceId: string, patterns: readonly string[]) =>
-    runWindowScopedForEvent(event, () => store.setScopedModelPatterns(workspaceId, patterns)),
-  );
-  ipcMain.handle(desktopIpc.setSkillEnabled, (event, workspaceId: string, filePath: string, enabled: boolean) =>
-    runWindowScopedForEvent(event, () => store.setSkillEnabled(workspaceId, filePath, enabled)),
-  );
-  ipcMain.handle(desktopIpc.setExtensionEnabled, (event, workspaceId: string, filePath: string, enabled: boolean) =>
-    runWindowScopedForEvent(event, () => store.setExtensionEnabled(workspaceId, filePath, enabled)),
-  );
-  ipcMain.handle(desktopIpc.respondToHostUiRequest, (event, workspaceId: string, sessionId: string, response) =>
-    runImmediateStateResultForWindow(
-      BrowserWindow.fromWebContents(event.sender),
-      () => store.respondToHostUiRequest({ workspaceId, sessionId }, response),
-    ),
-  );
-  ipcMain.handle(desktopIpc.setNotificationPreferences, (event, preferences) =>
-    runWindowScopedForEvent(event, () => store.setNotificationPreferences(preferences)),
-  );
-  ipcMain.handle(desktopIpc.setIntegratedTerminalShell, (event, shellPath: string) =>
-    runWindowScopedForEvent(event, () => store.setIntegratedTerminalShell(shellPath)),
-  );
-  ipcMain.handle(desktopIpc.setEnableTransparency, async (_event, enabled: boolean) => {
-    const nextState = await store.setEnableTransparency(enabled);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (process.platform === "darwin") {
-        mainWindow.setVibrancy(enabled ? "under-window" : null);
-      }
+    stopNotifications = notificationManager.start();
+    if (!isDev) {
+      stopUpdateChecker = initUpdateChecker();
     }
-    return nextState;
-  });
-  ipcMain.handle(desktopIpc.terminalEnsurePanel, (event, workspaceId: string, terminalScopeId: string, size) => {
-    return getTerminalService().ensurePanel(event.sender, workspaceId, terminalScopeId, size);
-  });
-  ipcMain.handle(desktopIpc.terminalCreateSession, (event, workspaceId: string, terminalScopeId: string, size) => {
-    return getTerminalService().createSession(event.sender, workspaceId, terminalScopeId, size);
-  });
-  ipcMain.handle(desktopIpc.terminalSetActiveSession, (event, workspaceId: string, terminalScopeId: string, terminalId: string) => {
-    return getTerminalService().setActiveSession(event.sender, workspaceId, terminalScopeId, terminalId);
-  });
-  ipcMain.handle(desktopIpc.terminalWrite, (event, terminalId: string, data: string) => {
-    terminalService?.write(event.sender, terminalId, data);
-  });
-  ipcMain.handle(desktopIpc.terminalResize, (event, terminalId: string, size) => {
-    terminalService?.resize(event.sender, terminalId, size);
-  });
-  ipcMain.handle(desktopIpc.terminalRestartSession, (event, terminalId: string, size) => {
-    return getTerminalService().restart(event.sender, terminalId, size);
-  });
-  ipcMain.handle(desktopIpc.terminalCloseSession, (event, terminalId: string) => {
-    return getTerminalService().close(event.sender, terminalId);
-  });
-  ipcMain.handle(desktopIpc.terminalSetTitle, (event, terminalId: string, title: string) => {
-    terminalService?.setTitle(event.sender, terminalId, title);
-  });
-  ipcMain.on(desktopIpc.terminalSetFocused, (event, focused: boolean) => {
-    if (focused) {
-      terminalFocusedWebContentsIds.add(event.sender.id);
-    } else {
-      terminalFocusedWebContentsIds.delete(event.sender.id);
-    }
-  });
-  ipcMain.handle(desktopIpc.getNotificationPermissionStatus, () =>
-    notificationPermissionService?.getCurrentStatus() ?? Promise.resolve("unknown"),
-  );
-  ipcMain.handle(desktopIpc.requestNotificationPermission, () =>
-    notificationPermissionService?.requestPermission() ?? Promise.resolve("unknown"),
-  );
-  ipcMain.handle(desktopIpc.openSystemNotificationSettings, () =>
-    notificationPermissionService?.openSystemSettings() ?? Promise.resolve(),
-  );
-  ipcMain.handle(desktopIpc.createSession, (event, input: CreateSessionInput) =>
-    runWindowScopedForEvent(event, () => store.createSession(input)),
-  );
-  ipcMain.handle(desktopIpc.startThread, (event, input: StartThreadInput) =>
-    runWindowScopedForEvent(event, () => store.startThread(input)),
-  );
-  ipcMain.handle(desktopIpc.forkThread, (event, input: ForkThreadInput) =>
-    runWindowScopedForEvent(event, () => store.forkThread(input)),
-  );
-  ipcMain.handle(desktopIpc.sendChildThreadFollowUp, (event, input: SendChildThreadFollowUpInput) =>
-    runWindowScopedForEvent(event, () => store.sendChildThreadFollowUp(input)),
-  );
-  ipcMain.handle(desktopIpc.setChildSupervisionLoop, (event, input: SetChildSupervisionLoopInput) =>
-    runWindowScopedForEvent(event, () => store.setChildSupervisionLoop(input)),
-  );
-  ipcMain.handle(desktopIpc.openSkillInFinder, async (_event, workspaceId: string, filePath: string) => {
-    const resolved = store.getSkillFilePath(workspaceId, filePath);
-    if (!resolved) {
-      throw new Error(`Unknown skill: ${filePath}`);
-    }
-    await shell.openPath(path.dirname(resolved));
-  });
-  ipcMain.handle(desktopIpc.openExtensionInFinder, async (_event, workspaceId: string, filePath: string) => {
-    const resolved = store.getExtensionFilePath(workspaceId, filePath);
-    if (!resolved) {
-      throw new Error(`Unknown extension: ${filePath}`);
-    }
-    await shell.openPath(path.dirname(resolved));
-  });
-  ipcMain.handle(desktopIpc.cancelCurrentRun, (event) =>
-    runWindowScopedForEvent(event, () => store.cancelCurrentRun()),
-  );
-  ipcMain.handle(desktopIpc.pickComposerAttachments, async (event) => {
-    const window = resolveDialogWindow(BrowserWindow.fromWebContents(event.sender));
-    const result =
-      window
-        ? await dialog.showOpenDialog(window, {
-            properties: ["openFile", "multiSelections"],
-            title: "Attach files",
-          })
-        : await dialog.showOpenDialog({
-            properties: ["openFile", "multiSelections"],
-            title: "Attach files",
+
+    registerDesktopIpc({
+      windows: windowOwner,
+      owners: {
+        state: store,
+        workbench: store,
+        extensionViews,
+        review: new ReviewOwner({
+          checkpoints,
+          userDataDir: app.getPath("userData"),
+          resolveCheckoutPath: (checkoutId) => store.getWorkspacePath(checkoutId),
+          validateTask: (target) =>
+            store
+              .snapshot()
+              .workspaces.some(
+                (workspace) =>
+                  workspace.id === target.workspaceId &&
+                  workspace.sessions.some((session) => session.id === target.sessionId),
+              ),
+        }),
+        workspace: store,
+        conversation: store,
+        orchestration: store,
+        scheduledTasks: store,
+        settings: store,
+      },
+      capabilities: {
+        ping: () =>
+          devReloadMarkersEnabled
+            ? `pi desktop ready:${MAIN_DEV_RELOAD_MARKER}`
+            : "pi desktop ready",
+        theme: themeManager,
+        openExternal: async (url) => {
+          const parsed = parseExternalWebUrl(url);
+          if (!parsed) {
+            throw new Error(`Refusing to open unsupported URL: ${url}`);
+          }
+          await shell.openExternal(parsed.toString());
+        },
+        pickWorkspace: (window) => pickWorkspaceViaDialog(window),
+        createLoginCallbacks: (window) => createRuntimeLoginCallbacks(window),
+        probeCustomProviderModels,
+        notificationPermission: () => notificationPermissionService,
+        terminal: getTerminalService,
+        optionalTerminal: () => terminalService,
+        setTerminalFocused: (webContentsId, focused) => {
+          if (focused) {
+            terminalFocusedWebContentsIds.add(webContentsId);
+          } else {
+            terminalFocusedWebContentsIds.delete(webContentsId);
+          }
+        },
+        setSidePanelFocused: (webContentsId, focused) => {
+          if (focused) {
+            sidePanelFocusedWebContentsIds.add(webContentsId);
+          } else {
+            sidePanelFocusedWebContentsIds.delete(webContentsId);
+          }
+        },
+        setTransparency: (enabled) => {
+          if (process.platform !== "darwin") {
+            return;
+          }
+          for (const window of windowOwner.allWindows()) {
+            if (!window.isDestroyed()) {
+              window.setVibrancy(enabled ? "under-window" : null);
+            }
+          }
+        },
+        pickComposerAttachments: async (window, existing = []) => {
+          const parent = resolveDialogWindow(window);
+          const result = parent
+            ? await dialog.showOpenDialog(parent, {
+                properties: ["openFile", "multiSelections"],
+                title: "Attach files",
+              })
+            : await dialog.showOpenDialog({
+                properties: ["openFile", "multiSelections"],
+                title: "Attach files",
+              });
+          if (result.canceled || result.filePaths.length === 0) {
+            return undefined;
+          }
+          return readComposerAttachmentsFromPaths(result.filePaths, existing);
+        },
+        readClipboardImage: readClipboardImageAttachment,
+        validateComposerAttachments: (attachments) =>
+          attachments.flatMap(validateComposerAttachmentPayload),
+        listWorkspaceFiles,
+        readWorkspaceFile,
+        revealWorkspaceFile: async (workspacePath, filePath) => {
+          const resolved = await resolveExistingWorkspacePath(workspacePath, filePath);
+          shell.showItemInFolder(resolved);
+        },
+        getChangedFiles,
+        getFileDiff,
+        stageFile,
+        relaunchApplication: requestApplicationRelaunch,
+      },
+    });
+
+    createAppWindow();
+    void notificationPermissionService.getCurrentStatus().catch((error: unknown) => {
+      console.error("[main] getCurrentStatus failed", error);
+    });
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createAppWindow();
+        if (notificationPermissionService) {
+          void notificationPermissionService.getCurrentStatus().catch((error: unknown) => {
+            console.error("[main] getCurrentStatus failed", error);
           });
-    if (result.canceled || result.filePaths.length === 0) {
-      return stateForWindow(window);
-    }
-    const attachments = await Promise.all(result.filePaths.map(readComposerAttachment));
-    return runWindowScopedForWindow(window, () => store.addComposerAttachments(attachments));
-  });
-  ipcMain.on(desktopIpc.readClipboardImage, (event) => {
-    event.returnValue = readClipboardImageAttachment();
-  });
-  ipcMain.handle(desktopIpc.addComposerAttachments, (event, attachments: readonly ComposerAttachment[]) => {
-    const validated = attachments.flatMap(validateComposerAttachmentPayload);
-    return runWindowScopedForEvent(event, () => store.addComposerAttachments(validated));
-  });
-  ipcMain.handle(desktopIpc.removeComposerAttachment, (event, attachmentId: string) =>
-    runWindowScopedForEvent(event, () => store.removeComposerAttachment(attachmentId)),
-  );
-  ipcMain.handle(desktopIpc.editQueuedComposerMessage, (event, messageId: string, currentDraft?: string) =>
-    runWindowScopedForEvent(event, () => store.editQueuedComposerMessage(messageId, currentDraft)),
-  );
-  ipcMain.handle(desktopIpc.cancelQueuedComposerEdit, (event) =>
-    runWindowScopedForEvent(event, () => store.cancelQueuedComposerEdit()),
-  );
-  ipcMain.handle(desktopIpc.removeQueuedComposerMessage, (event, messageId: string) =>
-    runWindowScopedForEvent(event, () => store.removeQueuedComposerMessage(messageId)),
-  );
-  ipcMain.handle(desktopIpc.steerQueuedComposerMessage, (event, messageId: string) =>
-    runWindowScopedForEvent(event, () => store.steerQueuedComposerMessage(messageId)),
-  );
-  ipcMain.handle(desktopIpc.updateComposerDraft, (event, composerDraft: string) =>
-    runWindowScopedForEvent(event, async () => {
-      currentComposerDraftPersistOriginWebContentsId = event.sender.id;
-      try {
-        return await store.updateComposerDraft(composerDraft);
-      } finally {
-        currentComposerDraftPersistOriginWebContentsId = undefined;
+        }
       }
-    }),
-  );
-  ipcMain.handle(
-    desktopIpc.submitComposer,
-    (event, text: string, options?: { readonly deliverAs?: "steer" | "followUp" }) =>
-      runWindowScopedForEvent(event, () => store.submitComposer(text, options)),
-  );
-  ipcMain.handle(desktopIpc.getSessionTree, (_event, target: WorkspaceSessionTarget) =>
-    store.getSessionTree(target),
-  );
-  ipcMain.handle(
-    desktopIpc.navigateSessionTree,
-    (event, target: WorkspaceSessionTarget, targetId: string, options) =>
-      runWindowScopedStateResult(BrowserWindow.fromWebContents(event.sender), () =>
-        store.navigateSessionTree(target, targetId, options),
-      ),
-  );
-  ipcMain.handle(desktopIpc.listWorkspaceFiles, async (_event, workspaceId: string, options?: { readonly force?: boolean }) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      return [];
-    }
-    return listWorkspaceFiles(workspacePath, options);
+    });
+  })
+  .catch((error: unknown) => {
+    console.error("[main] Application startup failed", error);
+    app.exit(1);
   });
-  ipcMain.handle(desktopIpc.readWorkspaceFile, async (_event, workspaceId: string, filePath: string) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      throw new Error(`Unknown workspace: ${workspaceId}`);
-    }
-    return readWorkspaceFile(workspacePath, filePath);
-  });
-  ipcMain.handle(desktopIpc.getChangedFiles, async (_event, workspaceId: string) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      return [];
-    }
-    return getChangedFiles(workspacePath);
-  });
-  ipcMain.handle(desktopIpc.getFileDiff, async (_event, workspaceId: string, filePath: string) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      return "";
-    }
-    return getFileDiff(workspacePath, filePath);
-  });
-  ipcMain.handle(desktopIpc.stageFile, async (_event, workspaceId: string, filePath: string) => {
-    const workspacePath = store.getWorkspacePath(workspaceId);
-    if (!workspacePath) {
-      throw new Error(`Unknown workspace: ${workspaceId}`);
-    }
-    await stageFile(workspacePath, filePath);
-  });
-  ipcMain.handle(desktopIpc.toggleWindowMaximize, (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window) {
-      return;
-    }
-
-    if (window.isMaximized()) {
-      window.unmaximize();
-      return;
-    }
-
-    window.maximize();
-  });
-
-  createAppWindow();
-  void notificationPermissionService.getCurrentStatus();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createAppWindow();
-      void notificationPermissionService?.getCurrentStatus();
-    }
-  });
-});
 
 app.on("window-all-closed", () => {
   // macOS normally keeps the app alive after its final window closes. The
   // Electron harness closes windows to end each isolated run, so let explicit
   // test-mode launches quit instead of leaving their process behind forever.
-  if (process.platform !== "darwin" || process.env.PI_APP_TEST_MODE !== undefined) {
+  if (process.platform !== "darwin" || appTestMode !== undefined) {
     stopNotifications?.();
     stopNotifications = undefined;
     notificationManager = undefined;
@@ -1519,11 +1204,11 @@ app.on("before-quit", (event) => {
 
   event.preventDefault();
   quittingAfterStoreFlush = true;
-  const flush = store
-    .flushPersistence()
-    .catch((error) => {
+  const flush = Promise.all([store.flushPersistence(), extensionViewOwner?.dispose()]).catch(
+    (error) => {
       console.error("pi-gui: persistence flush failed during quit:", error);
-    });
+    },
+  );
   // Never let a hung flush block quit forever — quit after a bounded wait.
   const flushDeadline = new Promise<void>((resolve) => {
     setTimeout(() => {
@@ -1531,9 +1216,13 @@ app.on("before-quit", (event) => {
       resolve();
     }, QUIT_FLUSH_TIMEOUT_MS);
   });
-  void Promise.race([flush, flushDeadline]).finally(() => {
-    app.quit();
-  });
+  void Promise.race([flush, flushDeadline])
+    .finally(() => {
+      app.quit();
+    })
+    .catch((error: unknown) => {
+      console.error("[main] Quit after persistence flush failed", error);
+    });
 });
 
 function resolveInitialWorkspacePaths(): readonly string[] {
@@ -1546,6 +1235,23 @@ function resolveInitialWorkspacePaths(): readonly string[] {
   }
 
   return [];
+}
+
+async function readComposerAttachmentsFromPaths(
+  filePaths: readonly string[],
+  existing: readonly ComposerAttachment[] = [],
+): Promise<ComposerAttachment[]> {
+  const planned = filePaths.map((filePath) => ({
+    filePath,
+    mimeType: mimeTypeForPath(filePath),
+  }));
+  const imageSizes = await Promise.all(
+    planned
+      .filter((entry) => entry.mimeType.startsWith("image/"))
+      .map(async (entry) => (await stat(entry.filePath)).size),
+  );
+  assertComposerImageFileSizes(imageSizes, existing);
+  return Promise.all(planned.map((entry) => readComposerAttachment(entry.filePath)));
 }
 
 async function readComposerAttachment(filePath: string): Promise<ComposerAttachment> {
@@ -1565,8 +1271,19 @@ async function readComposerAttachment(filePath: string): Promise<ComposerAttachm
   };
 }
 
-async function readComposerImageAttachment(filePath: string, mimeType: string): Promise<ComposerImageAttachment> {
+async function readComposerImageAttachment(
+  filePath: string,
+  mimeType: string,
+): Promise<ComposerImageAttachment> {
+  const stats = await stat(filePath);
+  assertComposerImageBytes(stats.size);
   const buffer = await readFile(filePath);
+  assertComposerImageBytes(buffer.length);
+  const image = nativeImage.createFromBuffer(buffer);
+  if (!image.isEmpty()) {
+    const size = image.getSize();
+    assertComposerImagePixels(size.width, size.height);
+  }
   return {
     id: randomUUID(),
     kind: "image",
@@ -1587,7 +1304,11 @@ function mimeTypeForPath(filePath: string): string {
 
 function validateComposerAttachmentPayload(attachment: ComposerAttachment): ComposerAttachment[] {
   if (attachment.kind === "image") {
-    if (typeof attachment.data !== "string" || typeof attachment.mimeType !== "string" || !SUPPORTED_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
+    if (
+      typeof attachment.data !== "string" ||
+      typeof attachment.mimeType !== "string" ||
+      !SUPPORTED_IMAGE_MIME_TYPES.has(attachment.mimeType)
+    ) {
       return [];
     }
     return [
@@ -1621,18 +1342,34 @@ function validateComposerAttachmentPayload(attachment: ComposerAttachment): Comp
 
 function createRuntimeLoginCallbacks(window?: BrowserWindow | null) {
   return {
-    onAuth: async ({ url, instructions }: { readonly url: string; readonly instructions?: string }) => {
+    onAuth: async ({
+      url,
+      instructions,
+    }: {
+      readonly url: string;
+      readonly instructions?: string;
+    }) => {
       await shell.openExternal(url);
       if (instructions?.trim()) {
         await showLoginInstructions(window, instructions.trim());
       }
     },
-    onPrompt: async ({ message, placeholder, allowEmpty }: { readonly message: string; readonly placeholder?: string; readonly allowEmpty?: boolean }) =>
-      promptForText(window, message, placeholder, allowEmpty ?? false),
+    onPrompt: async ({
+      message,
+      placeholder,
+      allowEmpty,
+    }: {
+      readonly message: string;
+      readonly placeholder?: string;
+      readonly allowEmpty?: boolean;
+    }) => promptForText(window, message, placeholder, allowEmpty ?? false),
   };
 }
 
-async function showLoginInstructions(parentWindow: BrowserWindow | null | undefined, message: string): Promise<void> {
+async function showLoginInstructions(
+  parentWindow: BrowserWindow | null | undefined,
+  message: string,
+): Promise<void> {
   const window = resolveDialogWindow(parentWindow);
   if (!window) {
     throw new Error("Main window is not available for login instructions.");
@@ -1667,6 +1404,7 @@ async function promptForText(
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
+    autoHideMenuBar: process.platform !== "darwin",
     title: "pi-gui",
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
@@ -1771,7 +1509,9 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-async function probeCustomProviderModels(input: CustomProviderProbeInput): Promise<CustomProviderProbeResult> {
+async function probeCustomProviderModels(
+  input: CustomProviderProbeInput,
+): Promise<CustomProviderProbeResult> {
   const baseUrl = input.baseUrl?.trim();
   if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
     return { ok: false, error: "Base URL must start with http:// or https://" };
@@ -1794,7 +1534,11 @@ async function probeCustomProviderModels(input: CustomProviderProbeInput): Promi
     }
     const models = data
       .map((entry) => {
-        if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+        if (
+          entry &&
+          typeof entry === "object" &&
+          typeof (entry as { id?: unknown }).id === "string"
+        ) {
           return (entry as { id: string }).id;
         }
         return undefined;

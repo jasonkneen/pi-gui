@@ -38,16 +38,20 @@ test("switches between app-global and per-repo model scope while worktrees inher
     const rootWorkspaceA = await waitForWorkspaceByPath(window, workspaceA);
     const rootWorkspaceB = await waitForWorkspaceByPath(window, workspaceB);
 
-    await createNamedThread(window, "Repo A global session", { workspaceName: rootWorkspaceA.name });
-    await expect(window.locator(".topbar__session")).toHaveText("Repo A global session");
+    await createNamedThread(window, "Repo A global session", {
+      workspaceName: rootWorkspaceA.name,
+    });
+    await expect(window.locator(".chat-header__title")).toHaveText("Repo A global session");
     await expectComposerModelState(window, {
       activeModel: "openai:gpt-5",
       visibleModelLabels: ["GPT-5", "GPT-4o"],
       hiddenModelLabels: ["GPT-4 Turbo"],
     });
 
-    await createNamedThread(window, "Repo B global session", { workspaceName: rootWorkspaceB.name });
-    await expect(window.locator(".topbar__session")).toHaveText("Repo B global session");
+    await createNamedThread(window, "Repo B global session", {
+      workspaceName: rootWorkspaceB.name,
+    });
+    await expect(window.locator(".chat-header__title")).toHaveText("Repo B global session");
     await expectComposerModelState(window, {
       activeModel: "openai:gpt-5",
       visibleModelLabels: ["GPT-5", "GPT-4o"],
@@ -56,25 +60,27 @@ test("switches between app-global and per-repo model scope while worktrees inher
 
     await openSettings(window);
     await openSettingsSection(window, "Models");
-    await expect(window.locator(".surface-toolbar__field")).toHaveCount(0);
-    await expect(window.locator(".settings-select")).toHaveValue("openai:gpt-5");
+    await expect(settingsWorkspacePicker(window)).toHaveCount(0);
+    await expect(window.getByLabel("Default model", { exact: true })).toHaveValue("openai:gpt-5");
 
     await openSettingsSection(window, "General");
     await window.getByRole("button", { name: "Per repo" }).click();
-    await expect.poll(async () => (await getDesktopState(window)).modelSettingsScopeMode).toBe("per-repo");
+    await expect
+      .poll(async () => (await getDesktopState(window)).modelSettingsScopeMode)
+      .toBe("per-repo");
 
     await openSettingsSection(window, "Models");
-    await expect(window.locator(".surface-toolbar__field")).toHaveCount(1);
-    await expect(window.locator(".surface-toolbar__field option")).toHaveCount(2);
-    await window.locator(".surface-toolbar__field select").selectOption({ label: rootWorkspaceA.name });
-    await expect(window.locator(".surface-toolbar__field select")).toHaveValue(rootWorkspaceA.id);
-    await expect(window.locator(".settings-select")).toHaveValue("openai:gpt-5");
+    await expect(settingsWorkspacePicker(window)).toHaveCount(1);
+    await expect(settingsWorkspacePicker(window).locator("option")).toHaveCount(2);
+    await settingsWorkspacePicker(window).selectOption({ label: rootWorkspaceA.name });
+    await expect(settingsWorkspacePicker(window)).toHaveValue(rootWorkspaceA.id);
+    await expect(window.getByLabel("Default model", { exact: true })).toHaveValue("openai:gpt-5");
     await setEnabledModels(window, ["openai/gpt-4o", "openai/gpt-4-turbo"], ["openai/gpt-5"]);
-    await window.locator(".settings-select").selectOption("openai:gpt-4o");
-    await expect(window.locator(".settings-select")).toHaveValue("openai:gpt-4o");
+    await window.getByLabel("Default model", { exact: true }).selectOption("openai:gpt-4o");
+    await expect(window.getByLabel("Default model", { exact: true })).toHaveValue("openai:gpt-4o");
 
-    await window.locator(".surface-toolbar__field select").selectOption({ label: rootWorkspaceB.name });
-    await expect(window.locator(".settings-select")).toHaveValue("openai:gpt-5");
+    await settingsWorkspacePicker(window).selectOption({ label: rootWorkspaceB.name });
+    await expect(window.getByLabel("Default model", { exact: true })).toHaveValue("openai:gpt-5");
 
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
     await selectSession(window, "Repo B global session");
@@ -91,7 +97,7 @@ test("switches between app-global and per-repo model scope while worktrees inher
       provider: "openai",
       modelId: "gpt-4o",
     });
-    await expect(window.locator(".topbar__session")).toHaveText("New thread");
+    await expect(window.locator(".chat-header__title")).toHaveText("New thread");
     await expectComposerModelState(window, {
       activeModel: "openai:gpt-4o",
       visibleModelLabels: ["GPT-4o", "GPT-4 Turbo"],
@@ -113,11 +119,15 @@ test("switches between app-global and per-repo model scope while worktrees inher
 
     await openSettings(window);
     await openSettingsSection(window, "Models");
-    await expect(window.locator(".surface-toolbar__field option")).toHaveCount(2);
-    expect((await window.locator(".surface-toolbar__field option").allTextContents()).every((text) => !/Worktree/i.test(text))).toBeTruthy();
+    await expect(settingsWorkspacePicker(window).locator("option")).toHaveCount(2);
+    expect(
+      (await settingsWorkspacePicker(window).locator("option").allTextContents()).every(
+        (text) => !/Worktree/i.test(text),
+      ),
+    ).toBeTruthy();
     await setEnabledModels(window, ["openai/gpt-5", "openai/gpt-4-turbo"], ["openai/gpt-4o"]);
-    await window.locator(".settings-select").selectOption("openai:gpt-5");
-    await expect(window.locator(".settings-select")).toHaveValue("openai:gpt-5");
+    await window.getByLabel("Default model", { exact: true }).selectOption("openai:gpt-5");
+    await expect(window.getByLabel("Default model", { exact: true })).toHaveValue("openai:gpt-5");
 
     await window.getByRole("button", { name: "Back to app", exact: true }).click();
     await expect(window.getByRole("button", { name: "openai:gpt-4-turbo" }).first()).toBeVisible();
@@ -148,33 +158,24 @@ async function openSettingsSection(window: Page, section: "General" | "Models"):
   await expect(window.locator(".view-header__title")).toContainText(section);
 }
 
-async function ensureEnabledModelsDisclosureOpen(window: Page): Promise<void> {
-  const disclosure = window.locator(".settings-disclosure", {
-    has: window.locator(".settings-disclosure__summary", { hasText: "Edit enabled models" }),
-  }).first();
-  const detailsOpen = await disclosure.evaluate((element) => (element as HTMLDetailsElement).open);
-  if (!detailsOpen) {
-    await disclosure.locator(".settings-disclosure__summary").click();
-  }
-  await expect(window.getByLabel("Search enabled models")).toBeVisible();
-}
-
 async function setEnabledModel(window: Page, pattern: string, enabled: boolean): Promise<void> {
-  await ensureEnabledModelsDisclosureOpen(window);
   const [, modelId = pattern] = pattern.split("/");
-  const searchInput = window.getByLabel("Search enabled models");
+  const searchInput = window.getByLabel("Search models");
   await searchInput.fill(modelId);
-  const row = window.locator("label.settings-toggle", { hasText: pattern }).first();
-  await expect(row).toBeVisible();
-  const checkbox = row.locator("input[type='checkbox']");
-  if ((await checkbox.isChecked()) !== enabled) {
-    await row.click();
+  const toggle = window.getByRole("switch", { name: `Enable ${pattern}`, exact: true });
+  await expect(toggle).toBeVisible();
+  if ((await toggle.isChecked()) !== enabled) {
+    await toggle.click();
   }
-  await expect(checkbox).toHaveJSProperty("checked", enabled);
+  await expect(toggle).toHaveJSProperty("checked", enabled);
   await searchInput.fill("");
 }
 
-async function setEnabledModels(window: Page, enable: readonly string[], disable: readonly string[]): Promise<void> {
+async function setEnabledModels(
+  window: Page,
+  enable: readonly string[],
+  disable: readonly string[],
+): Promise<void> {
   for (const pattern of enable) {
     await setEnabledModel(window, pattern, true);
   }
@@ -191,7 +192,9 @@ async function expectComposerModelState(
     readonly hiddenModelLabels: readonly string[];
   },
 ): Promise<void> {
-  await expect(window.getByRole("button", { name: expectations.activeModel }).first()).toBeVisible();
+  await expect(
+    window.getByRole("button", { name: expectations.activeModel }).first(),
+  ).toBeVisible();
   await expectModelOptions(window, ".composer__bar", expectations);
 }
 
@@ -213,7 +216,9 @@ async function expectNewThreadModelState(
     readonly hiddenModelLabels: readonly string[];
   },
 ): Promise<void> {
-  await expect(window.getByRole("button", { name: expectations.activeModel }).first()).toBeVisible();
+  await expect(
+    window.getByRole("button", { name: expectations.activeModel }).first(),
+  ).toBeVisible();
   await expectModelOptions(window, ".new-thread__hint", expectations);
 }
 
@@ -246,4 +251,8 @@ async function selectComposerModel(window: Page, label: string): Promise<void> {
   const dropdown = window.locator(".composer__bar .model-selector__dropdown").first();
   await expect(dropdown).toBeVisible();
   await dropdown.getByRole("button", { name: new RegExp(label, "i") }).click();
+}
+
+function settingsWorkspacePicker(window: Page) {
+  return window.getByTestId("settings-surface").getByLabel("Workspace", { exact: true });
 }

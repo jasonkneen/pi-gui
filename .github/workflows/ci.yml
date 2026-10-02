@@ -11,15 +11,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  ci-required:
+    name: CI required
+    if: ${{ always() }}
+    needs:
+      - typecheck
+      - website-build
+      - desktop-core
+      - desktop-package-linux
+      - desktop-package-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Require every CI job to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/check-ci-results.mjs
+
   typecheck:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -27,24 +49,30 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Driver unit tests
-        run: pnpm --filter @pi-gui/pi-sdk-driver test
+      - name: Baseline checks (same command as local development)
+        run: pnpm check
 
       - name: Verify install copy
         run: pnpm verify:install-copy
+
+      - name: Verify dev launcher argv/PATH contract
+        run: pnpm --dir apps/desktop run verify:launcher-contract
+
+      - name: Verify release version consistency
+        run: pnpm verify:release-version
+
+      - name: Verify release configuration
+        run: pnpm verify:release-config
 
   website-build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -56,14 +84,37 @@ jobs:
         run: pnpm --filter @pi-gui/website run build
 
   desktop-core:
-    runs-on: macos-latest
+    name: desktop-core
+    if: ${{ always() }}
+    needs: desktop-core-shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Require every Core shard to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/check-ci-results.mjs --core-shards
+
+  desktop-core-shards:
+    name: Desktop Core (${{ matrix.shard }}/4)
+    # PRs run Core on Linux, which doesn't queue behind the account's few macOS slots.
+    # Pushes to main keep macOS coverage.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -71,27 +122,55 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Desktop Core
-        run: pnpm --filter @pi-gui/desktop run test:e2e:ci:mac
+      - name: Desktop Core (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/apps/desktop/test-results/core-report.json
+        run: pnpm --filter @pi-gui/desktop run test:e2e:ci:mac --shard=${{ matrix.shard }}/4 --reporter=line,json
 
-      - name: Upload failure artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Install Linux display dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb openbox libnotify4
+          # The runner pipes crashes to systemd-coredump with an unlimited size, ignoring
+          # ulimit. A test that crashes a renderer then stalls quit while its multi-terabyte
+          # sparse address space is streamed out, so write plain core files, which ulimit -c 0 blocks.
+          sudo sysctl -w kernel.core_pattern=core
+
+      - name: Desktop Core (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/apps/desktop/test-results/core-report.json
+          PI_APP_TEST_WORKERS: "2"
+        # Openbox answers X11 maximize requests, which some window specs depend on.
+        run: >-
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24"
+          sh -c 'openbox >/dev/null 2>&1 & exec "$@"' sh
+          pnpm --filter @pi-gui/desktop run test:e2e:core --shard=${{ matrix.shard }}/4 --reporter=line,json
+
+      - name: Summarize Core timing
+        if: ${{ !cancelled() }}
+        run: node .github/scripts/summarize-playwright-trend.mjs apps/desktop/test-results/core-report.json apps/desktop/test-results/core-summary.json
+
+      - name: Upload Core results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
         with:
-          name: desktop-core-test-results
+          name: desktop-core-test-results-${{ matrix.shard }}
           path: apps/desktop/test-results/
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   desktop-package-linux:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -99,27 +178,73 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Package Linux AppImage
+      - name: Verify Linux package configuration
+        run: pnpm verify:release-config
+
+      - name: Package Linux AppImage and deb
         run: pnpm --filter @pi-gui/desktop run package:linux
 
       - name: Verify packaged runtime dependencies
         run: pnpm --dir apps/desktop run verify:packaged-runtime-deps:linux
 
+      - name: Verify Linux packages
+        run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          bash apps/desktop/scripts/verify-linux-release.sh \
+            --install \
+            "$PWD/apps/desktop/release" \
+            "$version" \
+            "$PWD/apps/desktop/release-proof/linux"
+
+      - name: Stage validated Linux candidate
+        run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          node apps/desktop/scripts/release-artifacts.mjs stage \
+            --platform linux \
+            --version "$version" \
+            --commit "$GITHUB_SHA" \
+            --input apps/desktop/release \
+            --output apps/desktop/release-candidate
+
+      - name: Upload immutable Linux CI candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-release-linux-${{ github.sha }}
+          path: apps/desktop/release-candidate/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload Linux package proof
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-linux-package-proof-${{ github.sha }}
+          path: apps/desktop/release-proof/linux/
+          if-no-files-found: warn
+          retention-days: 14
+
   desktop-package-windows:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
 
       - name: Install
         run: pnpm install --frozen-lockfile
+
+      - name: Verify dev launcher argv/PATH contract
+        run: pnpm --dir apps/desktop run verify:launcher-contract
+
+      - name: Changed-file adapter tests
+        run: pnpm --filter @pi-gui/desktop run test:changed-files
 
       - name: Package Windows directory
         run: pnpm --filter @pi-gui/desktop run package:win:dir

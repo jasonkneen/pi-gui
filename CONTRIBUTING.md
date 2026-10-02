@@ -6,7 +6,8 @@ test lanes, and what "done" means for a change.
 ## Prerequisites
 
 - Node 20+
-- [pnpm](https://pnpm.io), managed through `corepack`
+- [pnpm](https://pnpm.io), managed through `corepack`; `pnpm-lock.yaml` is the
+  authoritative lockfile
 
 ```bash
 corepack enable

@@ -1,3 +1,6 @@
+import type { SessionUsageSnapshot } from "./usage.js";
+import type { SessionTranscriptCustomMessage } from "./transcript.js";
+
 export type WorkspaceId = string;
 export type SessionId = string;
 export type RunId = string;
@@ -38,6 +41,7 @@ export interface SessionSnapshot {
   readonly config?: SessionConfig;
   readonly runningRunId?: RunId;
   readonly queuedMessages?: readonly SessionQueuedMessage[];
+  readonly usage?: SessionUsageSnapshot;
 }
 
 export interface SessionImageAttachment {
@@ -67,6 +71,8 @@ export type SessionTreeNodeKind =
   | "message"
   | "thinking_level_change"
   | "model_change"
+  | "usage"
+  | "context_edit"
   | "compaction"
   | "branch_summary"
   | "custom"
@@ -84,11 +90,16 @@ export interface SessionTreeNodeSnapshot {
   readonly customType?: string;
   readonly title: string;
   readonly preview?: string;
-  readonly children: readonly SessionTreeNodeSnapshot[];
 }
 
+/**
+ * The session tree as a flat list, in depth-first order: every parent comes before its
+ * children, and siblings run oldest first. A node whose parentId is null, its own id, or not
+ * in the list is a root. It is flat on purpose: Electron's contextBridge refuses values nested more than
+ * 1000 levels deep, and a nested tree gains a level per entry on its longest path.
+ */
 export interface SessionTreeSnapshot {
-  readonly roots: readonly SessionTreeNodeSnapshot[];
+  readonly nodes: readonly SessionTreeNodeSnapshot[];
   readonly leafId: string | null;
 }
 
@@ -167,6 +178,26 @@ export interface SessionUpdatedEvent extends SessionEventBase {
 export interface AssistantDeltaEvent extends SessionEventBase {
   readonly type: "assistantDelta";
   readonly text: string;
+}
+
+/** Finalizes one assistant message while the containing run may continue. */
+export interface AssistantMessageEndedEvent extends SessionEventBase {
+  readonly type: "assistantMessageEnded";
+}
+
+/** Identifies the immediately preceding ended assistant message after Pi persists it. */
+export interface AssistantMessagePersistedEvent extends SessionEventBase {
+  readonly type: "assistantMessagePersisted";
+  readonly sourceMessageId: string;
+}
+
+/**
+ * A persisted transcript item that arrives outside the assistant stream, such as an
+ * extension's custom message. `item.id` is the pi entry id, matching a later reload.
+ */
+export interface TranscriptItemAppendedEvent extends SessionEventBase {
+  readonly type: "transcriptItemAppended";
+  readonly item: SessionTranscriptCustomMessage;
 }
 
 export interface QueuedMessageStartedEvent extends SessionEventBase {
@@ -317,6 +348,9 @@ export type SessionDriverEvent =
   | SessionOpenedEvent
   | SessionUpdatedEvent
   | AssistantDeltaEvent
+  | AssistantMessageEndedEvent
+  | AssistantMessagePersistedEvent
+  | TranscriptItemAppendedEvent
   | QueuedMessageStartedEvent
   | ToolStartedEvent
   | ToolUpdatedEvent
@@ -338,7 +372,10 @@ export interface SessionDriver {
   archiveSession(sessionRef: SessionRef): Promise<void>;
   unarchiveSession(sessionRef: SessionRef): Promise<void>;
   sendUserMessage(sessionRef: SessionRef, input: SessionMessageInput): Promise<void>;
-  replaceQueuedMessages(sessionRef: SessionRef, messages: readonly SessionQueuedMessage[]): Promise<void>;
+  replaceQueuedMessages(
+    sessionRef: SessionRef,
+    messages: readonly SessionQueuedMessage[],
+  ): Promise<void>;
   cancelCurrentRun(sessionRef: SessionRef): Promise<void>;
   setSessionModel(sessionRef: SessionRef, selection: SessionModelSelection): Promise<void>;
   setSessionThinkingLevel(sessionRef: SessionRef, thinkingLevel: string): Promise<void>;
@@ -351,8 +388,23 @@ export interface SessionDriver {
     targetId: string,
     options?: NavigateSessionTreeOptions,
   ): Promise<NavigateSessionTreeResult>;
-  getSessionCommands(sessionRef: SessionRef): Promise<readonly import("./runtime-types.js").RuntimeCommandRecord[]>;
+  getSessionCommands(
+    sessionRef: SessionRef,
+  ): Promise<readonly import("./runtime-types.js").RuntimeCommandRecord[]>;
   respondToHostUiRequest(sessionRef: SessionRef, response: HostUiResponse): Promise<void>;
   subscribe(sessionRef: SessionRef, listener: SessionEventListener): Unsubscribe;
   closeSession(sessionRef: SessionRef): Promise<void>;
+}
+
+export interface SessionSchemaInfo {
+  /**
+   * The session file's header version. `undefined` when the file has no
+   * readable session header (e.g. missing/corrupt), in which case skew cannot
+   * be determined and is assumed absent.
+   */
+  readonly fileSchemaVersion: number | undefined;
+  /** The bundled runtime's schema version. */
+  readonly runtimeSchemaVersion: number;
+  /** True when the file was written by a newer pi than the bundled runtime. */
+  readonly writtenByNewerRuntime: boolean;
 }

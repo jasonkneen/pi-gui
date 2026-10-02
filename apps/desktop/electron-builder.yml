@@ -10,6 +10,18 @@ directories:
 files:
   - out/**/*
   - package.json
+  # The pnpm collector drops this nested version in the hoisted layout.
+  # Keep retry 0.12 for Pi's lockfile code; other consumers require root 0.13.
+  - from: ../../node_modules/proper-lockfile/node_modules/retry
+    to: node_modules/proper-lockfile/node_modules/retry
+    filter:
+      - "**/*"
+  # The collector nests the newer SSO under Bedrock. Its token provider must
+  # stay below SSO: Bedrock itself pins a different token-provider version.
+  - from: ../../node_modules/@aws-sdk/credential-provider-sso/node_modules/@aws-sdk/token-providers
+    to: node_modules/@aws-sdk/client-bedrock-runtime/node_modules/@aws-sdk/credential-provider-sso/node_modules/@aws-sdk/token-providers
+    filter:
+      - "**/*"
 
 extraResources:
   - from: resources/icon.png
@@ -27,7 +39,6 @@ artifactName: ${productName}-${version}-${arch}.${ext}
 mac:
   category: public.app-category.developer-tools
   hardenedRuntime: true
-  gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.inherit.plist
   notarize: true
@@ -44,12 +55,40 @@ mac:
 linux:
   category: Development
   executableName: pi-gui
+  maintainer: Matthew Lam <minghinmatthew.lam@gmail.com>
+  vendor: pi-gui
+  synopsis: Codex-style desktop app for the pi coding agent
+  description: A native desktop interface for pi coding agent sessions, workspaces, and tools.
   target:
     - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+
+deb:
+  artifactName: ${productName}_${version}_${arch}.${ext}
+  packageName: pi-gui
+  packageCategory: devel
+  priority: optional
+  afterRemove: resources/linux/after-remove.sh
+  depends:
+    - libgtk-3-0 | libgtk-3-0t64
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0 | libatspi2.0-0t64
+    - libuuid1
+    - libsecret-1-0
+    - libgbm1
 
 win:
   executableName: pi-gui
-  signAndEditExecutable: false
+  # Keep icon/version metadata editing; signing is optional without credentials.
+  signAndEditExecutable: true
   target:
     - target: nsis
       arch:
@@ -58,10 +97,17 @@ win:
       arch:
         - x64
 
+nsis:
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-${arch}-portable.${ext}
+
 toolsets:
   appimage: "1.0.2"
 
 dmg:
+  sign: true
   contents:
     - x: 130
       y: 220

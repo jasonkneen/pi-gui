@@ -1,0 +1,79 @@
+#!/bin/bash
+# SessionStart hook for Claude cloud sessions (see .claude/settings.json).
+# Local sessions exit immediately. In the cloud it:
+#   1. writes ~/.pi/agent/auth.json from the PI_AUTH_JSON_B64 environment
+#      variable, without printing it, unless an auth file already exists;
+#   2. starts a virtual X display, with a window manager when installed;
+#   3. sets this checkout's git author to the maintainer;
+#   4. exports the verify-pi-gui real-auth defaults for later shell commands.
+# Credentials never go in the setup script, which is cached as a snapshot.
+set -uo pipefail
+
+[ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
+
+agent_dir="$HOME/.pi/agent"
+auth="$agent_dir/auth.json"
+umask 077
+mkdir -p "$agent_dir"
+
+if [ -s "$auth" ]; then
+  echo "pi auth: keeping existing $auth"
+elif [ -n "${PI_AUTH_JSON_B64:-}" ]; then
+  tmp=$(mktemp "$agent_dir/auth.XXXXXX")
+  if printf '%s' "$PI_AUTH_JSON_B64" | base64 -d >"$tmp" 2>/dev/null && jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$auth"
+    echo "pi auth: wrote $auth with providers $(jq -c 'keys' "$auth")"
+  else
+    rm -f "$tmp"
+    echo "pi auth: PI_AUTH_JSON_B64 is not base64-encoded JSON; no auth written" >&2
+  fi
+else
+  echo "pi auth: PI_AUTH_JSON_B64 is not set; real-auth proofs will exit 2"
+fi
+
+display=:99
+if ! pgrep -x Xvfb >/dev/null 2>&1; then
+  if command -v Xvfb >/dev/null 2>&1; then
+    nohup Xvfb "$display" -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+    echo "display: started Xvfb on $display"
+  else
+    echo "display: Xvfb missing; paste scripts/cloud/setup.sh into the environment setup script" >&2
+  fi
+fi
+if command -v openbox >/dev/null 2>&1 && ! pgrep -x openbox >/dev/null 2>&1; then
+  # X11 maximize is a request only a window manager answers.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S "/tmp/.X11-unix/X${display#:}" ] && break
+    sleep 0.2
+  done
+  if [ -S "/tmp/.X11-unix/X${display#:}" ]; then
+    DISPLAY="$display" nohup openbox >/tmp/openbox.log 2>&1 &
+    echo "display: started openbox on $display"
+  else
+    echo "display: no X server on $display; openbox not started" >&2
+  fi
+fi
+
+# The cloud image's global git identity is Claude, and GitHub credits commit
+# authors (and squash-merge co-authors) as repo contributors. Author as the
+# maintainer in this checkout instead, but only for the upstream repo so a
+# contributor's cloud session on a fork never commits under the maintainer.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] &&
+  git -C "$CLAUDE_PROJECT_DIR" remote get-url origin 2>/dev/null | grep -q 'github.com[:/]minghinmatthewlam/pi-gui\(\.git\)\?$'; then
+  git -C "$CLAUDE_PROJECT_DIR" config user.name "Matthew Lam"
+  git -C "$CLAUDE_PROJECT_DIR" config user.email "minghinmatthew.lam@gmail.com"
+  echo "git: authoring commits as Matthew Lam"
+fi
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  {
+    # setup.sh pins a Node >=22.19 install at /opt/pi-node.
+    [ -x /opt/pi-node/bin/node ] && echo "export PATH=/opt/pi-node/bin:\$PATH"
+    echo "export DISPLAY=$display"
+    echo "export PI_APP_REAL_AUTH=\${PI_APP_REAL_AUTH:-1}"
+    echo "export PI_APP_REAL_AUTH_SOURCE_DIR=\${PI_APP_REAL_AUTH_SOURCE_DIR:-$agent_dir}"
+    echo "export PI_GUI_PROVIDER=\${PI_GUI_PROVIDER:-openai-codex}"
+    echo "export PI_GUI_MODEL=\${PI_GUI_MODEL:-gpt-5.6-luna}"
+  } >>"$CLAUDE_ENV_FILE"
+fi
+exit 0
